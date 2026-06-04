@@ -4,7 +4,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"net/url"
-	"path/filepath"
 	"regexp"
 	"sort"
 	"strconv"
@@ -15,13 +14,13 @@ import (
 )
 
 type ParseResult struct {
-	Title    string
-	Season   int
-	Episode  int
-	Year     int
-	Language string
-	Quality  string
-	IsPack   bool
+	Title        string
+	Season       int
+	Episode      int
+	Year         int
+	Language     string
+	Quality      string
+	IsPack       bool
 	// Go port extension fields to prevent orchestrator compilation errors
 	EpisodeStart int
 	EpisodeEnd   int
@@ -538,4 +537,14 @@ func ParseMagnet(magnetURI string, contentType string) *ParsedMagnet {
 	}
 
 	return pm
+}
+
+// extractInfohash parses the standard infohash from the magnet URI
+func extractInfohash(magnet string) string {
+	re := regexp.MustCompile(`(?i)btih:([a-f0-9]{40})`)
+	m := re.FindStringSubmatch(magnet)
+	if len(m) > 1 {
+		return strings.ToLower(m[1])
+	}
+	return ""
 }
