@@ -94,6 +94,11 @@ func catalogHandler(c *gin.Context) {
 	catalogID := c.Param("id")
 	extra := c.Param("extra")
 
+	// Critical Fix: Stremio client automatically appends ".json" to the end of catalog path parameters.
+	// We must strip these suffixes to prevent string matching and integer conversion failures.
+	catalogID = strings.TrimSuffix(catalogID, ".json")
+	extra = strings.TrimSuffix(extra, ".json")
+
 	skip := 0
 	// Parse skip parameter from query or path suffix
 	if qSkip := c.Query("skip"); qSkip != "" {
