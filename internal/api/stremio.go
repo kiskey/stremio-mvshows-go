@@ -387,6 +387,9 @@ func rdAddHandler(c *gin.Context) {
 	var torrentRecord database.DebridTorrent
 	errRecord := database.DB.Where("infohash = ?", infohash).First(&torrentRecord).Error
 	if errRecord == nil && torrentRecord.Status == "downloaded" {
+		// Update LastChecked timestamp to indicate active access hit (extending cache TTL)
+		database.DB.Model(&torrentRecord).Update("last_checked", time.Now())
+
 		dlLink := getDebridCachedLink(&torrentRecord, season, episode, isMovie)
 		if dlLink != "" {
 			c.Redirect(http.StatusFound, dlLink)
@@ -470,6 +473,7 @@ func rdAddHandler(c *gin.Context) {
 		}
 	}
 	torrentRecord.Links = info.Links
+	torrentRecord.LastChecked = time.Now() // Set initial cache timestamp to now
 
 	_ = database.DB.Clauses(clause.OnConflict{
 		Columns:   []clause.Column{{Name: "infohash"}},
@@ -529,7 +533,7 @@ func buildTrackerSources() []string {
 		} else if strings.HasPrefix(t, "http://") {
 			rest = strings.TrimPrefix(t, "http://")
 		} else if strings.HasPrefix(t, "https://") {
-			rest = strings.TrimPrefix(t, "https://")
+			rest = strings.TrimPrefix(rest, "https://")
 		}
 		out = append(out, "&tr="+url.QueryEscape(proto+"://"+rest))
 	}
