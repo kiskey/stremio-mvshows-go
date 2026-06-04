@@ -7,20 +7,19 @@ RUN apk add --no-cache gcc musl-dev
 WORKDIR /app
 
 # Copy module manifests first to optimize layer caching
-COPY go.mod ./
-# Generate go.sum if needed, or download immediately
-RUN go mod tidy && go mod download
+COPY go.mod go.sum ./
+RUN go mod download
 
 # Copy the remaining project sources
 COPY . .
 
 # Compile static binary with optimizations and CGO enabled
-RUN CGO_ENABLED=1 GOOS=linux go build -ldflags="-s -w" -o server ./cmd/server
+RUN CGO_ENABLED=1 GOOS=linux go build -ldflags="-s -w" -installsuffix cgo -o server ./cmd/server
 
 # -------- Runtime Stage --------
 FROM alpine:latest
 
-# Ensure secure HTTPS endpoints are reachable by fetching TLS root certificates
+# Ensure secure HTTPS endpoints are reachable by fetching TLS root certificates and config timezone databases
 RUN apk --no-cache add ca-certificates tzdata
 
 WORKDIR /root/
