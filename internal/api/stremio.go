@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"net/url" // Critical fix: added net/url to resolve compile error in url.QueryEscape
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -17,7 +17,6 @@ import (
 	"github.com/kiskey/stremio-mvshows-go/internal/services/parser"
 	"github.com/kiskey/stremio-mvshows-go/internal/services/tracker"
 	"github.com/kiskey/stremio-mvshows-go/internal/utils"
-	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
 
