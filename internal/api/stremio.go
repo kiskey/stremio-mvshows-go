@@ -17,7 +17,6 @@ import (
 	"github.com/kiskey/stremio-mvshows-go/internal/services/parser"
 	"github.com/kiskey/stremio-mvshows-go/internal/services/tracker"
 	"github.com/kiskey/stremio-mvshows-go/internal/utils"
-	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
 
@@ -609,7 +608,8 @@ func rdAddHandler(c *gin.Context) {
 				}
 			}(info.ID, infohash)
 
-			c.JSON(http.StatusClientClosedRequest, gin.H{"error": "Request cancelled by client. Cache polling detached to background."})
+			// Passed raw 499 status code directly as net/http does not contain StatusClientClosedRequest natively
+			c.JSON(499, gin.H{"error": "Request cancelled by client. Cache polling detached to background."})
 			return
 		default:
 		}
