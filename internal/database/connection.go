@@ -4,6 +4,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"github.com/glebarez/sqlite" // Pure-Go GORM SQLite driver
@@ -14,6 +15,7 @@ import (
 var DB *gorm.DB
 
 // Init initializes the SQLite database, configures WAL mode and connection pools, and runs AutoMigrate.
+// Includes a self-healing schema recovery handler to survive persistent volume corruption.
 func Init(dbPath string, level gormlogger.LogLevel) (*gorm.DB, error) {
 	// Ensure the parent directory exists
 	dir := filepath.Dir(dbPath)
@@ -43,8 +45,6 @@ func Init(dbPath string, level gormlogger.LogLevel) (*gorm.DB, error) {
 	}
 
 	// Optimize SQLite performance for concurrent read throughput under multi-threaded Go execution.
-	// Raising MaxOpenConns from 1 to 20 unblocks concurrent reads, while SQLite's WAL mode and busy_timeout
-	// safely handle queueing any concurrent write transactions.
 	sqlDB.SetMaxOpenConns(20) 
 	sqlDB.SetMaxIdleConns(5)
 	sqlDB.SetConnMaxLifetime(time.Hour)
@@ -55,9 +55,7 @@ func Init(dbPath string, level gormlogger.LogLevel) (*gorm.DB, error) {
 	DB.Exec("PRAGMA foreign_keys=ON;")
 	DB.Exec("PRAGMA busy_timeout=5000;") // Wait up to 5s for locks to clear before throwing an error
 
-	// ── CRITICAL FIX: Drop legacy non-composite unique index to resolve constraint failures ──
-	// GORM AutoMigrate does not drop old indexes. We must forcefully clear the old global index
-	// so that the new composite index (idx_stream_unique) can properly allow multi-episode pack inserts.
+	// Ensure legacy non-composite unique indexes are cleared
 	DB.Exec("DROP INDEX IF EXISTS idx_streams_infohash;")
 	DB.Exec("DROP INDEX IF EXISTS idx_streams_infohash_unique;")
 
@@ -72,8 +70,25 @@ func Init(dbPath string, level gormlogger.LogLevel) (*gorm.DB, error) {
 		&MagnetCache{},
 		&TorboxIdMap{},
 	)
+	
+	// ── SELF-HEALING SCHEMA RECOVERY ──
+	// If AutoMigrate fails, it is almost certainly due to legacy schema mismatches or foreign key constraints
+	// created in previous versions. We close the connection, backup the file, and rebuild a pristine DB.
 	if err != nil {
-		return nil, err
+		log.Printf("WARNING: Database migration failed (likely due to legacy SQLite schema corruption): %v", err)
+		log.Println("Attempting database schema recovery: backing up old database and starting fresh.")
+		
+		// Close GORM connection safely
+		if sqlDB, errDb := DB.DB(); errDb == nil {
+			_ = sqlDB.Close()
+		}
+
+		// Backup the corrupted database file with a timestamp suffix
+		backupPath := dbPath + ".bak_" + strconv.FormatInt(time.Now().Unix(), 10)
+		_ = os.Rename(dbPath, backupPath)
+
+		// Re-initialize a brand new, clean database file
+		return Init(dbPath, level)
 	}
 
 	// Ensure the unique composite index exists for Stream
