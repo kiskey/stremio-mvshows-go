@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/go-resty/resty/v2"
 	"github.com/kiskey/stremio-mvshows-go/internal/config"
@@ -302,6 +303,16 @@ var metadataWords = map[string]bool{
 	"vf": true, "season": true, "series": true, "episode": true, "pack": true,
 }
 
+var sequelIndicators = map[string]bool{
+	"part": true, "chapter": true, "episode": true, "season": true,
+	"volume": true, "vol": true, "book": true, "returns": true,
+	"rises": true, "begins": true, "forever": true, "legacy": true,
+	"fallout": true, "crusade": true, "dynasty": true, "empire": true,
+	"revenge": true, "resurrection": true, "reloaded": true,
+	"revolutions": true, "origins": true, "awakens": true,
+	"last": true, "final": true, "next": true, "new": true,
+}
+
 var homoglyphClasses = map[rune][]rune{
 	'0': {'0', 'o'}, 'o': {'0', 'o'},
 	'1': {'1', 'i', 'l', '!'}, 'i': {'1', 'i', 'l', '!'}, 'l': {'1', 'i', 'l', '!'},
@@ -311,6 +322,31 @@ var homoglyphClasses = map[rune][]rune{
 	'7': {'7', 't', 'v', 'l'}, 't': {'7', 't'}, 'v': {'7', 'v'},
 	'8': {'8', 'b'}, 'b': {'8', 'b'},
 	'9': {'9', 'g'}, 'g': {'9', 'g'},
+}
+
+var writtenNumbers = map[string]string{
+	"one": "1", "first": "1", "1st": "1",
+	"two": "2", "second": "2", "2nd": "2",
+	"three": "3", "third": "3", "3rd": "3",
+	"four": "4", "fourth": "4", "4th": "4",
+	"five": "5", "fifth": "5", "5th": "5",
+	"six": "6", "sixth": "6", "6th": "6",
+	"seven": "7", "seventh": "7", "7th": "7",
+	"eight": "8", "eighth": "8", "8th": "8",
+	"nine": "9", "ninth": "9", "9th": "9",
+	"ten": "10", "tenth": "10", "10th": "10",
+	"eleven": "11", "eleventh": "11", "11th": "11",
+	"twelve": "12", "twelfth": "12", "12th": "12",
+}
+
+var sequelContexts = map[string]bool{
+	"part": true, "vol": true, "volume": true, "chapter": true,
+	"episode": true, "season": true, "act": true, "entry": true,
+}
+
+var ignoredNumbers = map[string]bool{
+	"1080": true, "2160": true, "720": true, "480": true, "360": true,
+	"576": true, "264": true, "265": true, "10": true, "8": true,
 }
 
 func getMapString(m map[string]interface{}, key string) string {
@@ -323,13 +359,9 @@ func getMapString(m map[string]interface{}, key string) string {
 }
 
 func isNumber(s string) bool {
-	if s == "" {
-		return false
-	}
+	if s == "" { return false }
 	for _, c := range s {
-		if c < '0' || c > '9' {
-			return false
-		}
+		if c < '0' || c > '9' { return false }
 	}
 	return true
 }
@@ -355,29 +387,15 @@ func stripLeadingArticles(s string) string {
 }
 
 func isTechnicalToken(s string) bool {
-	if metadataWords[s] || stopWords[s] || isNumber(s) {
-		return true
-	}
+	if metadataWords[s] || stopWords[s] || isNumber(s) { return true }
 	if len(s) >= 2 {
 		first := s[0]
-		if (first == 's' || first == 'e' || first == 'p') && isNumber(s[1:]) {
-			return true
-		}
-		if len(s) >= 3 && (s[:2] == "se" || s[:2] == "ep") && isNumber(s[2:]) {
-			return true
-		}
-		if len(s) >= 4 && s[:3] == "epi" && isNumber(s[3:]) {
-			return true
-		}
-		if len(s) >= 5 && (s[:4] == "seas" || s[:4] == "part") && isNumber(s[4:]) {
-			return true
-		}
-		if len(s) >= 7 && s[:6] == "season" && isNumber(s[6:]) {
-			return true
-		}
-		if len(s) >= 8 && s[:7] == "episode" && isNumber(s[7:]) {
-			return true
-		}
+		if (first == 's' || first == 'e' || first == 'p') && isNumber(s[1:]) { return true }
+		if len(s) >= 3 && (s[:2] == "se" || s[:2] == "ep") && isNumber(s[2:]) { return true }
+		if len(s) >= 4 && s[:3] == "epi" && isNumber(s[3:]) { return true }
+		if len(s) >= 5 && (s[:4] == "seas" || s[:4] == "part") && isNumber(s[4:]) { return true }
+		if len(s) >= 7 && s[:6] == "season" && isNumber(s[6:]) { return true }
+		if len(s) >= 8 && s[:7] == "episode" && isNumber(s[7:]) { return true }
 	}
 	return false
 }
@@ -386,15 +404,11 @@ func passTitleGuardrail(targetTitle, parsedTitle string) bool {
 	cleanTarget := strings.Trim(strings.ToLower(targetTitle), " .-_[]()/\\")
 	cleanParsed := strings.Trim(strings.ToLower(parsedTitle), " .-_[]()/\\")
 
-	if cleanTarget == cleanParsed {
-		return true
-	}
+	if cleanTarget == cleanParsed { return true }
 
 	targetNoArt := stripLeadingArticles(cleanTarget)
 	parsedNoArt := stripLeadingArticles(cleanParsed)
-	if targetNoArt == parsedNoArt {
-		return true
-	}
+	if targetNoArt == parsedNoArt { return true }
 
 	targetWords := strings.Fields(targetNoArt)
 	parsedWords := strings.Fields(parsedNoArt)
@@ -425,9 +439,7 @@ func passTitleGuardrail(targetTitle, parsedTitle string) bool {
 		singleWord := cleanWord(targetWords[0])
 		if len(parsedWords) > 1 {
 			firstWord := cleanWord(parsedWords[0])
-			if firstWord == singleWord {
-				return true
-			}
+			if firstWord == singleWord { return true }
 
 			for _, w := range parsedWords {
 				cw := cleanWord(w)
@@ -449,12 +461,8 @@ func getHomoglyphRepresentations(r rune) []rune {
 
 // OverlapCoefficient computes Bigram overlap evaluating homoglyphs to resolve typos/transliteration errors
 func OverlapCoefficient(s1, s2 string) float64 {
-	if s1 == s2 {
-		return 1.0
-	}
-	if len(s1) < 2 || len(s2) < 2 {
-		return 0.0
-	}
+	if s1 == s2 { return 1.0 }
+	if len(s1) < 2 || len(s2) < 2 { return 0.0 }
 
 	bg1 := make(map[string]struct{}, len(s1)*2)
 	runes1 := []rune(s1)
@@ -487,45 +495,184 @@ func OverlapCoefficient(s1, s2 string) float64 {
 		}
 	}
 
-	if len(bg1) == 0 || len(bg2) == 0 {
-		return 0.0
-	}
-
+	if len(bg1) == 0 || len(bg2) == 0 { return 0.0 }
 	minSize := len(bg1)
-	if len(bg2) < minSize {
-		minSize = len(bg2)
-	}
+	if len(bg2) < minSize { minSize = len(bg2) }
 
 	return float64(intersection) / float64(minSize)
 }
 
+func isRomanSequence(s string) bool {
+	if s == "" { return false }
+	for _, r := range s {
+		if r != 'i' && r != 'v' && r != 'x' && r != 'l' && r != 'c' && r != 'd' && r != 'm' { return false }
+	}
+	return true
+}
+
+func romanToArabic(s string) int {
+	romanMap := map[rune]int{'i': 1, 'v': 5, 'x': 10, 'l': 50, 'c': 100, 'd': 500, 'm': 1000}
+	total := 0
+	lastVal := 0
+	for i := len(s) - 1; i >= 0; i-- {
+		val, ok := romanMap[rune(s[i])]
+		if !ok { return 0 }
+		if val < lastVal {
+			total -= val
+		} else {
+			total += val
+			lastVal = val
+		}
+	}
+	return total
+}
+
+func normalizeNumbersInTitle(title string) string {
+	titleClean := strings.ReplaceAll(title, ":", " ")
+	titleClean = strings.ReplaceAll(titleClean, "-", " ")
+
+	words := strings.Fields(strings.ToLower(titleClean))
+	for i, w := range words {
+		if numDigit, ok := writtenNumbers[w]; ok {
+			words[i] = numDigit
+			continue
+		}
+		if isRomanSequence(w) {
+			shouldConvert := false
+			if len(w) >= 2 {
+				shouldConvert = true
+			} else if len(w) == 1 {
+				if i > 0 && sequelContexts[words[i-1]] { shouldConvert = true }
+				if i == len(words)-1 { shouldConvert = true }
+			}
+			if shouldConvert {
+				val := romanToArabic(w)
+				if val > 0 { words[i] = strconv.Itoa(val) }
+			}
+		}
+	}
+	return strings.Join(words, " ")
+}
+
+func extractNonYearNumbers(s string) []string {
+	var nums []string
+	var current strings.Builder
+	for _, r := range s {
+		if unicode.IsDigit(r) {
+			current.WriteRune(r)
+		} else {
+			if current.Len() > 0 {
+				val := current.String()
+				if !ignoredNumbers[val] && !(len(val) == 4 && (strings.HasPrefix(val, "19") || strings.HasPrefix(val, "20"))) {
+					nums = append(nums, val)
+				}
+				current.Reset()
+			}
+		}
+	}
+	if current.Len() > 0 {
+		val := current.String()
+		if !ignoredNumbers[val] && !(len(val) == 4 && (strings.HasPrefix(val, "19") || strings.HasPrefix(val, "20"))) {
+			nums = append(nums, val)
+		}
+	}
+	return nums
+}
+
+func hasNumericMismatch(target, parsed string) bool {
+	targetNums := extractNonYearNumbers(target)
+	parsedNums := extractNonYearNumbers(parsed)
+
+	if len(targetNums) == 0 || len(parsedNums) == 0 { return false }
+
+	for _, tn := range targetNums {
+		tnInt, err1 := strconv.Atoi(tn)
+		if err1 != nil { continue }
+		for _, pn := range parsedNums {
+			pnInt, err2 := strconv.Atoi(pn)
+			if err2 == nil && tnInt == pnInt {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func sequelGuardrail(targetTitle, parsedTitle string, score float64) float64 {
+	cleanTarget := strings.Trim(strings.ToLower(targetTitle), " .-_[]()/\\")
+	cleanParsed := strings.Trim(strings.ToLower(parsedTitle), " .-_[]()/\\")
+
+	cleanTarget = normalizeNumbersInTitle(cleanTarget)
+	cleanParsed = normalizeNumbersInTitle(cleanParsed)
+
+	targetNoArt := stripLeadingArticles(cleanTarget)
+	parsedNoArt := stripLeadingArticles(cleanParsed)
+
+	shorter := len(targetNoArt)
+	longer := len(parsedNoArt)
+	if shorter > longer { shorter, longer = longer, shorter }
+	if longer == 0 || shorter == 0 { return score }
+
+	ratio := float64(longer) / float64(shorter)
+	if ratio <= 1.3 { return score }
+	if !strings.Contains(targetNoArt, parsedNoArt) && !strings.Contains(parsedNoArt, targetNoArt) { return score }
+
+	var longerStr, shorterStr string
+	if len(targetNoArt) > len(parsedNoArt) {
+		longerStr, shorterStr = targetNoArt, parsedNoArt
+	} else {
+		longerStr, shorterStr = parsedNoArt, targetNoArt
+	}
+
+	var extra string
+	if strings.HasPrefix(longerStr, shorterStr) {
+		extra = strings.TrimSpace(longerStr[len(shorterStr):])
+	} else if strings.HasSuffix(longerStr, shorterStr) {
+		extra = strings.TrimSpace(longerStr[:len(longerStr)-len(shorterStr)])
+	} else { return score }
+
+	extraWords := strings.Fields(extra)
+	for _, w := range extraWords {
+		cw := cleanWord(w)
+		if isRomanSequence(cw) || isNumber(cw) || sequelIndicators[cw] {
+			return score * (float64(shorter) / float64(longer))
+		}
+	}
+	return score
+}
+
 func calculateScore(targetTitle string, targetYear int, candidateTitle string, candidateYear int) float64 {
-	// Guardrail Check: Block franchise/sequel pollution
+	// Guardrail Check 1: Block franchise/sequel pollution via token lengths
 	if !passTitleGuardrail(targetTitle, candidateTitle) {
 		return 0.0
 	}
 
-	// 1. Calculate year score (up to 40% weight)
+	// 1. Normalize numbers in titles before comparison (e.g. Roman to Arabic)
+	cleanTarget := normalizeNumbersInTitle(targetTitle)
+	cleanCand := normalizeNumbersInTitle(candidateTitle)
+
+	// Guardrail Check 2: Block numeric mismatches (e.g. "Kumki" matching "Kumki 2")
+	if hasNumericMismatch(cleanTarget, cleanCand) {
+		return 0.0
+	}
+
+	// 2. Calculate year score (up to 40% weight)
 	yearScore := 0.0
 	if targetYear > 0 && candidateYear > 0 {
 		diff := math.Abs(float64(targetYear - candidateYear))
-		if diff == 0 {
-			yearScore = 40.0
-		} else if diff == 1 {
-			yearScore = 25.0
-		} else if diff <= 3 {
-			yearScore = 10.0
-		}
+		if diff == 0 { yearScore = 40.0 } else if diff == 1 { yearScore = 25.0 } else if diff <= 3 { yearScore = 10.0 }
 	} else {
-		// No target year to compare against, give moderate default weight
 		yearScore = 20.0
 	}
 
-	// 2. Calculate title similarity score via advanced Bigram Homoglyph Coefficient (up to 60% weight)
-	normTarget := normalizeForCompare(targetTitle)
-	normCand := normalizeForCompare(candidateTitle)
+	// 3. Calculate title similarity score via advanced Bigram Homoglyph Coefficient (up to 60% weight)
+	normTarget := normalizeForCompare(cleanTarget)
+	normCand := normalizeForCompare(cleanCand)
 
 	titleScore := OverlapCoefficient(normTarget, normCand) * 60.0
+
+	// Guardrail Check 3: Final penalty for remaining unmatched sequel indicators
+	titleScore = sequelGuardrail(targetTitle, candidateTitle, titleScore)
 
 	return yearScore + titleScore
 }
