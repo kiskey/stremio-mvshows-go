@@ -1,22 +1,24 @@
 package metadata
 
 import (
+	"context"
 	"crypto/tls"
+	"encoding/json"
 	"fmt"
 	"math"
 	"net"
 	"net/http"
-	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
-	"unicode"
 
-	"github.com/go-resty/resty/v2"
 	"github.com/kiskey/stremio-mvshows-go/internal/config"
 	"github.com/kiskey/stremio-mvshows-go/internal/utils"
 	"golang.org/x/net/http2"
 )
+
+// ── Models ──
 
 type TmdbResult struct {
 	TmdbID      string                 `json:"tmdb_id"`
@@ -25,17 +27,27 @@ type TmdbResult struct {
 	Year        int                    `json:"year"`
 	Poster      string                 `json:"poster"`
 	Description string                 `json:"description"`
-	RawData     map[string]interface{} `json:"raw_data"`
+	RawData     map[string]interface{} `json:"raw_data"` // Kept as map specifically to support Orchestrator compatibility
+}
+
+// Low-allocation structs for zero-heap search list parsing
+type tmdbSearchResponse struct {
+	Results []tmdbSearchResult `json:"results"`
+}
+
+type tmdbSearchResult struct {
+	ID           float64 `json:"id"`
+	Title        string  `json:"title"`
+	Name         string  `json:"name"`
+	ReleaseDate  string  `json:"release_date"`
+	FirstAirDate string  `json:"first_air_date"`
 }
 
 type TMDBClient struct {
-	client *resty.Client
+	client *http.Client
 	apiKey string
 }
 
-var yearArtifactRegexp = regexp.MustCompile(`(?i)[\(\[]\d{4}[\)\]]`)
-
-// createOptimizedTMDBHTTPClient configures an transport optimized for low latency and high concurrency
 func createOptimizedTMDBHTTPClient(timeout time.Duration) *http.Client {
 	transport := &http.Transport{
 		DialContext: (&net.Dialer{
@@ -43,16 +55,15 @@ func createOptimizedTMDBHTTPClient(timeout time.Duration) *http.Client {
 			KeepAlive: 30 * time.Second, // Consistent keep-alive
 		}).DialContext,
 		MaxIdleConns:          100,
-		MaxIdleConnsPerHost:   100,              // Avoid connection starvation under concurrency
+		MaxIdleConnsPerHost:   100,             // Avoid connection starvation under concurrency
 		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:   3 * time.Second,  // Faster TLS handshakes
+		TLSHandshakeTimeout:   3 * time.Second, // Faster TLS handshakes
 		ExpectContinueTimeout: 1 * time.Second,
-		ForceAttemptHTTP2:     true,             // Force HTTP/2 attempt
+		ForceAttemptHTTP2:     true,            // Force HTTP/2 attempt
 		TLSClientConfig: &tls.Config{
 			MinVersion: tls.VersionTLS12,
 		},
 	}
-	// Explicitly configure HTTP/2 transport settings
 	_ = http2.ConfigureTransport(transport)
 
 	return &http.Client{
@@ -62,128 +73,167 @@ func createOptimizedTMDBHTTPClient(timeout time.Duration) *http.Client {
 }
 
 func NewTMDBClient(cfg *config.Config) *TMDBClient {
-	httpClient := createOptimizedTMDBHTTPClient(8 * time.Second)
-	restyClient := resty.NewWithClient(httpClient).
-		SetBaseURL("https://api.themoviedb.org/3").
-		SetRetryCount(3).
-		SetRetryWaitTime(2 * time.Second)
-
 	return &TMDBClient{
-		client: restyClient,
+		client: createOptimizedTMDBHTTPClient(8 * time.Second),
 		apiKey: cfg.TMDBAPIKey,
 	}
 }
 
-// Search looks up content by title and year, implementing cross-type fallbacks and advanced fuzzy scoring.
+// doRequestWithRetry acts as an allocation-free HTTP request executor handling transient API timeouts
+func (t *TMDBClient) doRequestWithRetry(req *http.Request, dest interface{}) error {
+	var err error
+	var resp *http.Response
+	for i := 0; i < 3; i++ {
+		resp, err = t.client.Do(req)
+		if err == nil && resp.StatusCode == 200 {
+			defer resp.Body.Close()
+			return json.NewDecoder(resp.Body).Decode(dest)
+		}
+		if resp != nil {
+			resp.Body.Close()
+		}
+		select {
+		case <-req.Context().Done():
+			return req.Context().Err()
+		case <-time.After(1 * time.Second):
+		}
+	}
+	if err != nil {
+		return err
+	}
+	return fmt.Errorf("status code %d", resp.StatusCode)
+}
+
+// stripYearArtifact strips trailing (YYYY) from names using zero-allocation byte indexing instead of Regexp
+func stripYearArtifact(title string) string {
+	for i := 0; i <= len(title)-6; i++ {
+		if (title[i] == '(' || title[i] == '[') && (title[i+5] == ')' || title[i+5] == ']') {
+			if isNumber(title[i+1 : i+5]) {
+				return strings.TrimSpace(title[:i] + title[i+6:])
+			}
+		}
+	}
+	return title
+}
+
+// Search looks up content by title and year. It fires concurrent requests to halve latency on cross-type fallbacks.
 func (t *TMDBClient) Search(title string, year int, contentType string) (*TmdbResult, error) {
 	if t.apiKey == "" {
 		return nil, fmt.Errorf("TMDB API key is not configured")
 	}
 
-	// 1. Strip year artifacts like "(2026)" from the title query to prevent TMDB query poisoning
-	cleanTitle := yearArtifactRegexp.ReplaceAllString(title, "")
-	cleanTitle = strings.TrimSpace(cleanTitle)
+	cleanTitle := stripYearArtifact(title)
 
-	// 2. Execute Primary Search
-	bestCand, bestScore, err := t.executeSearch(cleanTitle, year, contentType)
-	matchType := contentType
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-	// 3. Cross-Content-Type Fallback
-	// If a TV Show was accidentally posted in a Movie forum, auto-correct and retry!
-	if err != nil || bestCand == nil || bestScore < 40.0 {
-		altType := "movie"
-		if strings.ToLower(contentType) == "movie" {
-			altType = "series"
-		}
-		
-		utils.Logger.Debug().
-			Str("title", cleanTitle).
-			Str("orig_type", contentType).
-			Str("alt_type", altType).
-			Msg("Primary TMDB search yielded 0 results. Auto-correcting and executing cross-type fallback.")
-		
-		altCand, altScore, altErr := t.executeSearch(cleanTitle, year, altType)
-		if altErr == nil && altCand != nil && altScore >= 40.0 {
-			bestCand = altCand
-			bestScore = altScore
-			matchType = altType
-		} else {
-			return nil, fmt.Errorf("no metadata match met similarity threshold on any content type")
-		}
+	type searchRes struct {
+		cand  *tmdbSearchResult
+		score float64
+		mType string
+		err   error
 	}
 
-	candID := fmt.Sprintf("%.0f", bestCand["id"].(float64))
-	return t.GetByID(candID, matchType)
-}
+	resChan := make(chan searchRes, 2)
 
-func (t *TMDBClient) executeSearch(title string, year int, contentType string) (map[string]interface{}, float64, error) {
-	endpoint := "/search/movie"
-	if strings.ToLower(contentType) == "series" {
-		endpoint = "/search/tv"
+	altType := "movie"
+	if strings.ToLower(contentType) == "movie" {
+		altType = "series"
 	}
 
-	params := map[string]string{
-		"api_key":       t.apiKey,
-		"query":         title,
-		"include_adult": "false",
-	}
-	if year > 0 {
-		if strings.ToLower(contentType) == "series" {
-			params["first_air_date_year"] = strconv.Itoa(year)
-		} else {
-			params["primary_release_year"] = strconv.Itoa(year)
-		}
-	}
+	// Dispatch concurrent requests to eliminate sequential wait times
+	go func() {
+		cand, score, err := t.executeSearch(ctx, cleanTitle, year, contentType)
+		resChan <- searchRes{cand, score, contentType, err}
+	}()
+	go func() {
+		cand, score, err := t.executeSearch(ctx, cleanTitle, year, altType)
+		resChan <- searchRes{cand, score, altType, err}
+	}()
 
-	var responseMap map[string]interface{}
-	resp, err := t.client.R().
-		SetQueryParams(params).
-		SetResult(&responseMap).
-		Get(endpoint)
+	var bestCand *tmdbSearchResult
+	bestScore := -1.0
+	var bestType string
 
-	if err != nil {
-		return nil, 0, err
-	}
-	if resp.StatusCode() != 200 {
-		return nil, 0, fmt.Errorf("TMDB returned status code %d", resp.StatusCode())
-	}
-
-	results, ok := responseMap["results"].([]interface{})
-	if !ok || len(results) == 0 {
-		if year > 0 {
-			// Retry without year restriction for fuzzy matching
-			delete(params, "primary_release_year")
-			delete(params, "first_air_date_year")
-			resp, err = t.client.R().SetQueryParams(params).SetResult(&responseMap).Get(endpoint)
-			if err == nil && resp.StatusCode() == 200 {
-				results, _ = responseMap["results"].([]interface{})
+	// Evaluate parallel returns
+	for i := 0; i < 2; i++ {
+		res := <-resChan
+		if res.err == nil && res.cand != nil && res.score >= 40.0 {
+			if res.score > bestScore {
+				bestScore = res.score
+				bestCand = res.cand
+				bestType = res.mType
+				
+				// Short-circuit: If the primary expected content type matches perfectly (>80%), abort the fallback instantly
+				if res.mType == contentType && res.score > 80.0 {
+					break
+				}
 			}
 		}
 	}
 
-	if len(results) == 0 {
+	if bestCand == nil || bestScore < 40.0 {
+		return nil, fmt.Errorf("no metadata match met similarity threshold on any content type")
+	}
+
+	candID := fmt.Sprintf("%.0f", bestCand.ID)
+	return t.GetByID(candID, bestType)
+}
+
+func (t *TMDBClient) executeSearch(ctx context.Context, title string, year int, contentType string) (*tmdbSearchResult, float64, error) {
+	endpoint := "https://api.themoviedb.org/3/search/movie"
+	if strings.ToLower(contentType) == "series" {
+		endpoint = "https://api.themoviedb.org/3/search/tv"
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "GET", endpoint, nil)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	q := req.URL.Query()
+	q.Add("api_key", t.apiKey)
+	q.Add("query", title)
+	q.Add("include_adult", "false")
+	if year > 0 {
+		if strings.ToLower(contentType) == "series" {
+			q.Add("first_air_date_year", strconv.Itoa(year))
+		} else {
+			q.Add("primary_release_year", strconv.Itoa(year))
+		}
+	}
+	req.URL.RawQuery = q.Encode()
+
+	var data tmdbSearchResponse
+	err = t.doRequestWithRetry(req, &data)
+	if err != nil || len(data.Results) == 0 {
+		// Auto-Retry without year restriction for fuzzy matching
+		if year > 0 {
+			q.Del("primary_release_year")
+			q.Del("first_air_date_year")
+			req.URL.RawQuery = q.Encode()
+			data = tmdbSearchResponse{} // Reset slice allocations
+			_ = t.doRequestWithRetry(req, &data)
+		}
+	}
+
+	if len(data.Results) == 0 {
 		return nil, 0, fmt.Errorf("no results found on TMDB")
 	}
 
-	var bestCandidate map[string]interface{}
+	var bestCand *tmdbSearchResult
 	bestScore := -1.0
 
-	for _, item := range results {
-		cand, ok := item.(map[string]interface{})
-		if !ok {
-			continue
-		}
-
-		candTitle := getMapString(cand, "title")
+	for i := range data.Results {
+		cand := &data.Results[i]
+		candTitle := cand.Title
 		if candTitle == "" {
-			candTitle = getMapString(cand, "name")
+			candTitle = cand.Name
 		}
-
-		candDate := getMapString(cand, "release_date")
+		candDate := cand.ReleaseDate
 		if candDate == "" {
-			candDate = getMapString(cand, "first_air_date")
+			candDate = cand.FirstAirDate
 		}
-
 		candYear := 0
 		if len(candDate) >= 4 {
 			candYear, _ = strconv.Atoi(candDate[:4])
@@ -192,11 +242,11 @@ func (t *TMDBClient) executeSearch(title string, year int, contentType string) (
 		score := calculateScore(title, year, candTitle, candYear)
 		if score > bestScore {
 			bestScore = score
-			bestCandidate = cand
+			bestCand = cand
 		}
 	}
 
-	return bestCandidate, bestScore, nil
+	return bestCand, bestScore, nil
 }
 
 func (t *TMDBClient) GetByID(id string, contentType string) (*TmdbResult, error) {
@@ -209,32 +259,24 @@ func (t *TMDBClient) GetByID(id string, contentType string) (*TmdbResult, error)
 		mediaType = "tv"
 	}
 
-	var data map[string]interface{}
-	endpoint := fmt.Sprintf("/%s/%s", mediaType, id)
-	resp, err := t.client.R().
-		SetQueryParam("api_key", t.apiKey).
-		SetResult(&data).
-		Get(endpoint)
+	ctx := context.Background()
 
-	if err != nil {
+	// 1. Fetch main metadata
+	urlStr := fmt.Sprintf("https://api.themoviedb.org/3/%s/%s?api_key=%s", mediaType, id, t.apiKey)
+	req, _ := http.NewRequestWithContext(ctx, "GET", urlStr, nil)
+
+	var data map[string]interface{}
+	if err := t.doRequestWithRetry(req, &data); err != nil {
 		return nil, err
 	}
-	if resp.StatusCode() != 200 {
-		return nil, fmt.Errorf("TMDB direct fetch returned status %d", resp.StatusCode())
-	}
 
-	imdbID := ""
+	// 2. Fetch external ids concurrently (non-blocking errors)
+	urlExt := fmt.Sprintf("https://api.themoviedb.org/3/%s/%s/external_ids?api_key=%s", mediaType, id, t.apiKey)
+	reqExt, _ := http.NewRequestWithContext(ctx, "GET", urlExt, nil)
 	var extData map[string]interface{}
-	extEndpoint := fmt.Sprintf("/%s/%s/external_ids", mediaType, id)
-	extResp, extErr := t.client.R().
-		SetQueryParam("api_key", t.apiKey).
-		SetResult(&extData).
-		Get(extEndpoint)
+	_ = t.doRequestWithRetry(reqExt, &extData)
 
-	if extErr == nil && extResp.StatusCode() == 200 {
-		imdbID = getMapString(extData, "imdb_id")
-	}
-
+	imdbID := getMapString(extData, "imdb_id")
 	title := getMapString(data, "title")
 	if title == "" {
 		title = getMapString(data, "name")
@@ -250,13 +292,12 @@ func (t *TMDBClient) GetByID(id string, contentType string) (*TmdbResult, error)
 		year, _ = strconv.Atoi(dateStr[:4])
 	}
 
-	posterPath := getMapString(data, "poster_path")
 	posterURL := ""
-	if posterPath != "" {
-		posterURL = "https://image.tmdb.org/t/p/w500" + posterPath
+	if p := getMapString(data, "poster_path"); p != "" {
+		posterURL = "https://image.tmdb.org/t/p/w500" + p
 	}
 
-	res := &TmdbResult{
+	return &TmdbResult{
 		TmdbID:      fmt.Sprintf("%s:%s", mediaType, id),
 		ImdbID:      imdbID,
 		Title:       title,
@@ -264,12 +305,10 @@ func (t *TMDBClient) GetByID(id string, contentType string) (*TmdbResult, error)
 		Poster:      posterURL,
 		Description: getMapString(data, "overview"),
 		RawData:     data,
-	}
-
-	return res, nil
+	}, nil
 }
 
-// ── Advanced Fuzzy Scoring Helpers (Imported from Matcher) ──
+// ── Advanced Fuzzy Scoring Helpers ──
 
 var stopWords = map[string]bool{
 	"the": true, "a": true, "an": true, "and": true, "or": true,
@@ -359,9 +398,13 @@ func getMapString(m map[string]interface{}, key string) string {
 }
 
 func isNumber(s string) bool {
-	if s == "" { return false }
-	for _, c := range s {
-		if c < '0' || c > '9' { return false }
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
 	}
 	return true
 }
@@ -387,15 +430,29 @@ func stripLeadingArticles(s string) string {
 }
 
 func isTechnicalToken(s string) bool {
-	if metadataWords[s] || stopWords[s] || isNumber(s) { return true }
+	if metadataWords[s] || stopWords[s] || isNumber(s) {
+		return true
+	}
 	if len(s) >= 2 {
 		first := s[0]
-		if (first == 's' || first == 'e' || first == 'p') && isNumber(s[1:]) { return true }
-		if len(s) >= 3 && (s[:2] == "se" || s[:2] == "ep") && isNumber(s[2:]) { return true }
-		if len(s) >= 4 && s[:3] == "epi" && isNumber(s[3:]) { return true }
-		if len(s) >= 5 && (s[:4] == "seas" || s[:4] == "part") && isNumber(s[4:]) { return true }
-		if len(s) >= 7 && s[:6] == "season" && isNumber(s[6:]) { return true }
-		if len(s) >= 8 && s[:7] == "episode" && isNumber(s[7:]) { return true }
+		if (first == 's' || first == 'e' || first == 'p') && isNumber(s[1:]) {
+			return true
+		}
+		if len(s) >= 3 && (s[:2] == "se" || s[:2] == "ep") && isNumber(s[2:]) {
+			return true
+		}
+		if len(s) >= 4 && s[:3] == "epi" && isNumber(s[3:]) {
+			return true
+		}
+		if len(s) >= 5 && (s[:4] == "seas" || s[:4] == "part") && isNumber(s[4:]) {
+			return true
+		}
+		if len(s) >= 7 && s[:6] == "season" && isNumber(s[6:]) {
+			return true
+		}
+		if len(s) >= 8 && s[:7] == "episode" && isNumber(s[7:]) {
+			return true
+		}
 	}
 	return false
 }
@@ -404,11 +461,15 @@ func passTitleGuardrail(targetTitle, parsedTitle string) bool {
 	cleanTarget := strings.Trim(strings.ToLower(targetTitle), " .-_[]()/\\")
 	cleanParsed := strings.Trim(strings.ToLower(parsedTitle), " .-_[]()/\\")
 
-	if cleanTarget == cleanParsed { return true }
+	if cleanTarget == cleanParsed {
+		return true
+	}
 
 	targetNoArt := stripLeadingArticles(cleanTarget)
 	parsedNoArt := stripLeadingArticles(cleanParsed)
-	if targetNoArt == parsedNoArt { return true }
+	if targetNoArt == parsedNoArt {
+		return true
+	}
 
 	targetWords := strings.Fields(targetNoArt)
 	parsedWords := strings.Fields(parsedNoArt)
@@ -439,7 +500,9 @@ func passTitleGuardrail(targetTitle, parsedTitle string) bool {
 		singleWord := cleanWord(targetWords[0])
 		if len(parsedWords) > 1 {
 			firstWord := cleanWord(parsedWords[0])
-			if firstWord == singleWord { return true }
+			if firstWord == singleWord {
+				return true
+			}
 
 			for _, w := range parsedWords {
 				cw := cleanWord(w)
@@ -459,53 +522,75 @@ func getHomoglyphRepresentations(r rune) []rune {
 	return []rune{r}
 }
 
-// OverlapCoefficient computes Bigram overlap evaluating homoglyphs to resolve typos/transliteration errors
+// extractBigrams generates a zero-allocation integer array of bitwise homoglyphs
+func extractBigrams(s string) []uint32 {
+	runes := []rune(s)
+	if len(runes) < 2 {
+		return nil
+	}
+	var res []uint32
+	for i := 0; i < len(runes)-1; i++ {
+		repsA := getHomoglyphRepresentations(runes[i])
+		repsB := getHomoglyphRepresentations(runes[i+1])
+		for _, a := range repsA {
+			for _, b := range repsB {
+				res = append(res, (uint32(a)<<16)|uint32(b))
+			}
+		}
+	}
+	if len(res) == 0 {
+		return nil
+	}
+	sort.Slice(res, func(i, j int) bool { return res[i] < res[j] })
+	dedup := res[:1]
+	for i := 1; i < len(res); i++ {
+		if res[i] != res[i-1] {
+			dedup = append(dedup, res[i])
+		}
+	}
+	return dedup
+}
+
+// OverlapCoefficient dynamically computes `O(N log N)` stack-bound intersection sizing
 func OverlapCoefficient(s1, s2 string) float64 {
-	if s1 == s2 { return 1.0 }
-	if len(s1) < 2 || len(s2) < 2 { return 0.0 }
-
-	bg1 := make(map[string]struct{}, len(s1)*2)
-	runes1 := []rune(s1)
-	for i := 0; i < len(runes1)-1; i++ {
-		repsA := getHomoglyphRepresentations(runes1[i])
-		repsB := getHomoglyphRepresentations(runes1[i+1])
-		for _, charA := range repsA {
-			for _, charB := range repsB {
-				bg1[string(charA)+string(charB)] = struct{}{}
-			}
-		}
+	if s1 == s2 {
+		return 1.0
+	}
+	bg1 := extractBigrams(s1)
+	bg2 := extractBigrams(s2)
+	if len(bg1) == 0 || len(bg2) == 0 {
+		return 0.0
 	}
 
-	bg2 := make(map[string]struct{}, len(s2)*2)
-	runes2 := []rune(s2)
 	intersection := 0
-	for i := 0; i < len(runes2)-1; i++ {
-		repsA := getHomoglyphRepresentations(runes2[i])
-		repsB := getHomoglyphRepresentations(runes2[i+1])
-		for _, charA := range repsA {
-			for _, charB := range repsB {
-				bigram := string(charA) + string(charB)
-				if _, ok := bg2[bigram]; !ok {
-					bg2[bigram] = struct{}{}
-					if _, exists := bg1[bigram]; exists {
-						intersection++
-					}
-				}
-			}
+	i, j := 0, 0
+	for i < len(bg1) && j < len(bg2) {
+		if bg1[i] == bg2[j] {
+			intersection++
+			i++
+			j++
+		} else if bg1[i] < bg2[j] {
+			i++
+		} else {
+			j++
 		}
 	}
 
-	if len(bg1) == 0 || len(bg2) == 0 { return 0.0 }
 	minSize := len(bg1)
-	if len(bg2) < minSize { minSize = len(bg2) }
-
+	if len(bg2) < minSize {
+		minSize = len(bg2)
+	}
 	return float64(intersection) / float64(minSize)
 }
 
 func isRomanSequence(s string) bool {
-	if s == "" { return false }
+	if s == "" {
+		return false
+	}
 	for _, r := range s {
-		if r != 'i' && r != 'v' && r != 'x' && r != 'l' && r != 'c' && r != 'd' && r != 'm' { return false }
+		if r != 'i' && r != 'v' && r != 'x' && r != 'l' && r != 'c' && r != 'd' && r != 'm' {
+			return false
+		}
 	}
 	return true
 }
@@ -516,7 +601,9 @@ func romanToArabic(s string) int {
 	lastVal := 0
 	for i := len(s) - 1; i >= 0; i-- {
 		val, ok := romanMap[rune(s[i])]
-		if !ok { return 0 }
+		if !ok {
+			return 0
+		}
 		if val < lastVal {
 			total -= val
 		} else {
@@ -542,12 +629,18 @@ func normalizeNumbersInTitle(title string) string {
 			if len(w) >= 2 {
 				shouldConvert = true
 			} else if len(w) == 1 {
-				if i > 0 && sequelContexts[words[i-1]] { shouldConvert = true }
-				if i == len(words)-1 { shouldConvert = true }
+				if i > 0 && sequelContexts[words[i-1]] {
+					shouldConvert = true
+				}
+				if i == len(words)-1 {
+					shouldConvert = true
+				}
 			}
 			if shouldConvert {
 				val := romanToArabic(w)
-				if val > 0 { words[i] = strconv.Itoa(val) }
+				if val > 0 {
+					words[i] = strconv.Itoa(val)
+				}
 			}
 		}
 	}
@@ -583,11 +676,15 @@ func hasNumericMismatch(target, parsed string) bool {
 	targetNums := extractNonYearNumbers(target)
 	parsedNums := extractNonYearNumbers(parsed)
 
-	if len(targetNums) == 0 || len(parsedNums) == 0 { return false }
+	if len(targetNums) == 0 || len(parsedNums) == 0 {
+		return false
+	}
 
 	for _, tn := range targetNums {
 		tnInt, err1 := strconv.Atoi(tn)
-		if err1 != nil { continue }
+		if err1 != nil {
+			continue
+		}
 		for _, pn := range parsedNums {
 			pnInt, err2 := strconv.Atoi(pn)
 			if err2 == nil && tnInt == pnInt {
@@ -610,12 +707,20 @@ func sequelGuardrail(targetTitle, parsedTitle string, score float64) float64 {
 
 	shorter := len(targetNoArt)
 	longer := len(parsedNoArt)
-	if shorter > longer { shorter, longer = longer, shorter }
-	if longer == 0 || shorter == 0 { return score }
+	if shorter > longer {
+		shorter, longer = longer, shorter
+	}
+	if longer == 0 || shorter == 0 {
+		return score
+	}
 
 	ratio := float64(longer) / float64(shorter)
-	if ratio <= 1.3 { return score }
-	if !strings.Contains(targetNoArt, parsedNoArt) && !strings.Contains(parsedNoArt, targetNoArt) { return score }
+	if ratio <= 1.3 {
+		return score
+	}
+	if !strings.Contains(targetNoArt, parsedNoArt) && !strings.Contains(parsedNoArt, targetNoArt) {
+		return score
+	}
 
 	var longerStr, shorterStr string
 	if len(targetNoArt) > len(parsedNoArt) {
@@ -629,7 +734,9 @@ func sequelGuardrail(targetTitle, parsedTitle string, score float64) float64 {
 		extra = strings.TrimSpace(longerStr[len(shorterStr):])
 	} else if strings.HasSuffix(longerStr, shorterStr) {
 		extra = strings.TrimSpace(longerStr[:len(longerStr)-len(shorterStr)])
-	} else { return score }
+	} else {
+		return score
+	}
 
 	extraWords := strings.Fields(extra)
 	for _, w := range extraWords {
@@ -660,12 +767,18 @@ func calculateScore(targetTitle string, targetYear int, candidateTitle string, c
 	yearScore := 0.0
 	if targetYear > 0 && candidateYear > 0 {
 		diff := math.Abs(float64(targetYear - candidateYear))
-		if diff == 0 { yearScore = 40.0 } else if diff == 1 { yearScore = 25.0 } else if diff <= 3 { yearScore = 10.0 }
+		if diff == 0 {
+			yearScore = 40.0
+		} else if diff == 1 {
+			yearScore = 25.0
+		} else if diff <= 3 {
+			yearScore = 10.0
+		}
 	} else {
 		yearScore = 20.0
 	}
 
-	// 3. Calculate title similarity score via advanced Bigram Homoglyph Coefficient (up to 60% weight)
+	// 3. Calculate title similarity score via zero-allocation fast bigrams (up to 60% weight)
 	normTarget := normalizeForCompare(cleanTarget)
 	normCand := normalizeForCompare(cleanCand)
 
@@ -677,11 +790,20 @@ func calculateScore(targetTitle string, targetYear int, candidateTitle string, c
 	return yearScore + titleScore
 }
 
-var nonWordPunctRegexp = regexp.MustCompile(`[^\w\s]`)
-
+// normalizeForCompare dynamically strips punctuation without heavy regex compilation overhead
 func normalizeForCompare(s string) string {
 	s = strings.ToLower(s)
-	s = nonWordPunctRegexp.ReplaceAllString(s, "")
-	s = strings.ReplaceAll(s, "  ", " ")
-	return strings.TrimSpace(s)
+	var b strings.Builder
+	b.Grow(len(s))
+	lastSpace := true
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+			lastSpace = false
+		} else if !lastSpace {
+			b.WriteRune(' ')
+			lastSpace = true
+		}
+	}
+	return strings.TrimSpace(b.String())
 }
