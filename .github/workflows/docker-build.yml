@@ -66,11 +66,14 @@ jobs:
           go mod tidy
           go mod download
 
-      - name: Downcase Repository Name
-        run: |
-          # GHCR tags require strictly lowercased repository paths.
-          # Converts repository path to lowercase and stores it in GITHUB_ENV.
-          echo "IMAGE_NAME=ghcr.io/${{ github.repository }}" | tr '[:upper:]' '[:lower:]' >> $GITHUB_ENV
+      - name: Extract Docker Metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=raw,value=latest
+            type=sha,prefix=,format=long
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -91,8 +94,7 @@ jobs:
           context: .
           file: ./Dockerfile
           push: true
-          tags: |
-            ${{ env.IMAGE_NAME }}:latest
-            ${{ env.IMAGE_NAME }}:${{ github.sha }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
