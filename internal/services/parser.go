@@ -9,18 +9,9 @@ import (
 	"sort"
 	"strconv"
 	"strings"
-)
 
-type ParsedMagnet struct {
-	Type         string // "MOVIE", "SEASON_PACK", "EPISODE_PACK", "SINGLE_EPISODE"
-	Infohash     string
-	Season       int
-	Episode      int
-	EpisodeStart int
-	EpisodeEnd   int
-	Quality      string
-	Language     string
-}
+	rtp "github.com/ovrlord-app/releasetitleparser"
+)
 
 type ParseResult struct {
 	Title        string
@@ -38,6 +29,17 @@ type CandidateFile struct {
 	ID   int
 	Path string
 	Size int64
+}
+
+type ParsedMagnet struct {
+	Type         string // "MOVIE", "SEASON_PACK", "EPISODE_PACK", "SINGLE_EPISODE"
+	Infohash     string
+	Season       int
+	Episode      int
+	EpisodeStart int
+	EpisodeEnd   int
+	Quality      string
+	Language     string
 }
 
 // GenerateThreadHash sorts the magnet URIs before hashing them with the title
@@ -67,12 +69,21 @@ func SanitizeName(name string) string {
 	return strings.TrimSpace(name)
 }
 
-// ParseTitle is the entrypoint to analyze raw thread names
-func ParseTitle(rawTitle string) *ParseResult {
-	return RobustParseInfo(rawTitle, 1)
+// IsPack detects full/partial/multi-season packs from rtp.SeriesInfo
+func IsPack(info *rtp.SeriesInfo) bool {
+	if info == nil {
+		return false
+	}
+	// If multiple episodes exist, or if SeasonNumber is parsed but no EpisodeNumbers exist, it is a Pack!
+	return len(info.EpisodeNumbers) == 0 || len(info.EpisodeNumbers) > 1
 }
 
-// RobustParseInfo analyzes the title to extract metadata
+// ParseTitle is a high-performance proxy to RobustParseInfo
+func ParseTitle(rawTitle string) *ParseResult {
+	return RobustParseInfo(rawTitle, 0)
+}
+
+// RobustParseInfo analyzes the title using standard regexes and releasetitleparser helpers
 func RobustParseInfo(title string, fallbackSeason int) *ParseResult {
 	clean := SanitizeName(title)
 
@@ -84,6 +95,7 @@ func RobustParseInfo(title string, fallbackSeason int) *ParseResult {
 		Season:   fallbackSeason,
 	}
 
+	// Try standard regex parsing of season and episode ranges first
 	season, epStart, epEnd, singleEp, isPack := extractSeasonAndEpisodes(clean)
 	if season > 0 {
 		res.Season = season
@@ -93,7 +105,40 @@ func RobustParseInfo(title string, fallbackSeason int) *ParseResult {
 	res.Episode = singleEp
 	res.IsPack = isPack
 
+	// Overlay rtp parser checks for extra scene validation
+	seriesInfo := rtp.ParseSeriesTitle(clean)
+	if seriesInfo != nil {
+		if seriesInfo.SeasonNumber > 0 {
+			res.Season = seriesInfo.SeasonNumber
+		}
+		if len(seriesInfo.EpisodeNumbers) == 1 {
+			res.Episode = seriesInfo.EpisodeNumbers[0]
+			res.IsPack = false
+		} else if len(seriesInfo.EpisodeNumbers) > 1 {
+			res.EpisodeStart = seriesInfo.EpisodeNumbers[0]
+			res.EpisodeEnd = seriesInfo.EpisodeNumbers[len(seriesInfo.EpisodeNumbers)-1]
+			res.IsPack = true
+		} else if seriesInfo.SeasonNumber > 0 {
+			res.IsPack = true
+		}
+	}
+
 	return res
+}
+
+// ParseFilePath parses individual file paths for nested episode matching
+func ParseFilePath(path string, fallbackSeason int) (season, episode int, ok bool) {
+	clean := SanitizeName(path)
+	res := RobustParseInfo(clean, fallbackSeason)
+	if res.Season > 0 {
+		if res.Episode > 0 {
+			return res.Season, res.Episode, true
+		}
+		if res.EpisodeStart > 0 {
+			return res.Season, res.EpisodeStart, true
+		}
+	}
+	return 0, 0, false
 }
 
 // ParseMagnet processes a magnet URI and extracts infohash + name-based attributes
@@ -121,8 +166,9 @@ func ParseMagnet(magnetURI string, contentType string) *ParsedMagnet {
 	// Remove common web prefixes
 	rePrefix := regexp.MustCompile(`(?i)^www\.[a-z0-9-]+\.[a-z]{2,4}\s*-\s*`)
 	dn = rePrefix.ReplaceAllString(dn, "")
+	dn = strings.TrimSpace(dn)
 
-	parsed := RobustParseInfo(dn, 1)
+	parsed := RobustParseInfo(dn, 0)
 
 	pm := &ParsedMagnet{
 		Infohash:     infohash,
@@ -141,21 +187,50 @@ func ParseMagnet(magnetURI string, contentType string) *ParsedMagnet {
 		return pm
 	}
 
-	// For series, determine the structural pack type
-	if parsed.IsPack {
-		if parsed.EpisodeStart > 0 && parsed.EpisodeEnd > 0 {
-			pm.Type = "EPISODE_PACK"
+	// For series, determine the structural pack type using ovrlord-app's releasetitleparser
+	clean := SanitizeName(dn)
+	seriesInfo := rtp.ParseSeriesTitle(clean)
+
+	if seriesInfo != nil && (seriesInfo.SeasonNumber != 0 || len(seriesInfo.EpisodeNumbers) > 0) {
+		season := seriesInfo.SeasonNumber
+		if season == 0 {
+			season = parsed.Season
+		}
+
+		if IsPack(seriesInfo) {
+			if len(seriesInfo.EpisodeNumbers) > 1 {
+				pm.Type = "EPISODE_PACK"
+				pm.Season = season
+				pm.EpisodeStart = seriesInfo.EpisodeNumbers[0]
+				pm.EpisodeEnd = seriesInfo.EpisodeNumbers[len(seriesInfo.EpisodeNumbers)-1]
+			} else {
+				pm.Type = "SEASON_PACK"
+				pm.Season = season
+			}
 		} else {
-			pm.Type = "SEASON_PACK"
+			pm.Type = "SINGLE_EPISODE"
+			pm.Season = season
+			if len(seriesInfo.EpisodeNumbers) > 0 {
+				pm.Episode = seriesInfo.EpisodeNumbers[0]
+			}
 		}
 	} else {
-		pm.Type = "SINGLE_EPISODE"
+		// Fallback to regex-based parsed results
+		if parsed.IsPack {
+			if parsed.EpisodeStart > 0 && parsed.EpisodeEnd > 0 {
+				pm.Type = "EPISODE_PACK"
+			} else {
+				pm.Type = "SEASON_PACK"
+			}
+		} else {
+			pm.Type = "SINGLE_EPISODE"
+		}
 	}
 
 	return pm
 }
 
-// FindBestSeriesFile matches candidates for a target season and episode
+// FindBestSeriesFile matches candidates for a target season and episode, prioritising based on range, size, and sequential fallback
 func FindBestSeriesFile(candidates []CandidateFile, targetSeason, targetEpisode, fallbackSeason int) (CandidateFile, bool) {
 	var matches []CandidateFile
 
@@ -186,17 +261,15 @@ func FindBestSeriesFile(candidates []CandidateFile, targetSeason, targetEpisode,
 	}
 
 	if len(matches) > 0 {
-		// If multiple matches are found (e.g. multi-quality files in same torrent),
-		// choose the largest one.
+		// Sort matches by size so that we always select the highest-quality video stream (avoiding samples/extras)
 		sort.Slice(matches, func(i, j int) bool {
 			return matches[i].Size > matches[j].Size
 		})
 		return matches[0], true
 	}
 
-	// Falls back to direct sequential index comparison for multi-file folders if paths are uniform
+	// Falls back to direct sequential index comparison for absolute-numbered folder packs
 	if len(candidates) >= targetEpisode && targetEpisode > 0 {
-		// Filter out non-video formats to be safe
 		var videos []CandidateFile
 		for _, cand := range candidates {
 			if isVideo(cand.Path) && !isExtraOrSpecial(cand.Path) {
@@ -223,17 +296,10 @@ func extractInfohash(magnet string) string {
 	if len(m) > 1 {
 		return strings.ToLower(m[1])
 	}
-	// Support 32-character base32 hashes if encountered
-	re32 := regexp.MustCompile(`(?i)btih:([a-z2-7]{32})`)
-	m32 := re32.FindStringSubmatch(magnet)
-	if len(m32) > 1 {
-		return strings.ToLower(m32[1]) // Standard client libraries handle conversion as needed
-	}
 	return ""
 }
 
 func extractCleanTitle(title string) string {
-	// Cut off starting from year, season markers, resolution tags, or audio details
 	reCut := regexp.MustCompile(`(?i)(19\d\d|20\d\d|s\d+|ep\d+|season|episode|1080p|720p|2160p|4k|webrip|bluray|hdtv|dual|multi|tamil|telugu|malayalam|hindi|kannada)`)
 	idx := reCut.FindStringIndex(title)
 	var clean string
@@ -242,7 +308,6 @@ func extractCleanTitle(title string) string {
 	} else {
 		clean = title
 	}
-	// Clean brackets and extra whitespaces
 	clean = regexp.MustCompile(`[\[\]\(\)\-\._]`).ReplaceAllString(clean, " ")
 	clean = regexp.MustCompile(`\s+`).ReplaceAllString(clean, " ")
 	return strings.TrimSpace(clean)
@@ -252,7 +317,7 @@ func extractYear(cleanTitle string) int {
 	re := regexp.MustCompile(`\b(19\d\d|20\d\d)\b`)
 	matches := re.FindAllString(cleanTitle, -1)
 	if len(matches) > 0 {
-		y, _ := strconv.Atoi(matches[len(matches)-1]) // Return the last matching year found
+		y, _ := strconv.Atoi(matches[len(matches)-1])
 		return y
 	}
 	return 0
@@ -271,11 +336,10 @@ func extractQuality(cleanTitle string) string {
 	if strings.Contains(cleanTitle, "480p") || strings.Contains(cleanTitle, "sd") {
 		return "480p"
 	}
-	return "1080p" // Safe normalized default
+	return "1080p"
 }
 
 func extractLanguage(cleanTitle string) string {
-	// Maps common regional/audio descriptors to ISO 639-1 language codes
 	langs := map[string]string{
 		"tamil":     "ta",
 		"telugu":    "te",
@@ -289,17 +353,15 @@ func extractLanguage(cleanTitle string) string {
 			return code
 		}
 	}
-	return "ta" // Fallback to Tamil
+	return "ta"
 }
 
 func extractSeasonAndEpisodes(cleanTitle string) (season, epStart, epEnd, singleEp int, isPack bool) {
-	// Try parsing Season first, e.g. "s01", "season 1"
 	reSeason := regexp.MustCompile(`\b(s|season)\s*(\d+)\b`)
 	if m := reSeason.FindStringSubmatch(cleanTitle); len(m) > 2 {
 		season, _ = strconv.Atoi(m[2])
 	}
 
-	// Look for episode ranges, e.g. "e01 05", "e01 5", "ep01 05", "e01 to e05"
 	reRange := regexp.MustCompile(`\b(?:e|ep|episode)\s*(\d+)\s*(?:-|to|\s)\s*(?:e|ep|episode)?\s*(\d+)\b`)
 	if m := reRange.FindStringSubmatch(cleanTitle); len(m) > 2 {
 		epStart, _ = strconv.Atoi(m[1])
@@ -308,21 +370,18 @@ func extractSeasonAndEpisodes(cleanTitle string) (season, epStart, epEnd, single
 		return
 	}
 
-	// Look for single episodes, e.g. "e01", "ep01", "episode 5"
 	reSingle := regexp.MustCompile(`\b(?:e|ep|episode)\s*(\d+)\b`)
 	if m := reSingle.FindStringSubmatch(cleanTitle); len(m) > 1 {
 		singleEp, _ = strconv.Atoi(m[1])
 		return
 	}
 
-	// Look for bare absolute episode number patterns e.g. "bigg boss 8 day 15"
 	reDay := regexp.MustCompile(`\b(?:day|ep|episode)\s*(\d+)\b`)
 	if m := reDay.FindStringSubmatch(cleanTitle); len(m) > 1 {
 		singleEp, _ = strconv.Atoi(m[1])
 		return
 	}
 
-	// Default pack check: if season exists without single episode, it is a Season Pack
 	if season > 0 {
 		isPack = true
 	}
@@ -331,7 +390,6 @@ func extractSeasonAndEpisodes(cleanTitle string) (season, epStart, epEnd, single
 }
 
 func isAbsoluteEpisodeFallback(cleanPath string, targetEpisode int) bool {
-	// Extracts any standalone numbers and matches them against target episode
 	reStandAlone := regexp.MustCompile(`\b\d+\b`)
 	matches := reStandAlone.FindAllString(cleanPath, -1)
 	for _, m := range matches {
