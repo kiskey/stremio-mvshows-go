@@ -1,8 +1,8 @@
 package maintenance
 
 import (
-	"github.com/sevvian/smvshows-go/internal/database"
-	"github.com/sevvian/smvshows-go/internal/utils"
+	"github.com/kiskey/stremio-mvshows-go/internal/database"
+	"github.com/kiskey/stremio-mvshows-go/internal/utils"
 )
 
 // PerformMaintenance runs WAL checkpoint truncation, database VACUUM, and ANALYZE queries.
