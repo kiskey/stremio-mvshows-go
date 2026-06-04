@@ -1,6 +1,9 @@
 package tracker
 
 import (
+	"crypto/tls"
+	"net"
+	"net/http"
 	"strings"
 	"sync"
 	"time"
@@ -8,6 +11,7 @@ import (
 	"github.com/go-resty/resty/v2"
 	"github.com/kiskey/stremio-mvshows-go/internal/config"
 	"github.com/kiskey/stremio-mvshows-go/internal/utils"
+	"golang.org/x/net/http2"
 )
 
 var (
@@ -23,9 +27,36 @@ var fallbackTrackers = []string{
 	"udp://opentracker.i2p.rocks:6969/announce",
 }
 
+// createOptimizedTrackerHTTPClient configures an transport optimized for low latency and high concurrency
+func createOptimizedTrackerHTTPClient(timeout time.Duration) *http.Client {
+	transport := &http.Transport{
+		DialContext: (&net.Dialer{
+			Timeout:   5 * time.Second,  // Faster connect timeout
+			KeepAlive: 30 * time.Second, // Consistent keep-alive
+		}).DialContext,
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   100,              // Avoid connection starvation under concurrency
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   3 * time.Second,  // Faster TLS handshakes
+		ExpectContinueTimeout: 1 * time.Second,
+		ForceAttemptHTTP2:     true,             // Force HTTP/2 attempt
+		TLSClientConfig: &tls.Config{
+			MinVersion: tls.VersionTLS12,
+		},
+	}
+	// Explicitly configure HTTP/2 transport settings
+	_ = http2.ConfigureTransport(transport)
+
+	return &http.Client{
+		Transport: transport,
+		Timeout:   timeout,
+	}
+}
+
 // FetchAndCacheTrackers retrieves the best trackers list from public URL and updates the cache.
 func FetchAndCacheTrackers(cfg *config.Config) {
-	client := resty.New().SetTimeout(10 * time.Second)
+	httpClient := createOptimizedTrackerHTTPClient(10 * time.Second)
+	client := resty.NewWithClient(httpClient)
 	resp, err := client.R().Get(cfg.TrackerURL)
 	if err != nil {
 		utils.Logger.Error().Err(err).Msg("Failed to fetch trackers list. Retaining fallback/previous trackers.")
