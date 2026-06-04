@@ -25,8 +25,16 @@ jobs:
           cache: true # Caches Go modules automatically to accelerate builds
 
       - name: Generate Go Sum File
+        env:
+          GOPROXY: "https://proxy.golang.org,direct"
+          GOPRIVATE: ""
         run: |
-          # Dynamically generates a fresh, correct go.sum file if missing/untracked
+          # Safe Reset: clear any conflicting global git redirect rules that force SSH/Auth on public repos
+          git config --global --unset-all url.git@github.com:.insteadOf || true
+          git config --global --unset-all url."git@github.com:".insteadOf || true
+          git config --global --unset-all url."https://github.com/".insteadOf || true
+
+          # Dynamically generates a fresh, correct go.sum file from the public proxy
           go mod tidy
           go mod download
 
