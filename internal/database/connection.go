@@ -14,7 +14,7 @@ import (
 
 var DB *gorm.DB
 
-// Init initializes the SQLite database, configures WAL mode and connection pools, and runs AutoMigrate.
+// Init initializes the SQLite database, configures WAL mode and connection pools, and runs explicit DDL setup.
 // Includes a self-healing schema recovery handler to survive persistent volume corruption and datatype/relationship mismatches.
 func Init(dbPath string, level gormlogger.LogLevel) (*gorm.DB, error) {
 	// Ensure the parent directory exists
@@ -25,8 +25,8 @@ func Init(dbPath string, level gormlogger.LogLevel) (*gorm.DB, error) {
 
 	var err error
 	DB, err = gorm.Open(sqlite.Open(dbPath), &gorm.Config{
-		DisableForeignKeyConstraintWhenMigrating: true, // Prevents SQLite from creating invalid/circular physical constraints
-		IgnoreRelationshipsWhenMigrating:         true, // Tells GORM to ignore model relationships during schema migration (runtime preloads still work 100%)
+		DisableForeignKeyConstraintWhenMigrating: true, // Prevents physical database foreign keys
+		IgnoreRelationshipsWhenMigrating:         true, // Telling GORM to ignore model relationships during runtime schema generation
 		Logger: gormlogger.New(
 			log.New(os.Stdout, "\r\n", log.LstdFlags),
 			gormlogger.Config{
@@ -61,17 +61,8 @@ func Init(dbPath string, level gormlogger.LogLevel) (*gorm.DB, error) {
 	DB.Exec("DROP INDEX IF EXISTS idx_streams_infohash;")
 	DB.Exec("DROP INDEX IF EXISTS idx_streams_infohash_unique;")
 
-	// AutoMigrate all tables
-	err = DB.AutoMigrate(
-		&Thread{},
-		&TmdbMetadata{},
-		&Stream{},
-		&FailedThread{},
-		&DebridTorrent{},
-		&DebridCacheLock{},
-		&MagnetCache{},
-		&TorboxIdMap{},
-	)
+	// Execute highly stable, explicit SQL DDL schemas to bypass GORM's schema-parsing bugs completely
+	err = createExplicitTables(DB)
 
 	if err == nil {
 		// Run table integrity check to catch hidden legacy schema datatype/foreign key mismatches
@@ -79,7 +70,7 @@ func Init(dbPath string, level gormlogger.LogLevel) (*gorm.DB, error) {
 	}
 	
 	// ── SELF-HEALING SCHEMA RECOVERY ──
-	// If AutoMigrate or integrity verification fails, we close, backup, and rebuild a pristine DB.
+	// If the schema verification fails, we close, backup, and rebuild a pristine DB.
 	if err != nil {
 		log.Printf("WARNING: Database migration or integrity verification failed: %v", err)
 		log.Println("Attempting database schema recovery: backing up old database and starting fresh.")
@@ -138,4 +129,117 @@ func backupAndRemoveDatabase(dbPath string) {
 	if _, err := os.Stat(shmPath); err == nil {
 		_ = os.Rename(shmPath, shmPath+".bak_"+timestamp)
 	}
+}
+
+// createExplicitTables constructs tables and indices explicitly using raw SQLite DDL statements.
+func createExplicitTables(db *gorm.DB) error {
+	tx := db.Begin()
+	defer func() {
+		if r := recover(); r != nil {
+			tx.Rollback()
+		}
+	}()
+
+	ddls := []string{
+		`CREATE TABLE IF NOT EXISTS tmdb_metadata (
+			tmdb_id TEXT PRIMARY KEY,
+			imdb_id TEXT UNIQUE,
+			year INTEGER,
+			data TEXT NOT NULL,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_tmdb_metadata_year ON tmdb_metadata(year);`,
+
+		`CREATE TABLE IF NOT EXISTS threads (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			thread_hash TEXT UNIQUE NOT NULL,
+			raw_title TEXT NOT NULL,
+			clean_title TEXT,
+			year INTEGER,
+			tmdb_id TEXT,
+			status TEXT NOT NULL DEFAULT 'linked',
+			type TEXT NOT NULL DEFAULT 'series',
+			posted_at DATETIME,
+			catalog TEXT,
+			magnet_uris TEXT,
+			custom_poster TEXT,
+			custom_description TEXT,
+			last_seen DATETIME DEFAULT CURRENT_TIMESTAMP,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_threads_clean_title ON threads(clean_title);`,
+		`CREATE INDEX IF NOT EXISTS idx_threads_year ON threads(year);`,
+		`CREATE INDEX IF NOT EXISTS idx_threads_tmdb_id ON threads(tmdb_id);`,
+		`CREATE INDEX IF NOT EXISTS idx_threads_status ON threads(status);`,
+		`CREATE INDEX IF NOT EXISTS idx_threads_type ON threads(type);`,
+		`CREATE INDEX IF NOT EXISTS idx_threads_posted_at ON threads(posted_at);`,
+		`CREATE INDEX IF NOT EXISTS idx_threads_catalog ON threads(catalog);`,
+		`CREATE INDEX IF NOT EXISTS idx_threads_last_seen ON threads(last_seen);`,
+
+		`CREATE TABLE IF NOT EXISTS streams (
+			id INTEGER PRIMARY KEY AUTOINCREMENT,
+			tmdb_id TEXT NOT NULL,
+			season INTEGER,
+			episode INTEGER,
+			episode_end INTEGER,
+			infohash TEXT NOT NULL,
+			quality TEXT,
+			language TEXT,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		);`,
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_stream_unique ON streams(tmdb_id, season, episode, infohash);`,
+		`CREATE INDEX IF NOT EXISTS idx_streams_tmdb_id ON streams(tmdb_id);`,
+		`CREATE INDEX IF NOT EXISTS idx_streams_season ON streams(season);`,
+		`CREATE INDEX IF NOT EXISTS idx_streams_episode ON streams(episode);`,
+		`CREATE INDEX IF NOT EXISTS idx_streams_quality ON streams(quality);`,
+
+		`CREATE TABLE IF NOT EXISTS failed_threads (
+			thread_hash TEXT PRIMARY KEY,
+			raw_title TEXT,
+			reason TEXT,
+			last_attempt DATETIME DEFAULT CURRENT_TIMESTAMP
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_failed_threads_last_attempt ON failed_threads(last_attempt);`,
+
+		`CREATE TABLE IF NOT EXISTS debrid_torrents (
+			infohash TEXT PRIMARY KEY,
+			torrent_id TEXT UNIQUE NOT NULL,
+			provider TEXT NOT NULL DEFAULT 'realdebrid',
+			status TEXT NOT NULL,
+			files TEXT,
+			links TEXT,
+			last_checked DATETIME DEFAULT CURRENT_TIMESTAMP,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+			updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_debrid_torrents_provider ON debrid_torrents(provider);`,
+
+		`CREATE TABLE IF NOT EXISTS debrid_cache_locks (
+			infohash TEXT PRIMARY KEY,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		);`,
+
+		`CREATE TABLE IF NOT EXISTS magnet_cache (
+			infohash TEXT PRIMARY KEY,
+			magnet TEXT NOT NULL,
+			created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+		);`,
+
+		`CREATE TABLE IF NOT EXISTS torbox_id_map (
+			torrent_id INTEGER PRIMARY KEY,
+			hash TEXT UNIQUE NOT NULL
+		);`,
+	}
+
+	for _, ddl := range ddls {
+		if err := tx.Exec(ddl).Error; err != nil {
+			tx.Rollback()
+			return err
+		}
+	}
+
+	return tx.Commit().Error
 }
