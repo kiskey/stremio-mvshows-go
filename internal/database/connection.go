@@ -15,7 +15,7 @@ import (
 var DB *gorm.DB
 
 // Init initializes the SQLite database, configures WAL mode and connection pools, and runs AutoMigrate.
-// Includes a self-healing schema recovery handler to survive persistent volume corruption and datatype mismatch errors.
+// Includes a self-healing schema recovery handler to survive persistent volume corruption and datatype/relationship mismatches.
 func Init(dbPath string, level gormlogger.LogLevel) (*gorm.DB, error) {
 	// Ensure the parent directory exists
 	dir := filepath.Dir(dbPath)
@@ -26,6 +26,7 @@ func Init(dbPath string, level gormlogger.LogLevel) (*gorm.DB, error) {
 	var err error
 	DB, err = gorm.Open(sqlite.Open(dbPath), &gorm.Config{
 		DisableForeignKeyConstraintWhenMigrating: true, // Prevents SQLite from creating invalid/circular physical constraints
+		IgnoreRelationshipsWhenMigrating:         true, // Tells GORM to ignore model relationships during schema migration (runtime preloads still work 100%)
 		Logger: gormlogger.New(
 			log.New(os.Stdout, "\r\n", log.LstdFlags),
 			gormlogger.Config{
@@ -73,26 +74,23 @@ func Init(dbPath string, level gormlogger.LogLevel) (*gorm.DB, error) {
 	)
 
 	if err == nil {
-		// Run table integrity check to catch hidden legacy schema datatype mismatches (e.g., SQLite Error 20)
+		// Run table integrity check to catch hidden legacy schema datatype/foreign key mismatches
 		err = verifyTableIntegrity(DB)
 	}
 	
 	// ── SELF-HEALING SCHEMA RECOVERY ──
-	// If AutoMigrate or integrity verification fails, it is almost certainly due to legacy schema mismatches,
-	// foreign key constraints, or datatype mismatches created in previous versions.
-	// We close the connection, backup the file, and rebuild a pristine DB.
+	// If AutoMigrate or integrity verification fails, we close, backup, and rebuild a pristine DB.
 	if err != nil {
 		log.Printf("WARNING: Database migration or integrity verification failed: %v", err)
 		log.Println("Attempting database schema recovery: backing up old database and starting fresh.")
 		
-		// Close GORM connection safely
+		// Close GORM connection safely to release open handles
 		if sqlDB, errDb := DB.DB(); errDb == nil {
 			_ = sqlDB.Close()
 		}
 
-		// Backup the corrupted database file with a timestamp suffix
-		backupPath := dbPath + ".bak_" + strconv.FormatInt(time.Now().Unix(), 10)
-		_ = os.Rename(dbPath, backupPath)
+		// Perform full, WAL-aware database backup and file cleanup
+		backupAndRemoveDatabase(dbPath)
 
 		// Re-initialize a brand new, clean database file
 		return Init(dbPath, level)
@@ -104,7 +102,7 @@ func Init(dbPath string, level gormlogger.LogLevel) (*gorm.DB, error) {
 	return DB, nil
 }
 
-// verifyTableIntegrity tests writing a text value to tmdb_id in TmdbMetadata to detect INTEGER primary key affinity corruption.
+// verifyTableIntegrity tests writing a text value to tmdb_id in TmdbMetadata to detect datatype/affinity corruption.
 func verifyTableIntegrity(db *gorm.DB) error {
 	// Clean up any stray dummy record from a previous abrupt crash
 	_ = db.Unscoped().Where("tmdb_id = ?", "tv:test_integrity_dummy").Delete(&TmdbMetadata{}).Error
@@ -120,4 +118,24 @@ func verifyTableIntegrity(db *gorm.DB) error {
 	// Clean up the dummy record
 	_ = db.Unscoped().Delete(&dummy).Error
 	return nil
+}
+
+// backupAndRemoveDatabase renames the database file and its SQLite WAL/SHM sidecars to prevent dirty schema recoveries.
+func backupAndRemoveDatabase(dbPath string) {
+	timestamp := strconv.FormatInt(time.Now().Unix(), 10)
+
+	// 1. Backup the main SQLite database file
+	_ = os.Rename(dbPath, dbPath+".bak_"+timestamp)
+
+	// 2. Backup the active Write-Ahead Log (WAL) sidecar if present
+	walPath := dbPath + "-wal"
+	if _, err := os.Stat(walPath); err == nil {
+		_ = os.Rename(walPath, walPath+".bak_"+timestamp)
+	}
+
+	// 3. Backup the Shared Memory (SHM) sidecar index if present
+	shmPath := dbPath + "-shm"
+	if _, err := os.Stat(shmPath); err == nil {
+		_ = os.Rename(shmPath, shmPath+".bak_"+timestamp)
+	}
 }
