@@ -21,6 +21,10 @@ import (
 	"gorm.io/gorm/clause"
 )
 
+// Global concurrency semaphore: restricts background debrid pollers to maximum 3 concurrent goroutines.
+// This completely protects the server IP from ever hammering or throttling the debrid API providers.
+var backgroundPollSemaphore = make(chan struct{}, 3)
+
 // tmdbLightData is a highly optimized, allocation-free struct replacing map[string]interface{} unmarshaling
 type tmdbLightData struct {
 	Title      string `json:"title"`
@@ -506,10 +510,13 @@ func rdAddHandler(c *gin.Context) {
 		case <-reqCtx.Done():
 			// Client disconnected/aborted player. Detach active polling and complete the download in the background
 			// so that subsequent streaming requests load instantly.
+			//
+			// To completely prevent API rate-limiting / IP throttling, we enforce a strict 15-second slow-poll
+			// interval for detached background runs, and check a global semaphore to cap total active background pollers.
 			utils.Logger.Info().
 				Str("infohash", infohash).
 				Str("id", info.ID).
-				Msg("Client disconnected during active stream loading. Detaching and continuing debrid polling in background.")
+				Msg("Client disconnected during active stream loading. Detaching and delegating debrid caching to background.")
 			
 			go func(torrentID string, infohash string) {
 				defer func() {
@@ -517,6 +524,15 @@ func rdAddHandler(c *gin.Context) {
 						utils.Logger.Error().Interface("panic", r).Msg("Recovered from background caching poll panic.")
 					}
 				}()
+
+				// Check global semaphore to cap background execution
+				select {
+				case backgroundPollSemaphore <- struct{}{}:
+					defer func() { <-backgroundPollSemaphore }()
+				default:
+					utils.Logger.Warn().Str("infohash", infohash).Msg("Background caching queue full. Skipping background polling to prevent API throttling.")
+					return
+				}
 
 				bgCtx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
 				defer cancel()
@@ -526,7 +542,10 @@ func rdAddHandler(c *gin.Context) {
 				var bgInfo *debrid.TorrentInfo
 				var bgErr error
 
-				for j := 0; j < (60 - i); j++ {
+				// Slow-poll interval: 15s instead of 3s to reduce debrid API queries by 500% !
+				bgPollInterval := 15 * time.Second
+
+				for j := 0; j < (180 / 15); j++ {
 					select {
 					case <-bgCtx.Done():
 						return
@@ -538,7 +557,7 @@ func rdAddHandler(c *gin.Context) {
 						bgDownloaded = true
 						break
 					}
-					time.Sleep(pollInterval)
+					time.Sleep(bgPollInterval)
 				}
 
 				if bgDownloaded && bgInfo != nil {
