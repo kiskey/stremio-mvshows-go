@@ -4,9 +4,9 @@ import (
 	"errors"
 	"sync"
 
-	"github.com/sevvian/smvshows-go/internal/config"
-	"github.com/sevvian/smvshows-go/internal/database"
-	"github.com/sevvian/smvshows-go/internal/utils"
+	"github.com/kiskey/stremio-mvshows-go/internal/config"
+	"github.com/kiskey/stremio-mvshows-go/internal/database"
+	"github.com/kiskey/stremio-mvshows-go/internal/utils"
 	"gorm.io/gorm"
 )
 
