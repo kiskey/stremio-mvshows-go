@@ -4,6 +4,7 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -31,28 +32,6 @@ type CrawledThread struct {
 	CatalogID  string
 }
 
-// RoundRobinProxySwitcher returns a thread-safe Colly ProxyFunc rotating through provided proxy strings.
-func RoundRobinProxySwitcher(proxies []string) (colly.ProxyFunc, error) {
-	if len(proxies) == 0 {
-		return nil, errors.New("proxy list is empty")
-	}
-
-	var urls []*url.URL
-	for _, p := range proxies {
-		parsed, err := url.Parse(p)
-		if err != nil {
-			return nil, fmt.Errorf("failed to parse proxy URL '%s': %w", p, err)
-		}
-		urls = append(urls, parsed)
-	}
-
-	var index uint64
-	return func(pr *http.Request) (*url.URL, error) {
-		idx := atomic.AddUint64(&index, 1) - 1
-		return urls[idx%uint64(len(urls))], nil
-	}, nil
-}
-
 // createOptimizedScraperTransport configures an http.Transport optimized for low latency and high concurrency
 func createOptimizedScraperTransport() *http.Transport {
 	transport := &http.Transport{
@@ -75,6 +54,36 @@ func createOptimizedScraperTransport() *http.Transport {
 	return transport
 }
 
+// ProxyTransport wraps our optimized base transport, automatically transforming GET requests
+// into POST payloads pointing to rotated Netlify Cloudflare-bypass scraper endpoints.
+type ProxyTransport struct {
+	ProxyURLs []string
+	index     uint64
+	Base      http.RoundTripper
+}
+
+func (pt *ProxyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	// Dynamically rotate Netlify proxy URLs
+	idx := atomic.AddUint64(&pt.index, 1) - 1
+	proxyURLStr := pt.ProxyURLs[idx%uint64(len(pt.ProxyURLs))]
+
+	// Construct the POST body expected by the Netlify scraper function
+	bodyString := fmt.Sprintf(`{"pageURL":"%s"}`, req.URL.String())
+
+	// Create a new POST request pointing to the Netlify scraper URL
+	proxyReq, err := http.NewRequestWithContext(req.Context(), "POST", proxyURLStr, strings.NewReader(bodyString))
+	if err != nil {
+		return nil, err
+	}
+
+	// Propagate required stealth headers and parameters
+	proxyReq.Header.Set("Content-Type", "application/json")
+	proxyReq.Header.Set("User-Agent", req.Header.Get("User-Agent"))
+
+	// Execute over the optimized HTTP/2 transport
+	return pt.Base.RoundTrip(proxyReq)
+}
+
 // RunCrawler executes the asynchronous forum crawl based on the current configuration.
 func RunCrawler(cfg *config.Config) ([]CrawledThread, error) {
 	var crawled []CrawledThread
@@ -85,9 +94,6 @@ func RunCrawler(cfg *config.Config) ([]CrawledThread, error) {
 		colly.Async(true),
 		colly.MaxDepth(2),
 	)
-
-	// Inject our highly optimized HTTP/2 transport into Colly
-	c.WithTransport(createOptimizedScraperTransport())
 
 	// Set request timeout
 	c.SetRequestTimeout(time.Duration(cfg.ScraperTimeoutSecs) * time.Second)
@@ -102,14 +108,18 @@ func RunCrawler(cfg *config.Config) ([]CrawledThread, error) {
 		return nil, err
 	}
 
-	// Dynamic proxy rotation
+	// Configure appropriate transport: if proxy is enabled, wrap the optimized base
+	// transport inside our POST-body translating ProxyTransport to handle Netlify.
+	baseTransport := createOptimizedScraperTransport()
 	if cfg.IsProxyEnabled {
-		switcher, errProxy := RoundRobinProxySwitcher(cfg.ProxyURLs)
-		if errProxy != nil {
-			utils.Logger.Error().Err(errProxy).Msg("Failed to configure proxy switcher. Continuing without proxies.")
-		} else {
-			c.SetProxyFunc(switcher)
+		utils.Logger.Info().Msg("Injecting custom POST-mutating ProxyTransport for Netlify scraper compatibility.")
+		proxyTransport := &ProxyTransport{
+			ProxyURLs: cfg.ProxyURLs,
+			Base:      baseTransport,
 		}
+		c.WithTransport(proxyTransport)
+	} else {
+		c.WithTransport(baseTransport)
 	}
 
 	// Pre-navigation request hooks with advanced browser mimicry and Chrome client hints (prevents Cloudflare blocks)
