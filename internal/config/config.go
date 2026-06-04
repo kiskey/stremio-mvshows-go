@@ -40,6 +40,9 @@ type Config struct {
 	IsRDEnabled          bool
 	IsTorboxEnabled      bool
 	IsProxyEnabled       bool
+	// Cache Expiry Configuration
+	CacheExpiryDays      int
+	CacheExpiryEnabled   bool
 }
 
 // Load reads settings from the environment and optional .env file.
@@ -84,6 +87,9 @@ func Load() *Config {
 		ForumSortQuery:       strings.TrimSpace(os.Getenv("FORUM_SORT_QUERY")),
 		DBAutoVacuumCron:     os.Getenv("DB_AUTO_VACUUM_CRON"),
 		DBAutoVacuumEnabled:  os.Getenv("DB_AUTO_VACUUM_ENABLED") == "true",
+		// Cache Expiry Defaults: expire cache if unaccessed for 5 days
+		CacheExpiryDays:      getEnvInt("CACHE_EXPIRY_DAYS", 5),
+		CacheExpiryEnabled:   getEnv("CACHE_EXPIRY_ENABLED", "true") == "true",
 	}
 
 	c.IsRDEnabled = c.RealDebridAPIKey != ""
