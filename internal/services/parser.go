@@ -9,20 +9,22 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode"
 
 	rtp "github.com/ovrlord-app/releasetitleparser"
 )
 
 type ParseResult struct {
-	Title        string
-	Season       int
-	Episode      int
+	Title    string
+	Season   int
+	Episode  int
+	Year     int
+	Language string
+	Quality  string
+	IsPack   bool
+	// Go port extension fields to prevent orchestrator compilation errors
 	EpisodeStart int
 	EpisodeEnd   int
-	Year         int
-	Language     string
-	Quality      string
-	IsPack       bool
 }
 
 type CandidateFile struct {
@@ -42,6 +44,404 @@ type ParsedMagnet struct {
 	Language     string
 }
 
+var languageToISO = map[rtp.Language]string{
+	rtp.LanguageEnglish:       "en",
+	rtp.LanguageSpanish:       "es",
+	rtp.LanguageGerman:        "de",
+	rtp.LanguageFrench:        "fr",
+	rtp.LanguageItalian:       "it",
+	rtp.LanguageRussian:       "ru",
+	rtp.LanguageJapanese:      "ja",
+	rtp.LanguageChinese:       "zh",
+	rtp.LanguageKorean:        "ko",
+	rtp.LanguagePortuguese:    "pt",
+	rtp.LanguagePortugueseBR:  "pt-BR",
+	rtp.LanguageDutch:         "nl",
+	rtp.LanguageDanish:        "da",
+	rtp.LanguageNorwegian:     "no",
+	rtp.LanguageSwedish:       "sv",
+	rtp.LanguageFinnish:       "fi",
+	rtp.LanguagePolish:        "pl",
+	rtp.LanguageCzech:         "cs",
+	rtp.LanguageSlovak:        "sk",
+	rtp.LanguageHungarian:     "hu",
+	rtp.LanguageRomanian:      "ro",
+	rtp.LanguageBulgarian:     "bg",
+	rtp.LanguageUkrainian:     "uk",
+	rtp.LanguageGreek:         "el",
+	rtp.LanguageTurkish:       "tr",
+	rtp.LanguageArabic:        "ar",
+	rtp.LanguageHindi:         "hi",
+	rtp.LanguageThai:          "th",
+	rtp.LanguageVietnamese:    "vi",
+	rtp.LanguageHebrew:        "he",
+	rtp.LanguagePersian:       "fa",
+	rtp.LanguageBengali:       "bn",
+	rtp.LanguageLatvian:       "lv",
+	rtp.LanguageLithuanian:    "lt",
+	rtp.LanguageSpanishLatino: "es-MX",
+	rtp.LanguageTamil:         "ta",
+	rtp.LanguageTelugu:        "te",
+	rtp.LanguageMalayalam:     "ml",
+	rtp.LanguageKannada:       "kn",
+	rtp.LanguageAlbanian:      "sq",
+	rtp.LanguageAfrikaans:     "af",
+	rtp.LanguageMarathi:       "mr",
+	rtp.LanguageTagalog:       "tl",
+	rtp.LanguageIcelandic:     "is",
+	rtp.LanguageFlemish:       "nl-BE",
+	rtp.LanguageUrdu:          "ur",
+	rtp.LanguageMongolian:     "mn",
+	rtp.LanguageGeorgian:      "ka",
+	rtp.LanguageRomansh:       "rm",
+	rtp.LanguageOriginal:      "original",
+	rtp.LanguageCatalan:       "ca",
+	rtp.LanguageAzerbaijani:   "az",
+	rtp.LanguageUzbek:         "uz",
+}
+
+// Collapses spaces and symbols between SXX and EP(XX) to force standard SXXEXX grouping
+var epPatternRegex = regexp.MustCompile(`(?i)(S\d+)?[\s\-_]*\bEP[\s\-_]*[\(\[]?\s*(\d+)\s*[\)\]]?\b`)
+var urlRegex = regexp.MustCompile(`\b(https?://\S+|www\.\S+\.\w+|[\w.-]+@[\w.-]+)\b`)
+var bracketRegex = regexp.MustCompile(`\[.*?[^\w\s-].*?\]`)
+
+var rangeRegex = regexp.MustCompile(`(?i)\b(?:e|ep|episode)?\s*(\d+)\s*(?:-|to)\s*(?:e|ep|episode)?\s*(\d+)\b`)
+var seasonFolderRegex = regexp.MustCompile(`(?i)\b(?:s|season|series)\s*0*(\d+)\b`)
+
+func normalizeEpisodePatterns(s string) string {
+	return epPatternRegex.ReplaceAllString(s, "${1}E${2}")
+}
+
+func getISO(lang rtp.Language) string {
+	if iso, ok := languageToISO[lang]; ok {
+		return iso
+	}
+	return "en"
+}
+
+func getQuality(res int) string {
+	switch res {
+	case 2160:
+		return "4K"
+	case 1080:
+		return "1080p"
+	case 720:
+		return "720p"
+	case 480:
+		return "480p"
+	case 360:
+		return "360p"
+	default:
+		return "sd"
+	}
+}
+
+func SanitizeName(name string) string {
+	s := name
+
+	// 1. Replace non-breaking spaces (\u00a0, \u200b) to standard spaces
+	s = strings.ReplaceAll(s, "\u00a0", " ")
+	s = strings.ReplaceAll(s, "\u200b", " ")
+
+	// 2. Normalize episode patterns (e.g. S02 EP(15) -> S02E15)
+	s = normalizeEpisodePatterns(s)
+
+	// 3. Remove non-ASCII scripts (Chinese, Cyrillic, Japanese, etc.)
+	var b strings.Builder
+	for _, r := range s {
+		if r > unicode.MaxASCII {
+			b.WriteRune(' ')
+			continue
+		}
+		b.WriteRune(r)
+	}
+	s = b.String()
+
+	// 4. Remove residual URLs/domains (e.g. www.BTHDTV.com)
+	s = urlRegex.ReplaceAllString(s, " ")
+
+	// 5. Remove residual empty/garbage brackets
+	s = bracketRegex.ReplaceAllString(s, " ")
+
+	s = strings.Join(strings.Fields(s), " ")
+	
+	// 6. Trim leftover leading/trailing punctuation
+	s = strings.TrimLeft(s, " .-_[]()/\\")
+	s = strings.TrimRight(s, " .-_[]()/\\")
+	return s
+}
+
+func RobustParseInfo(title string, fallbackSeason int) *ParseResult {
+	clean := SanitizeName(title)
+
+	info := rtp.ParseSeriesTitle(clean)
+	if info != nil && (info.SeasonNumber != 0 || len(info.EpisodeNumbers) > 0) {
+		lang := "en"
+		if len(info.Languages) > 0 {
+			lang = getISO(info.Languages[0])
+		}
+		episode := 0
+		if len(info.EpisodeNumbers) > 0 {
+			episode = info.EpisodeNumbers[0]
+		}
+		res := &ParseResult{
+			Title:    info.SeriesTitle,
+			Season:   info.SeasonNumber,
+			Episode:  episode,
+			Year:     info.SeriesTitleInfo.Year,
+			Language: lang,
+			Quality:  getQuality(info.Quality.Quality.Resolution),
+			IsPack:   len(info.EpisodeNumbers) == 0 || len(info.EpisodeNumbers) > 1,
+		}
+		if len(info.EpisodeNumbers) > 1 {
+			res.EpisodeStart = info.EpisodeNumbers[0]
+			res.EpisodeEnd = info.EpisodeNumbers[len(info.EpisodeNumbers)-1]
+		}
+		return res
+	}
+
+	movie := rtp.ParseMovieTitle(clean)
+	if movie != nil {
+		lang := "en"
+		if len(movie.Languages) > 0 {
+			lang = getISO(movie.Languages[0])
+		}
+		return &ParseResult{
+			Title:    movie.PrimaryMovieTitle(),
+			Season:   0,
+			Episode:  0,
+			Year:     movie.Year,
+			Language: lang,
+			Quality:  getQuality(movie.Quality.Quality.Resolution),
+		}
+	}
+
+	return &ParseResult{
+		Title:    clean,
+		Season:   fallbackSeason,
+		Episode:  0,
+		Language: "en",
+		Quality:  "sd",
+	}
+}
+
+func ParseFilePath(path string, fallbackSeason int) *ParseResult {
+	// Extract the base filename to prevent parent folder names (e.g., S01 EP (01-08)) from polluting parsing
+	fileName := path
+	if idx := strings.LastIndexAny(path, "/\\"); idx != -1 {
+		fileName = path[idx+1:]
+	}
+
+	cleanPath := normalizeEpisodePatterns(fileName)
+	info := rtp.ParseSeriesPath(cleanPath)
+	if info != nil && (info.SeasonNumber != 0 || len(info.EpisodeNumbers) > 0) {
+		episode := 0
+		if len(info.EpisodeNumbers) > 0 {
+			episode = info.EpisodeNumbers[0]
+		}
+		season := info.SeasonNumber
+		if season == 0 {
+			season = fallbackSeason
+		}
+		res := &ParseResult{
+			Title:   info.SeriesTitle,
+			Season:  season,
+			Episode: episode,
+			IsPack:  len(info.EpisodeNumbers) == 0 || len(info.EpisodeNumbers) > 1,
+		}
+		if len(info.EpisodeNumbers) > 1 {
+			res.EpisodeStart = info.EpisodeNumbers[0]
+			res.EpisodeEnd = info.EpisodeNumbers[len(info.EpisodeNumbers)-1]
+		}
+		return res
+	}
+	return &ParseResult{
+		Season:  fallbackSeason,
+		Episode: 0,
+	}
+}
+
+func IsPack(info *rtp.ParsedEpisodeInfo) bool {
+	return info != nil && (info.FullSeason || info.IsPartialSeason || info.IsMultiSeason)
+}
+
+func isExtraOrSpecial(path string) bool {
+	p := strings.ToLower(path)
+	return strings.Contains(p, "special") ||
+		strings.Contains(p, "bonus") ||
+		strings.Contains(p, "trailer") ||
+		strings.Contains(p, "featurette") ||
+		strings.Contains(p, "recap") ||
+		strings.Contains(p, "sample") ||
+		strings.Contains(p, "extra") ||
+		strings.Contains(p, "behind the scenes") ||
+		strings.Contains(p, "interview")
+}
+
+func isExtraOrSpecialRelaxed(path string) bool {
+	p := strings.ToLower(path)
+	return strings.Contains(p, "bonus") ||
+		strings.Contains(p, "trailer") ||
+		strings.Contains(p, "featurette") ||
+		strings.Contains(p, "recap") ||
+		strings.Contains(p, "sample") ||
+		strings.Contains(p, "behind the scenes") ||
+		strings.Contains(p, "interview")
+}
+
+func matchRange(path string, targetEpisode int) bool {
+	// Extract base filename to prevent parent folder names from polluting range analysis
+	fileName := path
+	if idx := strings.LastIndexAny(path, "/\\"); idx != -1 {
+		fileName = path[idx+1:]
+	}
+
+	matches := rangeRegex.FindAllStringSubmatchIndex(fileName, -1)
+	for _, match := range matches {
+		if len(match) >= 6 {
+			startNumStart := match[2]
+			startNumEnd := match[3]
+			endNumStart := match[4]
+			endNumEnd := match[5]
+
+			// Skip matches that are part of decimal numbers (e.g. 13.00-14.00)
+			if startNumStart > 0 && isDecimalDot(fileName, startNumStart-1) {
+				continue
+			}
+			if endNumEnd < len(fileName) && isDecimalDot(fileName, endNumEnd) {
+				continue
+			}
+
+			startStr := fileName[startNumStart:startNumEnd]
+			endStr := fileName[endNumStart:endNumEnd]
+
+			start, err1 := strconv.Atoi(startStr)
+			end, err2 := strconv.Atoi(endStr)
+			if err1 == nil && err2 == nil {
+				if start <= end && targetEpisode >= start && targetEpisode <= end {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func isDecimalDot(s string, i int) bool {
+	if i <= 0 || i >= len(s)-1 {
+		return false
+	}
+	if s[i] != '.' {
+		return false
+	}
+	left := s[i-1]
+	right := s[i+1]
+	return left >= '0' && left <= '9' && right >= '0' && right <= '9'
+}
+
+func FindBestSeriesFile(candidates []CandidateFile, targetSeason, targetEpisode, fallbackSeason int) (CandidateFile, bool) {
+	var bestCandidate CandidateFile
+	var found bool
+	var maxWeight int64 = -1
+
+	// Dynamically select target filters depending on requested season context
+	checkExtra := isExtraOrSpecial
+	if targetSeason == 0 {
+		checkExtra = isExtraOrSpecialRelaxed
+	}
+
+	// 1. Direct and Range-based Scanning with Size-weighting
+	for _, c := range candidates {
+		if checkExtra(c.Path) {
+			continue
+		}
+
+		cleanPath := normalizeEpisodePatterns(c.Path)
+		info := ParseFilePath(cleanPath, fallbackSeason)
+
+		matched := false
+		// Check standard parsing match
+		if info.Season == targetSeason && info.Episode == targetEpisode {
+			matched = true
+		}
+
+		// Check multi-episode parsed array by releasetitleparser (if available)
+		parsedInfo := ParseFilePath(c.Path, fallbackSeason)
+		if parsedInfo.Season == targetSeason && parsedInfo.Episode == targetEpisode {
+			matched = true
+		}
+
+		// Check Range Regex (e.g. S01E21-22)
+		if !matched && info.Season == targetSeason && matchRange(c.Path, targetEpisode) {
+			matched = true
+		}
+
+		if matched {
+			// Size-weighting check to prioritize actual episodes over samples/trailers
+			if c.Size > maxWeight {
+				bestCandidate = c
+				maxWeight = c.Size
+				found = true
+			}
+		}
+	}
+
+	if found {
+		return bestCandidate, true
+	}
+
+	// 2. Index-Based Sequential Match Fallback (For absolute numbering in folder packs)
+	var seasonMatches []CandidateFile
+	for _, c := range candidates {
+		if checkExtra(c.Path) {
+			continue
+		}
+
+		// Ensure it doesn't belong to a different season folder
+		matches := seasonFolderRegex.FindAllStringSubmatch(c.Path, -1)
+		isDifferentSeason := false
+		for _, match := range matches {
+			if len(match) >= 2 {
+				sNum, err := strconv.Atoi(match[1])
+				if err == nil && sNum != targetSeason {
+					isDifferentSeason = true
+					break
+				}
+			}
+		}
+		if isDifferentSeason {
+			continue
+		}
+
+		seasonMatches = append(seasonMatches, c)
+	}
+
+	if len(seasonMatches) > 0 {
+		// Sort alphabetically by path to reconstruct original sequence
+		sort.Slice(seasonMatches, func(i, j int) bool {
+			return strings.Compare(strings.ToLower(seasonMatches[i].Path), strings.ToLower(seasonMatches[j].Path)) < 0
+		})
+
+		if targetEpisode > 0 && targetEpisode <= len(seasonMatches) {
+			candidate := seasonMatches[targetEpisode-1]
+
+			// Defensive Verification: Ensure the sequential fallback has no explicit numeric mismatch
+			candParsed := ParseFilePath(candidate.Path, fallbackSeason)
+			if candParsed.Episode != 0 && candParsed.Episode != targetEpisode {
+				// Avoid aborting on valid conjoined multi-episode ranges containing this episode
+				if !matchRange(candidate.Path, targetEpisode) {
+					return CandidateFile{}, false
+				}
+			}
+			return candidate, true
+		}
+	}
+
+	return CandidateFile{}, false
+}
+
+// ── Go Port Required Stremio Addon Adaptors ──
+
 // GenerateThreadHash sorts the magnet URIs before hashing them with the title
 func GenerateThreadHash(title string, magnetURIs []string) string {
 	sorted := make([]string, len(magnetURIs))
@@ -52,96 +452,12 @@ func GenerateThreadHash(title string, magnetURIs []string) string {
 	return hex.EncodeToString(h[:])
 }
 
-// SanitizeName cleans up bracketed text, non-ASCII patterns, and normalizes space
-func SanitizeName(name string) string {
-	name = strings.ToLower(name)
-	// Remove content inside brackets, braces, and parentheses
-	reBrackets := regexp.MustCompile(`\[[^\]]*\]|\([^\)]*\)|\{[^\}]*\}`)
-	name = reBrackets.ReplaceAllString(name, " ")
-
-	// Replace dots, underscores, dashes, and path separators with spaces
-	name = strings.NewReplacer(".", " ", "_", " ", "-", " ", "/", " ", "\\", " ").Replace(name)
-
-	// Collapse multiple spaces into one
-	reSpaces := regexp.MustCompile(`\s+`)
-	name = reSpaces.ReplaceAllString(name, " ")
-
-	return strings.TrimSpace(name)
-}
-
-// IsPack detects full/partial/multi-season packs from rtp.SeriesInfo
-func IsPack(info *rtp.SeriesInfo) bool {
-	if info == nil {
-		return false
-	}
-	// If multiple episodes exist, or if SeasonNumber is parsed but no EpisodeNumbers exist, it is a Pack!
-	return len(info.EpisodeNumbers) == 0 || len(info.EpisodeNumbers) > 1
-}
-
 // ParseTitle is a high-performance proxy to RobustParseInfo
 func ParseTitle(rawTitle string) *ParseResult {
 	return RobustParseInfo(rawTitle, 0)
 }
 
-// RobustParseInfo analyzes the title using standard regexes and releasetitleparser helpers
-func RobustParseInfo(title string, fallbackSeason int) *ParseResult {
-	clean := SanitizeName(title)
-
-	res := &ParseResult{
-		Title:    extractCleanTitle(title),
-		Year:     extractYear(clean),
-		Quality:  extractQuality(clean),
-		Language: extractLanguage(clean),
-		Season:   fallbackSeason,
-	}
-
-	// Try standard regex parsing of season and episode ranges first
-	season, epStart, epEnd, singleEp, isPack := extractSeasonAndEpisodes(clean)
-	if season > 0 {
-		res.Season = season
-	}
-	res.EpisodeStart = epStart
-	res.EpisodeEnd = epEnd
-	res.Episode = singleEp
-	res.IsPack = isPack
-
-	// Overlay rtp parser checks for extra scene validation
-	seriesInfo := rtp.ParseSeriesTitle(clean)
-	if seriesInfo != nil {
-		if seriesInfo.SeasonNumber > 0 {
-			res.Season = seriesInfo.SeasonNumber
-		}
-		if len(seriesInfo.EpisodeNumbers) == 1 {
-			res.Episode = seriesInfo.EpisodeNumbers[0]
-			res.IsPack = false
-		} else if len(seriesInfo.EpisodeNumbers) > 1 {
-			res.EpisodeStart = seriesInfo.EpisodeNumbers[0]
-			res.EpisodeEnd = seriesInfo.EpisodeNumbers[len(seriesInfo.EpisodeNumbers)-1]
-			res.IsPack = true
-		} else if seriesInfo.SeasonNumber > 0 {
-			res.IsPack = true
-		}
-	}
-
-	return res
-}
-
-// ParseFilePath parses individual file paths for nested episode matching
-func ParseFilePath(path string, fallbackSeason int) (season, episode int, ok bool) {
-	clean := SanitizeName(path)
-	res := RobustParseInfo(clean, fallbackSeason)
-	if res.Season > 0 {
-		if res.Episode > 0 {
-			return res.Season, res.Episode, true
-		}
-		if res.EpisodeStart > 0 {
-			return res.Season, res.EpisodeStart, true
-		}
-	}
-	return 0, 0, false
-}
-
-// ParseMagnet processes a magnet URI and extracts infohash + name-based attributes
+// ParseMagnet analyzes magnet URIs utilizing RobustParseInfo and rtp.ParseSeriesTitle
 func ParseMagnet(magnetURI string, contentType string) *ParsedMagnet {
 	infohash := extractInfohash(magnetURI)
 	if infohash == "" {
@@ -157,7 +473,7 @@ func ParseMagnet(magnetURI string, contentType string) *ParsedMagnet {
 		return &ParsedMagnet{
 			Type:     "SINGLE_EPISODE",
 			Infohash: infohash,
-			Quality:  "SD",
+			Quality:  "sd",
 			Language: "ta",
 		}
 	}
@@ -197,22 +513,16 @@ func ParseMagnet(magnetURI string, contentType string) *ParsedMagnet {
 			season = parsed.Season
 		}
 
-		if IsPack(seriesInfo) {
-			if len(seriesInfo.EpisodeNumbers) > 1 {
-				pm.Type = "EPISODE_PACK"
-				pm.Season = season
-				pm.EpisodeStart = seriesInfo.EpisodeNumbers[0]
-				pm.EpisodeEnd = seriesInfo.EpisodeNumbers[len(seriesInfo.EpisodeNumbers)-1]
-			} else {
-				pm.Type = "SEASON_PACK"
-				pm.Season = season
-			}
+		pm.Season = season
+		if len(seriesInfo.EpisodeNumbers) > 1 {
+			pm.Type = "EPISODE_PACK"
+			pm.EpisodeStart = seriesInfo.EpisodeNumbers[0]
+			pm.EpisodeEnd = seriesInfo.EpisodeNumbers[len(seriesInfo.EpisodeNumbers)-1]
+		} else if len(seriesInfo.EpisodeNumbers) == 0 {
+			pm.Type = "SEASON_PACK"
 		} else {
 			pm.Type = "SINGLE_EPISODE"
-			pm.Season = season
-			if len(seriesInfo.EpisodeNumbers) > 0 {
-				pm.Episode = seriesInfo.EpisodeNumbers[0]
-			}
+			pm.Episode = seriesInfo.EpisodeNumbers[0]
 		}
 	} else {
 		// Fallback to regex-based parsed results
@@ -228,193 +538,4 @@ func ParseMagnet(magnetURI string, contentType string) *ParsedMagnet {
 	}
 
 	return pm
-}
-
-// FindBestSeriesFile matches candidates for a target season and episode, prioritising based on range, size, and sequential fallback
-func FindBestSeriesFile(candidates []CandidateFile, targetSeason, targetEpisode, fallbackSeason int) (CandidateFile, bool) {
-	var matches []CandidateFile
-
-	for _, cand := range candidates {
-		// Filter out samples, trailers, extra features, and bonus files
-		if isExtraOrSpecial(cand.Path) {
-			continue
-		}
-
-		cleanPath := SanitizeName(cand.Path)
-		season, epStart, epEnd, singleEp, isPack := extractSeasonAndEpisodes(cleanPath)
-		if season == 0 {
-			season = fallbackSeason
-		}
-
-		if season != targetSeason {
-			continue
-		}
-
-		// Check if it's a direct match or within a range
-		if singleEp == targetEpisode {
-			matches = append(matches, cand)
-		} else if isPack && epStart > 0 && epEnd > 0 && targetEpisode >= epStart && targetEpisode <= epEnd {
-			matches = append(matches, cand)
-		} else if isAbsoluteEpisodeFallback(cleanPath, targetEpisode) {
-			matches = append(matches, cand)
-		}
-	}
-
-	if len(matches) > 0 {
-		// Sort matches by size so that we always select the highest-quality video stream (avoiding samples/extras)
-		sort.Slice(matches, func(i, j int) bool {
-			return matches[i].Size > matches[j].Size
-		})
-		return matches[0], true
-	}
-
-	// Falls back to direct sequential index comparison for absolute-numbered folder packs
-	if len(candidates) >= targetEpisode && targetEpisode > 0 {
-		var videos []CandidateFile
-		for _, cand := range candidates {
-			if isVideo(cand.Path) && !isExtraOrSpecial(cand.Path) {
-				videos = append(videos, cand)
-			}
-		}
-		if len(videos) >= targetEpisode {
-			// Sort videos alphabetically by path to map indices deterministically
-			sort.Slice(videos, func(i, j int) bool {
-				return strings.Compare(videos[i].Path, videos[j].Path) < 0
-			})
-			return videos[targetEpisode-1], true
-		}
-	}
-
-	return CandidateFile{}, false
-}
-
-// ── Private Extractor Helpers ──
-
-func extractInfohash(magnet string) string {
-	re := regexp.MustCompile(`(?i)btih:([a-f0-9]{40})`)
-	m := re.FindStringSubmatch(magnet)
-	if len(m) > 1 {
-		return strings.ToLower(m[1])
-	}
-	return ""
-}
-
-func extractCleanTitle(title string) string {
-	reCut := regexp.MustCompile(`(?i)(19\d\d|20\d\d|s\d+|ep\d+|season|episode|1080p|720p|2160p|4k|webrip|bluray|hdtv|dual|multi|tamil|telugu|malayalam|hindi|kannada)`)
-	idx := reCut.FindStringIndex(title)
-	var clean string
-	if idx != nil {
-		clean = title[:idx[0]]
-	} else {
-		clean = title
-	}
-	clean = regexp.MustCompile(`[\[\]\(\)\-\._]`).ReplaceAllString(clean, " ")
-	clean = regexp.MustCompile(`\s+`).ReplaceAllString(clean, " ")
-	return strings.TrimSpace(clean)
-}
-
-func extractYear(cleanTitle string) int {
-	re := regexp.MustCompile(`\b(19\d\d|20\d\d)\b`)
-	matches := re.FindAllString(cleanTitle, -1)
-	if len(matches) > 0 {
-		y, _ := strconv.Atoi(matches[len(matches)-1])
-		return y
-	}
-	return 0
-}
-
-func extractQuality(cleanTitle string) string {
-	if strings.Contains(cleanTitle, "2160p") || strings.Contains(cleanTitle, "4k") || strings.Contains(cleanTitle, "uhd") {
-		return "4K"
-	}
-	if strings.Contains(cleanTitle, "1080p") || strings.Contains(cleanTitle, "fhd") {
-		return "1080p"
-	}
-	if strings.Contains(cleanTitle, "720p") || strings.Contains(cleanTitle, "hd") {
-		return "720p"
-	}
-	if strings.Contains(cleanTitle, "480p") || strings.Contains(cleanTitle, "sd") {
-		return "480p"
-	}
-	return "1080p"
-}
-
-func extractLanguage(cleanTitle string) string {
-	langs := map[string]string{
-		"tamil":     "ta",
-		"telugu":    "te",
-		"malayalam": "ml",
-		"kannada":   "kn",
-		"hindi":     "hi",
-		"english":   "en",
-	}
-	for kw, code := range langs {
-		if strings.Contains(cleanTitle, kw) {
-			return code
-		}
-	}
-	return "ta"
-}
-
-func extractSeasonAndEpisodes(cleanTitle string) (season, epStart, epEnd, singleEp int, isPack bool) {
-	reSeason := regexp.MustCompile(`\b(s|season)\s*(\d+)\b`)
-	if m := reSeason.FindStringSubmatch(cleanTitle); len(m) > 2 {
-		season, _ = strconv.Atoi(m[2])
-	}
-
-	reRange := regexp.MustCompile(`\b(?:e|ep|episode)\s*(\d+)\s*(?:-|to|\s)\s*(?:e|ep|episode)?\s*(\d+)\b`)
-	if m := reRange.FindStringSubmatch(cleanTitle); len(m) > 2 {
-		epStart, _ = strconv.Atoi(m[1])
-		epEnd, _ = strconv.Atoi(m[2])
-		isPack = true
-		return
-	}
-
-	reSingle := regexp.MustCompile(`\b(?:e|ep|episode)\s*(\d+)\b`)
-	if m := reSingle.FindStringSubmatch(cleanTitle); len(m) > 1 {
-		singleEp, _ = strconv.Atoi(m[1])
-		return
-	}
-
-	reDay := regexp.MustCompile(`\b(?:day|ep|episode)\s*(\d+)\b`)
-	if m := reDay.FindStringSubmatch(cleanTitle); len(m) > 1 {
-		singleEp, _ = strconv.Atoi(m[1])
-		return
-	}
-
-	if season > 0 {
-		isPack = true
-	}
-
-	return
-}
-
-func isAbsoluteEpisodeFallback(cleanPath string, targetEpisode int) bool {
-	reStandAlone := regexp.MustCompile(`\b\d+\b`)
-	matches := reStandAlone.FindAllString(cleanPath, -1)
-	for _, m := range matches {
-		if val, err := strconv.Atoi(m); err == nil && val == targetEpisode {
-			return true
-		}
-	}
-	return false
-}
-
-func isExtraOrSpecial(path string) bool {
-	p := strings.ToLower(path)
-	extras := []string{"sample", "trailer", "bonus", "behind the scenes", "featurette", "extra", "promo"}
-	for _, ext := range extras {
-		if strings.Contains(p, ext) {
-			return true
-		}
-	}
-	return false
-}
-
-func isVideo(path string) bool {
-	ext := strings.ToLower(filepath.Ext(path))
-	videoExts := map[string]bool{
-		".mp4": true, ".mkv": true, ".avi": true, ".mov": true, ".flv": true, ".webm": true, ".ts": true,
-	}
-	return videoExts[ext]
 }
