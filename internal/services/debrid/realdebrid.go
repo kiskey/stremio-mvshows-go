@@ -7,8 +7,8 @@ import (
 	"time"
 
 	"github.com/go-resty/resty/v2"
-	"github.com/sevvian/smvshows-go/internal/config"
-	"github.com/sevvian/smvshows-go/internal/utils"
+	"github.com/kiskey/stremio-mvshows-go/internal/config"
+	"github.com/kiskey/stremio-mvshows-go/internal/utils"
 )
 
 type RealDebridProvider struct {
