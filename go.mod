@@ -1,4 +1,4 @@
-module github.com/sevvian/smvshows-go
+module github.com/kiskey/stremio-mvshows-go
 
 go 1.22
 
@@ -13,5 +13,6 @@ require (
 	github.com/robfig/cron/v3 v3.0.1
 	github.com/rs/cors v1.11.0
 	github.com/rs/zerolog v1.32.0
+	golang.org/x/net v0.14.0
 	golang.org/x/time v0.5.0
 )
