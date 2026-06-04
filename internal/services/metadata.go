@@ -1,10 +1,13 @@
 package metadata
 
 import (
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"math"
-	"net/url"
+	"net"
+	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -12,6 +15,7 @@ import (
 	"github.com/go-resty/resty/v2"
 	"github.com/kiskey/stremio-mvshows-go/internal/config"
 	"github.com/kiskey/stremio-mvshows-go/internal/utils"
+	"golang.org/x/net/http2"
 )
 
 type TmdbResult struct {
@@ -29,13 +33,41 @@ type TMDBClient struct {
 	apiKey string
 }
 
+// createOptimizedTMDBHTTPClient configures an transport optimized for low latency and high concurrency
+func createOptimizedTMDBHTTPClient(timeout time.Duration) *http.Client {
+	transport := &http.Transport{
+		DialContext: (&net.Dialer{
+			Timeout:   5 * time.Second,  // Faster connect timeout
+			KeepAlive: 30 * time.Second, // Consistent keep-alive
+		}).DialContext,
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   100,              // Avoid connection starvation under concurrency
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   3 * time.Second,  // Faster TLS handshakes
+		ExpectContinueTimeout: 1 * time.Second,
+		ForceAttemptHTTP2:     true,             // Force HTTP/2 attempt
+		TLSClientConfig: &tls.Config{
+			MinVersion: tls.VersionTLS12,
+		},
+	}
+	// Explicitly configure HTTP/2 transport settings
+	_ = http2.ConfigureTransport(transport)
+
+	return &http.Client{
+		Transport: transport,
+		Timeout:   timeout,
+	}
+}
+
 func NewTMDBClient(cfg *config.Config) *TMDBClient {
+	httpClient := createOptimizedTMDBHTTPClient(8 * time.Second)
+	restyClient := resty.NewWithClient(httpClient).
+		SetBaseURL("https://api.themoviedb.org/3").
+		SetRetryCount(3).
+		SetRetryWaitTime(2 * time.Second)
+
 	return &TMDBClient{
-		client: resty.New().
-			SetBaseURL("https://api.themoviedb.org/3").
-			SetTimeout(8 * time.Second).
-			SetRetryCount(3).
-			SetRetryWaitTime(2 * time.Second),
+		client: restyClient,
 		apiKey: cfg.TMDBAPIKey,
 	}
 }
@@ -266,26 +298,13 @@ func calculateScore(targetTitle string, targetYear int, candidateTitle string, c
 	return yearScore + titleScore
 }
 
+var nonWordPunctRegexp = regexp.MustCompile(`[^\w\s]`)
+
 func normalizeForCompare(s string) string {
 	s = strings.ToLower(s)
-	// Strip special punctuation
-	re := regexpMustCompile(`[^\w\s]`)
-	s = re.ReplaceAllString(s, "")
-	// Strip diacritics / normalization where needed
+	// Strip special punctuation using native Go standard library regex
+	s = nonWordPunctRegexp.ReplaceAllString(s, "")
+	// Collapse spacing where needed
 	s = strings.ReplaceAll(s, "  ", " ")
 	return strings.TrimSpace(s)
-}
-
-func regexpMustCompile(pattern string) *regexpWrapper {
-	// Wrap for simple static compiling to avoid external dependencies
-	re := strings.NewReplacer("[^\\w\\s]", "")
-	return &regexpWrapper{rep: re}
-}
-
-type regexpWrapper struct {
-	rep *strings.Replacer
-}
-
-func (rw *regexpWrapper) ReplaceAllString(s, repl string) string {
-	return rw.rep.Replace(s)
 }
