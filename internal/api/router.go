@@ -1,10 +1,10 @@
 package api
 
 import (
+	"net/http"
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/rs/cors"
 	"github.com/kiskey/stremio-mvshows-go/internal/utils"
 )
 
@@ -14,7 +14,7 @@ func SetupRouter() *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
 
 	r := gin.New()
-	r.Use(gin.Recovery())
+	r.Use(customRecovery())
 	r.Use(corsMiddleware())
 	r.Use(requestLogger())
 
@@ -33,19 +33,37 @@ func SetupRouter() *gin.Engine {
 	return r
 }
 
+// corsMiddleware implements a lightweight, high-performance native CORS handler.
+// This completely removes dependency on "github.com/rs/cors" to reduce binary size (space complexity) and allocations.
 func corsMiddleware() gin.HandlerFunc {
-	c := cors.New(cors.Options{
-		AllowedOrigins: []string{"*"},
-		AllowedMethods: []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-		AllowedHeaders: []string{"Origin", "Content-Type", "Accept", "Authorization"},
-	})
-	return func(ginCtx *gin.Context) {
-		c.HandlerFunc(ginCtx.Writer, ginCtx.Request)
-		if ginCtx.Request.Method == "OPTIONS" {
-			ginCtx.AbortWithStatus(200)
+	return func(c *gin.Context) {
+		c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
+		c.Writer.Header().Set("Access-Control-Allow-Credentials", "true")
+		c.Writer.Header().Set("Access-Control-Allow-Headers", "Origin, Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, Accept, X-Requested-With")
+		c.Writer.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+
+		if c.Request.Method == "OPTIONS" {
+			c.AbortWithStatus(http.StatusNoContent)
 			return
 		}
-		ginCtx.Next()
+		c.Next()
+	}
+}
+
+// customRecovery replaces default gin.Recovery with highly optimized, zerolog-integrated panic catching.
+func customRecovery() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		defer func() {
+			if err := recover(); err != nil {
+				utils.Logger.Error().
+					Interface("panic", err).
+					Str("method", c.Request.Method).
+					Str("path", c.Request.URL.Path).
+					Msg("Unhandled panic rescued inside HTTP Router request chain.")
+				c.AbortWithStatus(http.StatusInternalServerError)
+			}
+		}()
+		c.Next()
 	}
 }
 
