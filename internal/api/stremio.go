@@ -17,6 +17,7 @@ import (
 	"github.com/kiskey/stremio-mvshows-go/internal/services/parser"
 	"github.com/kiskey/stremio-mvshows-go/internal/services/tracker"
 	"github.com/kiskey/stremio-mvshows-go/internal/utils"
+	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
 
@@ -152,8 +153,9 @@ func catalogHandler(c *gin.Context) {
 		}
 
 		if t.TmdbMetadata != nil {
-			if t.TmdbMetadata.ImdbID != "" {
-				metaID = t.TmdbMetadata.ImdbID
+			// Safely dereference ImdbID pointer
+			if t.TmdbMetadata.ImdbID != nil && *t.TmdbMetadata.ImdbID != "" {
+				metaID = *t.TmdbMetadata.ImdbID
 			} else {
 				metaID = t.TmdbMetadata.TmdbID
 			}
