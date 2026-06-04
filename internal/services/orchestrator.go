@@ -2,8 +2,8 @@ package orchestrator
 
 import (
 	"encoding/json"
-	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -14,6 +14,7 @@ import (
 	"github.com/kiskey/stremio-mvshows-go/internal/services/parser"
 	"github.com/kiskey/stremio-mvshows-go/internal/utils"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 var (
@@ -66,6 +67,17 @@ func UpdateDashboardCache() {
 
 // RunFullWorkflow triggers the full sequence: scrape, parse, TMDB lookup, and relational linking.
 func RunFullWorkflow(cfg *config.Config) {
+	// Defensive panic recovery to prevent unhandled background panics from crashing the entire process
+	defer func() {
+		if r := recover(); r != nil {
+			utils.Logger.Error().Interface("panic", r).Msg("Recovered from panic inside RunFullWorkflow background thread.")
+			crawlMu.Lock()
+			isCrawling = false
+			crawlMu.Unlock()
+			UpdateDashboardCache()
+		}
+	}()
+
 	crawlMu.Lock()
 	if isCrawling {
 		crawlMu.Unlock()
@@ -102,6 +114,16 @@ func RunFullWorkflow(cfg *config.Config) {
 }
 
 func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient) {
+	// Defensive panic recovery for individual thread processing
+	defer func() {
+		if r := recover(); r != nil {
+			utils.Logger.Error().
+				Interface("panic", r).
+				Str("title", thread.RawTitle).
+				Msg("Recovered from panic during processThread processing.")
+		}
+	}()
+
 	// 1. Check existing thread by raw_title
 	var existing database.Thread
 	err := database.DB.Where("raw_title = ?", thread.RawTitle).First(&existing).Error
