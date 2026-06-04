@@ -1,7 +1,7 @@
 package api
 
 import (
-	"context" // Added to support background context.Background() on async tasks
+	"context"
 	"encoding/json"
 	"net/http"
 	"os"
@@ -30,7 +30,7 @@ func RegisterAdminRoutes(r *gin.RouterGroup) {
 	r.POST("/custom-meta", customMetaHandler)
 	r.POST("/link-official", linkOfficialHandler)
 	r.POST("/rd-cache-pending", cachePendingHandler)
-	r.POST("/rd-check", rdCheckHandler) // Added: Local database only cache status endpoint
+	r.POST("/rd-check", rdCheckHandler)
 	r.GET("/failures", failuresHandler)
 	r.POST("/retry-parse", retryParseHandler)
 	r.GET("/recent", recentHandler)
@@ -213,9 +213,17 @@ func linkOfficialHandler(c *gin.Context) {
 	errTx := database.DB.Transaction(func(tx *gorm.DB) error {
 		// Save TmdbMetadata records
 		rawDataBytes, _ := json.Marshal(tmdbResult.RawData)
+		
+		// CRITICAL FIX: Convert empty IMDb string to explicit NULL pointer for SQLite unique constraint
+		var imdbIDPtr *string
+		if tmdbResult.ImdbID != "" {
+			val := tmdbResult.ImdbID
+			imdbIDPtr = &val
+		}
+
 		tmdbMetadata := database.TmdbMetadata{
 			TmdbID: tmdbResult.TmdbID,
-			ImdbID: tmdbResult.ImdbID,
+			ImdbID: imdbIDPtr,
 			Data:   string(rawDataBytes),
 		}
 		if tmdbResult.Year > 0 {
