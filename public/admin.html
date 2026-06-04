@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Stremio Addon Admin</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 20px; background: #1a1a2e; color: #eee; }
+        h2 { color: #e94560; }
+        table { border-collapse: collapse; margin: 10px 0; }
+        td { padding: 6px 12px; border-bottom: 1px solid #333; }
+        button { background: #e94560; color: white; border: none; padding: 8px 16px; cursor: pointer; border-radius: 4px; margin: 4px; }
+        button:hover { background: #c23152; }
+        button:disabled { background: #555; cursor: not-allowed; }
+        select, input { padding: 6px; margin: 4px; border-radius: 4px; border: 1px solid #555; background: #16213e; color: #eee; }
+        .section { margin: 20px 0; padding: 15px; background: #16213e; border-radius: 8px; }
+        .stream-item { display: flex; align-items: center; gap: 8px; padding: 4px 0; }
+    </style>
+</head>
+<body>
+    <h1>Stremio Addon Admin</h1>
+
+    <div class="section">
+        <h2>Status</h2>
+        <table>
+            <tr><td>Workflow running:</td><td id="isCrawling">-</td></tr>
+            <tr><td>Last workflow update:</td><td id="lastUpdated">-</td></tr>
+            <tr><td>Debrid provider:</td><td id="debridService">-</td></tr>
+            <tr><td>Cache check:</td><td id="cacheCheckMethod">-</td></tr>
+            <tr><td>RD enabled:</td><td id="rdEnabled">-</td></tr>
+            <tr><td>TorBox enabled:</td><td id="torboxEnabled">-</td></tr>
+            <tr><td>TMDB configured:</td><td id="tmdbConfigured">-</td></tr>
+            <tr><td>Tracker count:</td><td id="trackerCount">-</td></tr>
+            <tr><td>DB size:</td><td id="dbSize">-</td></tr>
+        </table>
+        <p>Health endpoint provides a quick snapshot. Use the Actions below to trigger a manual crawl.</p>
+    </div>
+
+    <div class="section">
+        <h2>Dashboard</h2>
+        <table>
+            <tr><td>Total Linked:</td><td id="linkedCount">0</td></tr>
+            <tr><td>Pending TMDB Match:</td><td id="pendingCount">0</td></tr>
+            <tr><td>Critical Parse Failures:</td><td id="failedCount">0</td></tr>
+        </table>
+    </div>
+
+    <div class="section">
+        <h2>Actions</h2>
+        <button id="triggerCrawl">Trigger Manual Crawl</button>
+    </div>
+
+    <div class="section">
+        <h2>Edit &amp; Rescue Pending Items</h2>
+        <h3>1. Pick Pending Items</h3>
+        <div style="display:flex; gap:20px;">
+            <div>
+                <h4>Available</h4>
+                <select id="availableList" size="10" style="min-width:300px;"></select>
+                <br>
+                <button id="moveBtn">→ Move</button>
+                <button id="removeBtn">← Remove</button>
+                <button id="moveAllBtn">→→ Move All</button>
+                <button id="clearAllBtn">←← Clear</button>
+            </div>
+            <div>
+                <h4>Selected</h4>
+                <select id="selectedList" size="10" style="min-width:300px;"></select>
+                <br>
+                <button id="setFocusBtn">Set Focus</button>
+                <span>Focused item drives RD caching below.</span>
+            </div>
+        </div>
+
+        <h3>2A. Edit Metadata (Focused Item)</h3>
+        <p>Focused Title: <span id="focusedTitle">None</span></p>
+        <label>Custom Poster URL: <input type="text" id="customPoster" style="width:400px;"></label><br>
+        <label>Custom Description: <input type="text" id="customDescription" style="width:400px;"></label><br>
+        <button id="saveFocused">Save Focused</button>
+
+        <h3>2B. Link Official ID</h3>
+        <p>Accepts IMDb (tt...) or TMDB (tv:... or movie:...).</p>
+        <label>Official ID: <input type="text" id="officialId"></label>
+        <button id="linkFocused">Link Focused</button>
+
+        <hr>
+        <h4>Bulk operations (Selected List)</h4>
+        <button id="bulkLink">Bulk Link</button>
+        <button id="bulkUpdateMeta">Bulk Update Meta</button>
+        <p>Tip: Great for series like Bigg Boss where many threads need the same ID or metadata.</p>
+
+        <h3>3. Choose a Stream to Cache in Debrid</h3>
+        <p>Operates on the focused item only. Select exactly one stream; already-initiated streams are marked and disabled.</p>
+        <div id="streamsContainer">
+            <table>
+                <thead><tr><th>Title</th><th>Quality / Language</th><th>Select</th></tr></thead>
+                <tbody id="streamsBody"><tr><td colspan="3">Set a focused item to see streams.</td></tr></tbody>
+            </table>
+        </div>
+        <button id="cacheSelected">Cache selected in Debrid</button>
+    </div>
+
+    <div class="section">
+        <h2>Recent Activity</h2>
+        <p>Linked (paginated): <button id="prevPage">Prev</button> <span id="currentPage">1</span> <button id="nextPage">Next</button></p>
+        <table>
+            <thead><tr><th>Type</th><th>Title / Reason</th><th>When</th></tr></thead>
+            <tbody id="recentBody"></tbody>
+        </table>
+    </div>
+
+    <div class="section">
+        <h2>Critical Parse Failures</h2>
+        <table>
+            <thead><tr><th>Failed Title</th><th>Reason</th><th>Last Attempt</th><th>Actions</th></tr></thead>
+            <tbody id="failuresBody"></tbody>
+        </table>
+    </div>
+
+    <script>
+        (function() {
+            'use strict';
+
+            let focusedThreadId = null;
+            let page = 1;
+
+            // ── Utility: safe DOM access ─────────────────────────
+            function el(id) {
+                return document.getElementById(id);
+            }
+
+            // ── Health & Dashboard ───────────────────────────────
+            async function fetchHealth() {
+                try {
+                    const r = await fetch('/admin/api/health');
+                    const d = await r.json();
+                    el('isCrawling').textContent = d.isCrawling ? 'Yes' : 'No';
+                    el('lastUpdated').textContent = d.lastUpdated || '-';
+                    el('debridService').textContent = d.debridService || 'none';
+                    el('cacheCheckMethod').textContent = d.debridCacheCheck === 'instant' ? '⚡ Instant (API)' : '🗄️ Database';
+                    el('rdEnabled').textContent = d.realDebridEnabled ? '✓' : '✗';
+                    el('torboxEnabled').textContent = d.torboxEnabled ? '✓' : '✗';
+                    el('tmdbConfigured').textContent = d.tmdbConfigured ? '✓' : '✗';
+                    el('trackerCount').textContent = d.trackerCount;
+                    el('dbSize').textContent = d.dbSizeBytes ? (d.dbSizeBytes / 1024 / 1024).toFixed(1) + ' MB' : '-';
+
+                    // Dashboard counts
+                    el('linkedCount').textContent = d.linked ?? 0;
+                    el('pendingCount').textContent = d.pending ?? 0;
+                    el('failedCount').textContent = d.failed ?? 0;
+                } catch (err) {
+                    console.error('Health fetch failed:', err);
+                }
+            }
+
+            // ── Trigger Crawl ────────────────────────────────────
+            el('triggerCrawl').addEventListener('click', async () => {
+                await fetch('/admin/api/trigger-crawl', { method: 'POST' });
+                alert('Crawl triggered!');
+            });
+
+            // ── Pending Items ────────────────────────────────────
+            async function loadPending() {
+                const r = await fetch('/admin/api/pending');
+                const items = await r.json();
+                const sel = el('availableList');
+                sel.innerHTML = '';
+                items.forEach(t => {
+                    const opt = document.createElement('option');
+                    opt.value = t.id;
+                    opt.textContent = t.clean_title || t.raw_title;
+                    sel.appendChild(opt);
+                });
+            }
+
+            el('setFocusBtn').addEventListener('click', async () => {
+                const sel = el('selectedList');
+                if (sel.selectedOptions.length > 0) {
+                    focusedThreadId = sel.selectedOptions[0].value;
+                    el('focusedTitle').textContent = sel.selectedOptions[0].textContent;
+                    await loadStreams(focusedThreadId);
+                }
+            });
+
+            async function loadStreams(threadId) {
+                const r = await fetch(`/admin/api/pending/${threadId}/streams`);
+                const data = await r.json();
+                const tbody = el('streamsBody');
+                tbody.innerHTML = '';
+                if (!data.items || data.items.length === 0) {
+                    tbody.innerHTML = '<tr><td colspan="3">No streams found.</td></tr>';
+                    return;
+                }
+                data.items.forEach((item, i) => {
+                    const tr = document.createElement('tr');
+                    tr.innerHTML = `
+                        <td>${item.label}</td>
+                        <td>${item.quality || 'SD'} / ${item.language || 'NA'}</td>
+                        <td><input type="radio" name="streamSelect" value="${item.infohash}" ${data.locked.includes(item.infohash) ? 'disabled' : ''}></td>
+                    `;
+                    if (data.locked.includes(item.infohash)) {
+                        tr.style.opacity = '0.5';
+                        tr.title = 'Already initiated';
+                    }
+                    tbody.appendChild(tr);
+                });
+            }
+
+            el('cacheSelected').addEventListener('click', async () => {
+                if (!focusedThreadId) return alert('Set a focused item first.');
+                const radio = document.querySelector('input[name="streamSelect"]:checked');
+                const infohash = radio ? radio.value : null;
+                const r = await fetch('/admin/api/rd-cache-pending', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ threadId: parseInt(focusedThreadId), infohash })
+                });
+                const d = await r.json();
+                alert(d.message);
+                await loadStreams(focusedThreadId);
+            });
+
+            el('linkFocused').addEventListener('click', async () => {
+                if (!focusedThreadId) return alert('Set a focused item first.');
+                const officialId = el('officialId').value.trim();
+                if (!officialId) return alert('Enter an official ID.');
+                const r = await fetch('/admin/api/link-official', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ threadId: parseInt(focusedThreadId), officialId })
+                });
+                const d = await r.json();
+                alert(d.message);
+                loadPending();
+            });
+
+            el('saveFocused').addEventListener('click', async () => {
+                if (!focusedThreadId) return alert('Set a focused item first.');
+                const r = await fetch('/admin/api/custom-meta', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        threadId: parseInt(focusedThreadId),
+                        poster: el('customPoster').value || undefined,
+                        description: el('customDescription').value || undefined
+                    })
+                });
+                const d = await r.json();
+                alert(d.message);
+            });
+
+            // Move buttons
+            el('moveBtn').addEventListener('click', () => moveItems('availableList', 'selectedList'));
+            el('removeBtn').addEventListener('click', () => moveItems('selectedList', 'availableList'));
+            el('moveAllBtn').addEventListener('click', () => moveAll('availableList', 'selectedList'));
+            el('clearAllBtn').addEventListener('click', () => moveAll('selectedList', 'availableList'));
+
+            function moveItems(fromId, toId) {
+                const from = el(fromId);
+                const to = el(toId);
+                [...from.selectedOptions].forEach(opt => to.appendChild(opt));
+            }
+            function moveAll(fromId, toId) {
+                const from = el(fromId);
+                const to = el(toId);
+                [...from.options].forEach(opt => to.appendChild(opt));
+            }
+
+            // ── Failures ─────────────────────────────────────────
+            async function loadFailures() {
+                const r = await fetch('/admin/api/failures');
+                const items = await r.json();
+                const tbody = el('failuresBody');
+                tbody.innerHTML = items.map(f => `
+                    <tr>
+                        <td>${f.raw_title}</td>
+                        <td>${f.reason}</td>
+                        <td>${f.last_attempt}</td>
+                        <td><button onclick="retryParse('${f.thread_hash}')">Retry</button></td>
+                    </tr>
+                `).join('');
+            }
+
+            window.retryParse = async function(hash) {
+                await fetch('/admin/api/retry-parse', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ threadHash: hash })
+                });
+                loadFailures();
+            };
+
+            // ── Recent Activity ──────────────────────────────────
+            async function loadRecent(p) {
+                page = p || page;
+                const r = await fetch(`/admin/api/recent?limit=15`);
+                const d = await r.json();
+                el('currentPage').textContent = page;
+                const rows = [];
+                (d.linked || []).forEach(l => rows.push(`<tr><td>Linked</td><td>${l.title}</td><td>${l.updatedAt}</td></tr>`));
+                (d.failures || []).forEach(f => rows.push(`<tr><td>Failed</td><td>${f.title}</td><td>${f.last_attempt}</td></tr>`));
+                el('recentBody').innerHTML = rows.join('');
+            }
+
+            el('prevPage').addEventListener('click', () => { if (page > 1) loadRecent(page - 1); });
+            el('nextPage').addEventListener('click', () => loadRecent(page + 1));
+
+            // ── Init ─────────────────────────────────────────────
+            document.addEventListener('DOMContentLoaded', () => {
+                fetchHealth();
+                loadPending();
+                loadFailures();
+                loadRecent(1);
+                // Refresh health and dashboard every 30 seconds
+                setInterval(fetchHealth, 30000);
+            });
+        })();
+    </script>
+</body>
+</html>
