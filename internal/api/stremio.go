@@ -9,12 +9,12 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
-	"github.com/sevvian/smvshows-go/internal/config"
-	"github.com/sevvian/smvshows-go/internal/database"
-	"github.com/sevvian/smvshows-go/internal/services/debrid"
-	"github.com/sevvian/smvshows-go/internal/services/parser"
-	"github.com/sevvian/smvshows-go/internal/services/tracker"
-	"github.com/sevvian/smvshows-go/internal/utils"
+	"github.com/kiskey/stremio-mvshows-go/internal/config"
+	"github.com/kiskey/stremio-mvshows-go/internal/database"
+	"github.com/kiskey/stremio-mvshows-go/internal/services/debrid"
+	"github.com/kiskey/stremio-mvshows-go/internal/services/parser"
+	"github.com/kiskey/stremio-mvshows-go/internal/services/tracker"
+	"github.com/kiskey/stremio-mvshows-go/internal/utils"
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
