@@ -1,21 +1,31 @@
 package main
 
 import (
+	"log"
+	"os"
 	"strconv"
 	"time"
 
+	"github.com/kiskey/stremio-mvshows-go/internal/api"
+	"github.com/kiskey/stremio-mvshows-go/internal/config"
+	"github.com/kiskey/stremio-mvshows-go/internal/database"
+	"github.com/kiskey/stremio-mvshows-go/internal/services/maintenance"
+	"github.com/kiskey/stremio-mvshows-go/internal/services/orchestrator"
+	"github.com/kiskey/stremio-mvshows-go/internal/services/tracker"
+	"github.com/kiskey/stremio-mvshows-go/internal/utils"
 	"github.com/robfig/cron/v3"
-	"github.com/sevvian/smvshows-go/internal/api"
-	"github.com/sevvian/smvshows-go/internal/config"
-	"github.com/sevvian/smvshows-go/internal/database"
-	"github.com/sevvian/smvshows-go/internal/services/maintenance"
-	"github.com/sevvian/smvshows-go/internal/services/orchestrator"
-	"github.com/sevvian/smvshows-go/internal/services/tracker"
-	"github.com/sevvian/smvshows-go/internal/utils"
 	gormlogger "gorm.io/gorm/logger"
 )
 
 func main() {
+	// Defensive top-level panic recovery to protect the main server thread
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("CRITICAL: Main server thread crashed with panic: %v", r)
+			os.Exit(1)
+		}
+	}()
+
 	// 1. Load centralized configuration
 	cfg := config.Load()
 
@@ -43,8 +53,11 @@ func main() {
 	// 6. Generate starting dashboard state cache
 	orchestrator.UpdateDashboardCache()
 
-	// 7. Configure background cron scheduler using UTC timezone
-	c := cron.New(cron.WithLocation(time.UTC))
+	// 7. Configure background cron scheduler using UTC timezone and panic recovery chain
+	c := cron.New(
+		cron.WithLocation(time.UTC),
+		cron.WithChain(cron.Recover(cron.PrintfLogger(log.New(os.Stdout, "[Cron] ", log.LstdFlags)))),
+	)
 
 	// Main workflow background scraper cron task
 	_, err = c.AddFunc(cfg.MainWorkflowCron, func() {
