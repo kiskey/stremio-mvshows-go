@@ -30,8 +30,12 @@ COPY --from=builder /app/server .
 # Copy static frontend assets served by the admin router
 COPY public/ ./public/
 
-# Default port exposed by the addon
+# Default exposed port
 EXPOSE 3000
+
+# ── Cache Expiry Environment Defaults ──
+ENV CACHE_EXPIRY_ENABLED=true
+ENV CACHE_EXPIRY_DAYS=5
 
 # Run server
 CMD ["./server"]
