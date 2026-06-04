@@ -7,12 +7,12 @@ import (
 	"sync"
 	"time"
 
-	"github.com/sevvian/smvshows-go/internal/config"
-	"github.com/sevvian/smvshows-go/internal/database"
-	"github.com/sevvian/smvshows-go/internal/services/crawler"
-	"github.com/sevvian/smvshows-go/internal/services/metadata"
-	"github.com/sevvian/smvshows-go/internal/services/parser"
-	"github.com/sevvian/smvshows-go/internal/utils"
+	"github.com/kiskey/stremio-mvshows-go/internal/config"
+	"github.com/kiskey/stremio-mvshows-go/internal/database"
+	"github.com/kiskey/stremio-mvshows-go/internal/services/crawler"
+	"github.com/kiskey/stremio-mvshows-go/internal/services/metadata"
+	"github.com/kiskey/stremio-mvshows-go/internal/services/parser"
+	"github.com/kiskey/stremio-mvshows-go/internal/utils"
 	"gorm.io/gorm"
 )
 
