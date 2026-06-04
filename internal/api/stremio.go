@@ -4,7 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"net/url" // Critical fix: added net/url to resolve compile error in url.QueryEscape
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -97,7 +97,8 @@ func catalogHandler(c *gin.Context) {
 	}
 
 	var threads []database.Thread
-	query := database.DB.Where("status = ? AND type = ?", "linked", mediaType)
+	// Return both linked and pending threads, prioritizing linked ones at the top of lists
+	query := database.DB.Where("status IN ? AND type = ?", []string{"linked", "pending_tmdb"}, mediaType)
 
 	// Filter by specific catalogs matching manifest IDs
 	if catalogID == "tamilmv_hd_movies" {
@@ -109,6 +110,7 @@ func catalogHandler(c *gin.Context) {
 	}
 
 	err := query.
+		Order("CASE status WHEN 'linked' THEN 0 ELSE 1 END"). // Order linked threads first, then pending rescue items
 		Order("posted_at DESC").
 		Offset(skip).
 		Limit(100).
@@ -178,10 +180,30 @@ func catalogHandler(c *gin.Context) {
 
 func metaHandler(c *gin.Context) {
 	id := strings.TrimSuffix(c.Param("id"), ".json")
+	cfg := config.Load()
 
 	var meta database.TmdbMetadata
 	err := database.DB.Where("imdb_id = ? OR tmdb_id = ?", id, id).Preload("Threads").First(&meta).Error
 	if err != nil {
+		// If direct metadata lookup fails, check if the ID refers to a pending/unlinked ThreadHash
+		var t database.Thread
+		errThread := database.DB.Where("thread_hash = ?", id).First(&t).Error
+		if errThread == nil {
+			// Return a safe placeholder metadata response for pending items
+			metaObj := gin.H{
+				"id":          id,
+				"type":        t.Type,
+				"name":        t.RawTitle,
+				"poster":      cfg.PlaceholderPoster,
+				"description": "Pending metadata match. You can link this manually in the administration rescue panel.",
+			}
+			if t.Year != nil {
+				metaObj["year"] = *t.Year
+			}
+			c.JSON(http.StatusOK, gin.H{"meta": metaObj})
+			return
+		}
+
 		c.JSON(http.StatusNotFound, gin.H{"error": "Metadata not found"})
 		return
 	}
@@ -193,7 +215,6 @@ func metaHandler(c *gin.Context) {
 		return
 	}
 
-	cfg := config.Load()
 	poster := cfg.PlaceholderPoster
 	if details.PosterPath != "" {
 		poster = "https://image.tmdb.org/t/p/w500" + details.PosterPath
@@ -278,6 +299,38 @@ func streamHandler(c *gin.Context) {
 	var meta database.TmdbMetadata
 	err := database.DB.Where("imdb_id = ? OR tmdb_id = ?", imdbID, imdbID).First(&meta).Error
 	if err != nil {
+		// If metadata lookup fails, check if the query requested unlinked/pending ThreadHash streams
+		var t database.Thread
+		errThread := database.DB.Where("thread_hash = ?", imdbID).First(&t).Error
+		if errThread == nil {
+			// This is an unlinked thread. Return direct P2P fallback streams only (No RD mapping)
+			streamList := make([]gin.H, 0)
+			seenP2P := make(map[string]bool)
+
+			for _, magnet := range t.MagnetURIs {
+				parsedMagnet := parser.ParseMagnet(magnet, t.Type)
+				if parsedMagnet == nil {
+					continue
+				}
+
+				// De-duplicate stream entries by infohash
+				if seenP2P[parsedMagnet.Infohash] {
+					continue
+				}
+				seenP2P[parsedMagnet.Infohash] = true
+
+				label := fmt.Sprintf("[P2P] TamilMV\n%s / %s", parsedMagnet.Quality, parsedMagnet.Language)
+				streamList = append(streamList, gin.H{
+					"name":     label,
+					"title":    t.RawTitle,
+					"infoHash": parsedMagnet.Infohash,
+					"sources":  tracker.GetTrackers(),
+				})
+			}
+			c.JSON(http.StatusOK, gin.H{"streams": streamList})
+			return
+		}
+
 		c.JSON(http.StatusNotFound, gin.H{"error": "Metadata mapping not found"})
 		return
 	}
@@ -309,11 +362,25 @@ func streamHandler(c *gin.Context) {
 	}
 	cacheMap := debrid.CheckCached(allHashes, database.DB)
 
-	streamList := make([]gin.H, 0, len(streams))
-	trackersStr := strings.Join(buildTrackerSources(), "")
+	var cachedStreams []gin.H   // Instant ⚡ streams
+	var uncachedStreams []gin.H // Downloading ⏳ streams
+	seenStreams := make(map[string]bool)
+
+	isRDStr := "false"
+	if p.IsEnabled() {
+		isRDStr = "true"
+	}
 
 	for _, s := range streams {
 		isCached := cacheMap[s.Infohash]
+
+		// Deduplicate stream candidates based on (isRD | quality | language | infohash)
+		dupKey := fmt.Sprintf("%s|%s|%s|%s", isRDStr, s.Quality, s.Language, s.Infohash)
+		if seenStreams[dupKey] {
+			continue
+		}
+		seenStreams[dupKey] = true
+
 		emoji := "⏳"
 		if isCached {
 			emoji = "⚡ Instant"
@@ -329,24 +396,30 @@ func streamHandler(c *gin.Context) {
 		rdUrl := fmt.Sprintf("%s/rd-add/%s/%s", cfg.AppHost, s.Infohash, targetEpStr)
 
 		if p.IsEnabled() {
-			streamList = append(streamList, gin.H{
+			item := gin.H{
 				"name":  "TamilMV Addon",
 				"title": label,
 				"url":   rdUrl,
-			})
+			}
+			if isCached {
+				cachedStreams = append(cachedStreams, item)
+			} else {
+				uncachedStreams = append(uncachedStreams, item)
+			}
 		} else {
-			// P2P fallback streams directly
-			streamList = append(streamList, gin.H{
+			// Direct P2P Streams
+			item := gin.H{
 				"name":     label,
 				"title":    "Direct Torrent P2P Stream",
 				"infoHash": s.Infohash,
 				"sources":  tracker.GetTrackers(),
-			})
+			}
+			uncachedStreams = append(uncachedStreams, item)
 		}
 	}
 
-	// Add trackers to redirect URLs if required
-	_ = trackersStr
+	// Order by: Cached (Instant) first, followed by Uncached (Downloading) streams
+	streamList := append(cachedStreams, uncachedStreams...)
 
 	c.JSON(http.StatusOK, gin.H{"streams": streamList})
 }
