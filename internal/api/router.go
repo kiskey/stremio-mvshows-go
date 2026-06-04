@@ -14,6 +14,11 @@ func SetupRouter() *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
 
 	r := gin.New()
+	
+	// Explicitly configure Gin to trust headers from Nginx/reverse proxy network gateways safely.
+	// Prevents warning logs and ensures c.ClientIP() accurately resolves true client IPs.
+	_ = r.SetTrustedProxies(nil)
+
 	r.Use(customRecovery())
 	r.Use(corsMiddleware())
 	r.Use(requestLogger())
