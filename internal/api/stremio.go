@@ -56,7 +56,15 @@ func manifestHandler(c *gin.Context) {
 		"version":     cfg.AddonVersion,
 		"name":        cfg.AddonName,
 		"description": cfg.AddonDescription,
-		"resources":   []string{"catalog", "meta", "stream"},
+		"resources": []interface{}{
+			"catalog",
+			gin.H{
+				"name":       "meta",
+				"types":      []string{"series", "movie"},
+				"idPrefixes": []string{cfg.AddonID},
+			},
+			"stream",
+		},
 		"types":       []string{"series", "movie"},
 		"catalogs": []gin.H{
 			{
@@ -203,111 +211,38 @@ func metaHandler(c *gin.Context) {
 	id := strings.TrimSuffix(c.Param("id"), ".json")
 	cfg := config.Load()
 
-	// Strip pending prefixes if looking up unlinked threads
-	pendingPrefix := cfg.AddonID + ":pending:"
-	cleanID := id
-	if strings.HasPrefix(id, pendingPrefix) {
-		cleanID = strings.TrimPrefix(id, pendingPrefix)
-	}
-
-	var meta database.TmdbMetadata
-	err := database.DB.Where("imdb_id = ? OR tmdb_id = ?", cleanID, cleanID).Preload("Threads").First(&meta).Error
-	if err != nil {
-		// If direct metadata lookup fails, check if the ID refers to a pending/unlinked ThreadHash
-		var t database.Thread
-		errThread := database.DB.Where("thread_hash = ?", cleanID).First(&t).Error
-		if errThread == nil {
-			// Return a safe placeholder metadata response for pending items
-			metaObj := gin.H{
-				"id":          id,
-				"type":        t.Type,
-				"name":        t.RawTitle,
-				"poster":      cfg.PlaceholderPoster,
-				"description": "Pending metadata match. You can link this manually in the administration rescue panel.",
-			}
-			if t.Year != nil {
-				metaObj["year"] = *t.Year
-			}
-			c.JSON(http.StatusOK, gin.H{"meta": metaObj})
-			return
-		}
-
-		// It is compliant with Stremio specifications to return a 404 for missing metadata
+	// Our addon should never handle metadata for linked items (IMDb/TMDB IDs).
+	// We only provide safe placeholder metadata for unrecognized, custom pending IDs.
+	if !strings.Contains(id, ":pending:") {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Metadata not found"})
 		return
 	}
 
-	// Optimized unmarshaling replacing map[string]interface{}
-	var details tmdbLightData
-	if errJson := json.Unmarshal([]byte(meta.Data), &details); errJson != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse TMDB data payload"})
+	cleanID := id
+	if idx := strings.Index(id, ":pending:"); idx != -1 {
+		cleanID = id[idx+len(":pending:"):]
+	}
+
+	// Verify if the ID refers to a pending/unlinked ThreadHash
+	var t database.Thread
+	errThread := database.DB.Where("thread_hash = ?", cleanID).First(&t).Error
+	if errThread != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Metadata not found"})
 		return
 	}
 
-	poster := cfg.PlaceholderPoster
-	if details.PosterPath != "" {
-		poster = "https://image.tmdb.org/t/p/w500" + details.PosterPath
-	}
-
-	overview := details.Overview
-
-	// Determine matching media type
-	mediaType := "movie"
-	if len(meta.Threads) > 0 {
-		mediaType = meta.Threads[0].Type
-	}
-
-	displayName := details.Title
-	if displayName == "" {
-		displayName = details.Name
-	}
-
+	// Return a safe placeholder metadata response for pending items
 	metaObj := gin.H{
 		"id":          id,
-		"type":        mediaType,
-		"name":        displayName,
-		"poster":      poster,
-		"description": overview,
-		"year":        meta.Year,
+		"type":        t.Type,
+		"name":        t.RawTitle,
+		"poster":      cfg.PlaceholderPoster,
+		"description": "Pending metadata match. You can link this manually in the administration rescue panel.",
 	}
-
-	if mediaType == "series" {
-		// Fetch linked streams to build the Stremio series videos episodic navigation
-		var streams []database.Stream
-		_ = database.DB.Where("tmdb_id = ?", meta.TmdbID).Order("season ASC, episode ASC").Find(&streams)
-
-		videos := make([]gin.H, 0)
-		seen := make(map[string]bool)
-
-		for _, s := range streams {
-			if s.Season != nil && s.Episode != nil {
-				sVal := *s.Season
-				eVal := *s.Episode
-				endVal := eVal
-				if s.EpisodeEnd != nil {
-					endVal = *s.EpisodeEnd
-				}
-
-				// Generate chronological sequence mapping for episode ranges (packs)
-				for ep := eVal; ep <= endVal; ep++ {
-					vKey := fmt.Sprintf("%d:%d", sVal, ep)
-					if seen[vKey] {
-						continue
-					}
-					seen[vKey] = true
-
-					videos = append(videos, gin.H{
-						"id":      fmt.Sprintf("%s:%d:%d", id, sVal, ep),
-						"season":  sVal,
-						"episode": ep,
-						"title":   fmt.Sprintf("Season %d - Episode %d", sVal, ep),
-					})
-				}
-			}
-		}
-		metaObj["videos"] = videos
+	if t.Year != nil {
+		metaObj["year"] = *t.Year
 	}
-
+	
 	c.JSON(http.StatusOK, gin.H{"meta": metaObj})
 }
 
@@ -315,11 +250,10 @@ func streamHandler(c *gin.Context) {
 	id := strings.TrimSuffix(c.Param("id"), ".json")
 	cfg := config.Load()
 
-	// Strip pending prefix if looking up unlinked thread streams
-	pendingPrefix := cfg.AddonID + ":pending:"
+	// Strip pending prefix robustly if looking up unlinked thread streams
 	cleanID := id
-	if strings.HasPrefix(id, pendingPrefix) {
-		cleanID = strings.TrimPrefix(id, pendingPrefix)
+	if idx := strings.Index(id, ":pending:"); idx != -1 {
+		cleanID = id[idx+len(":pending:"):]
 	}
 
 	var baseID string
