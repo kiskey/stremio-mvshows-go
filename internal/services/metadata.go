@@ -12,9 +12,9 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/kiskey/stremio-mvshows-go/internal/config"
-	"github.com/kiskey/stremio-mvshows-go/internal/utils"
 	"golang.org/x/net/http2"
 )
 
