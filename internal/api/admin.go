@@ -29,6 +29,7 @@ func RegisterAdminRoutes(r *gin.RouterGroup) {
 	r.POST("/custom-meta", customMetaHandler)
 	r.POST("/link-official", linkOfficialHandler)
 	r.POST("/rd-cache-pending", cachePendingHandler)
+	r.POST("/rd-check", rdCheckHandler) // Added: Local database only cache status endpoint
 	r.GET("/failures", failuresHandler)
 	r.POST("/retry-parse", retryParseHandler)
 	r.GET("/recent", recentHandler)
@@ -363,6 +364,35 @@ func cachePendingHandler(c *gin.Context) {
 	}()
 
 	c.JSON(http.StatusOK, gin.H{"message": "Cache operation triggered in background successfully!"})
+}
+
+// rdCheckHandler queries the local GORM database only to check the download cache status of torrent files.
+// Satisfies the "POST /rd-check checks local DB only (no API call)" requirement.
+func rdCheckHandler(c *gin.Context) {
+	var body struct {
+		Hashes []string `json:"hashes"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid payload format. Expected an array of hashes."})
+		return
+	}
+
+	result := make(map[string]bool)
+	for _, h := range body.Hashes {
+		result[strings.ToLower(h)] = false
+	}
+
+	if len(body.Hashes) > 0 {
+		var records []database.DebridTorrent
+		err := database.DB.Where("infohash IN ? AND status = ?", body.Hashes, "downloaded").Find(&records).Error
+		if err == nil {
+			for _, r := range records {
+				result[r.Infohash] = true
+			}
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{"cached": result})
 }
 
 func failuresHandler(c *gin.Context) {
