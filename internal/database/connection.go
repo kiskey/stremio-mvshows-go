@@ -15,7 +15,7 @@ import (
 var DB *gorm.DB
 
 // Init initializes the SQLite database, configures WAL mode and connection pools, and runs AutoMigrate.
-// Includes a self-healing schema recovery handler to survive persistent volume corruption.
+// Includes a self-healing schema recovery handler to survive persistent volume corruption and datatype mismatch errors.
 func Init(dbPath string, level gormlogger.LogLevel) (*gorm.DB, error) {
 	// Ensure the parent directory exists
 	dir := filepath.Dir(dbPath)
@@ -70,12 +70,18 @@ func Init(dbPath string, level gormlogger.LogLevel) (*gorm.DB, error) {
 		&MagnetCache{},
 		&TorboxIdMap{},
 	)
+
+	if err == nil {
+		// Run table integrity check to catch hidden legacy schema datatype mismatches (e.g., SQLite Error 20)
+		err = verifyTableIntegrity(DB)
+	}
 	
 	// ── SELF-HEALING SCHEMA RECOVERY ──
-	// If AutoMigrate fails, it is almost certainly due to legacy schema mismatches or foreign key constraints
-	// created in previous versions. We close the connection, backup the file, and rebuild a pristine DB.
+	// If AutoMigrate or integrity verification fails, it is almost certainly due to legacy schema mismatches,
+	// foreign key constraints, or datatype mismatches created in previous versions.
+	// We close the connection, backup the file, and rebuild a pristine DB.
 	if err != nil {
-		log.Printf("WARNING: Database migration failed (likely due to legacy SQLite schema corruption): %v", err)
+		log.Printf("WARNING: Database migration or integrity verification failed: %v", err)
 		log.Println("Attempting database schema recovery: backing up old database and starting fresh.")
 		
 		// Close GORM connection safely
@@ -95,4 +101,22 @@ func Init(dbPath string, level gormlogger.LogLevel) (*gorm.DB, error) {
 	DB.Exec(`CREATE UNIQUE INDEX IF NOT EXISTS idx_stream_unique ON streams(tmdb_id, season, episode, infohash)`)
 
 	return DB, nil
+}
+
+// verifyTableIntegrity tests writing a text value to tmdb_id in TmdbMetadata to detect INTEGER primary key affinity corruption.
+func verifyTableIntegrity(db *gorm.DB) error {
+	// Clean up any stray dummy record from a previous abrupt crash
+	_ = db.Unscoped().Where("tmdb_id = ?", "tv:test_integrity_dummy").Delete(&TmdbMetadata{}).Error
+
+	dummy := TmdbMetadata{
+		TmdbID: "tv:test_integrity_dummy",
+		Data:   "{}",
+	}
+	err := db.Create(&dummy).Error
+	if err != nil {
+		return err
+	}
+	// Clean up the dummy record
+	_ = db.Unscoped().Delete(&dummy).Error
+	return nil
 }
