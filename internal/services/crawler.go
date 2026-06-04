@@ -1,9 +1,10 @@
 package crawler
 
 import (
+	"crypto/tls"
 	"errors"
 	"fmt"
-	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -19,6 +20,7 @@ import (
 	"github.com/kiskey/stremio-mvshows-go/internal/database"
 	"github.com/kiskey/stremio-mvshows-go/internal/services/parser"
 	"github.com/kiskey/stremio-mvshows-go/internal/utils"
+	"golang.org/x/net/http2"
 )
 
 type CrawledThread struct {
@@ -52,15 +54,41 @@ func RoundRobinProxySwitcher(proxies []string) (colly.ProxyFunc, error) {
 	}, nil
 }
 
+// createOptimizedScraperTransport configures an http.Transport optimized for low latency and high concurrency
+func createOptimizedScraperTransport() *http.Transport {
+	transport := &http.Transport{
+		DialContext: (&net.Dialer{
+			Timeout:   5 * time.Second,  // Faster connect timeout
+			KeepAlive: 30 * time.Second, // Consistent keep-alive
+		}).DialContext,
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   100,              // Critical for scraping multiple pages of same host concurrently
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   3 * time.Second,  // Faster TLS handshakes
+		ExpectContinueTimeout: 1 * time.Second,
+		ForceAttemptHTTP2:     true,             // Force HTTP/2 attempt
+		TLSClientConfig: &tls.Config{
+			MinVersion: tls.VersionTLS12,
+		},
+	}
+	// Explicitly configure HTTP/2 transport settings
+	_ = http2.ConfigureTransport(transport)
+	return transport
+}
+
 // RunCrawler executes the asynchronous forum crawl based on the current configuration.
 func RunCrawler(cfg *config.Config) ([]CrawledThread, error) {
 	var crawled []CrawledThread
+	seenHashes := make(map[string]bool) // O(1) deduplication to replace inefficient slice sweeps
 	var mu sync.Mutex
 
 	c := colly.NewCollector(
 		colly.Async(true),
 		colly.MaxDepth(2),
 	)
+
+	// Inject our highly optimized HTTP/2 transport into Colly
+	c.WithTransport(createOptimizedScraperTransport())
 
 	// Set request timeout
 	c.SetRequestTimeout(time.Duration(cfg.ScraperTimeoutSecs) * time.Second)
@@ -171,15 +199,9 @@ func RunCrawler(cfg *config.Config) ([]CrawledThread, error) {
 			}
 
 			mu.Lock()
-			// Prevent duplicate additions in the same scraping window
-			isDup := false
-			for _, t := range crawled {
-				if t.ThreadHash == hash {
-					isDup = true
-					break
-				}
-			}
-			if !isDup {
+			// Highly optimized O(1) duplicate check to eliminate previous O(N^2) slice sweeps
+			if !seenHashes[hash] {
+				seenHashes[hash] = true
 				crawled = append(crawled, CrawledThread{
 					ThreadHash: hash,
 					RawTitle:   rawTitle,
