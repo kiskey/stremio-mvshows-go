@@ -34,7 +34,14 @@ jobs:
           git config --global --unset-all url."git@github.com:".insteadOf || true
           git config --global --unset-all url."https://github.com/".insteadOf || true
 
-          # Dynamically generates a fresh, correct go.sum file from the public proxy
+          # Remove the hardcoded non-existent v1.0.0 version from go.mod first to prevent Go validation crash
+          sed -i '/releasetitleparser/d' go.mod || true
+
+          # Fetch the latest commit on master/main branch of releasetitleparser dynamically.
+          # Go will resolve the branch to the exact latest commit and automatically write the correct pseudo-version.
+          go get github.com/ovrlord-app/releasetitleparser@master || go get github.com/ovrlord-app/releasetitleparser@main
+
+          # Tidy up go.mod and download dependencies cleanly
           go mod tidy
           go mod download
 
