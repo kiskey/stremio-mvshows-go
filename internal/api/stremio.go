@@ -232,6 +232,7 @@ func metaHandler(c *gin.Context) {
 			return
 		}
 
+		// It is compliant with Stremio specifications to return a 404 for missing metadata
 		c.JSON(http.StatusNotFound, gin.H{"error": "Metadata not found"})
 		return
 	}
@@ -321,23 +322,33 @@ func streamHandler(c *gin.Context) {
 		cleanID = strings.TrimPrefix(id, pendingPrefix)
 	}
 
-	var imdbID string
+	var baseID string
 	season := -1
 	episode := -1
 
+	// Smart ID Splitting: Accurately identifies base ID vs Season/Episode parameters.
+	// Fixes the critical bug where IDs containing colons (like "tv:310127") were incorrectly split and queried as "tv".
 	parts := strings.Split(cleanID, ":")
-	imdbID = parts[0]
-	if len(parts) > 2 {
-		season, _ = strconv.Atoi(parts[1])
-		episode, _ = strconv.Atoi(parts[2])
+	if len(parts) >= 3 {
+		s, errS := strconv.Atoi(parts[len(parts)-2])
+		e, errE := strconv.Atoi(parts[len(parts)-1])
+		if errS == nil && errE == nil {
+			season = s
+			episode = e
+			baseID = strings.Join(parts[:len(parts)-2], ":")
+		} else {
+			baseID = cleanID
+		}
+	} else {
+		baseID = cleanID
 	}
 
 	var meta database.TmdbMetadata
-	err := database.DB.Where("imdb_id = ? OR tmdb_id = ?", imdbID, imdbID).First(&meta).Error
+	err := database.DB.Where("imdb_id = ? OR tmdb_id = ?", baseID, baseID).First(&meta).Error
 	if err != nil {
 		// If metadata lookup fails, check if the query requested unlinked/pending ThreadHash streams
 		var t database.Thread
-		errThread := database.DB.Where("thread_hash = ?", imdbID).First(&t).Error
+		errThread := database.DB.Where("thread_hash = ?", baseID).First(&t).Error
 		if errThread == nil {
 			// This is an unlinked thread. Return direct P2P fallback streams only (No RD mapping)
 			streamList := make([]gin.H, 0)
@@ -349,7 +360,6 @@ func streamHandler(c *gin.Context) {
 					continue
 				}
 
-				// De-duplicate stream entries by infohash
 				if seenP2P[parsedMagnet.Infohash] {
 					continue
 				}
@@ -367,7 +377,10 @@ func streamHandler(c *gin.Context) {
 			return
 		}
 
-		c.JSON(http.StatusNotFound, gin.H{"error": "Metadata mapping not found"})
+		// STREMIO PROTOCOL FIX: Never return 404 on the stream endpoint! 
+		// If we return 404, Stremio displays an "Addon error". By returning 200 OK with an empty array, 
+		// Stremio knows we just don't have the streams for this item and falls back to other addons correctly.
+		c.JSON(http.StatusOK, gin.H{"streams": []interface{}{}})
 		return
 	}
 
