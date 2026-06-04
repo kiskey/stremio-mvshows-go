@@ -21,8 +21,27 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.22'
+          go-version: '1.25' # Upgraded to match the 1.25 constraint of the parser
           cache: true # Caches Go modules automatically to accelerate builds
+
+      - name: Normalize Directory Layout
+        run: |
+          # Self-Healing Directory Normalization:
+          # If the files are in a flat layout under internal/services/, we dynamically move
+          # them into their matching subdirectories to align with Go's compiler path rules.
+          mkdir -p internal/services/crawler \
+                   internal/services/metadata \
+                   internal/services/orchestrator \
+                   internal/services/tracker \
+                   internal/services/maintenance
+          
+          [ -f internal/services/crawler.go ] && mv internal/services/crawler.go internal/services/crawler/crawler.go || true
+          [ -f internal/services/metadata.go ] && mv internal/services/metadata.go internal/services/metadata/metadata.go || true
+          [ -f internal/services/orchestrator.go ] && mv internal/services/orchestrator.go internal/services/orchestrator/orchestrator.go || true
+          [ -f internal/services/tracker.go ] && mv internal/services/tracker.go internal/services/tracker/tracker.go || true
+          [ -f internal/services/maintenance.go ] && mv internal/services/maintenance.go internal/services/maintenance/maintenance.go || true
+          
+          echo "Directory structure normalized successfully."
 
       - name: Generate Go Sum File
         env:
