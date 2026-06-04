@@ -2,9 +2,7 @@ package crawler
 
 import (
 	"crypto/tls"
-	"errors"
 	"fmt"
-	"io"
 	"net"
 	"net/http"
 	"net/url"
@@ -30,6 +28,28 @@ type CrawledThread struct {
 	Type       string
 	PostedAt   *time.Time
 	CatalogID  string
+}
+
+// RoundRobinProxySwitcher returns a thread-safe Colly ProxyFunc rotating through provided proxy strings.
+func RoundRobinProxySwitcher(proxies []string) (colly.ProxyFunc, error) {
+	if len(proxies) == 0 {
+		return nil, fmt.Errorf("proxy list is empty")
+	}
+
+	var urls []*url.URL
+	for _, p := range proxies {
+		parsed, err := url.Parse(p)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse proxy URL '%s': %w", p, err)
+		}
+		urls = append(urls, parsed)
+	}
+
+	var index uint64
+	return func(pr *http.Request) (*url.URL, error) {
+		idx := atomic.AddUint64(&index, 1) - 1
+		return urls[idx%uint64(len(urls))], nil
+	}, nil
 }
 
 // createOptimizedScraperTransport configures an http.Transport optimized for low latency and high concurrency
@@ -322,27 +342,6 @@ func dumpDebugHTML(urlStr string, body []byte) {
 	}
 	filename := filepath.Join(dir, fmt.Sprintf("%d_%s.html", time.Now().Unix(), escaped))
 	_ = os.WriteFile(filename, body, 0644)
-}
-
-type ProxyTransport struct {
-	ProxyURLs []string
-	index     uint64
-	Base      http.RoundTripper
-}
-
-func (pt *ProxyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	idx := atomic.AddUint64(&pt.index, 1) - 1
-	proxyURLStr := pt.ProxyURLs[idx%uint64(len(pt.ProxyURLs))]
-
-	proxyURL, err := url.Parse(proxyURLStr)
-	if err != nil {
-		return nil, err
-	}
-
-	transport := &http.Transport{
-		Proxy: http.ProxyURL(proxyURL),
-	}
-	return transport.RoundTrip(req)
 }
 
 // ConvertToProxyPostRequest converts a standard GET requests to a proxy POST request body matching custom pre-navigation rules if required
