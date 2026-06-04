@@ -17,7 +17,6 @@ import (
 	"github.com/PuerkitoBio/goquery"
 	"github.com/gocolly/colly/v2"
 	"github.com/kiskey/stremio-mvshows-go/internal/config"
-	"github.com/kiskey/stremio-mvshows-go/internal/database"
 	"github.com/kiskey/stremio-mvshows-go/internal/services/parser"
 	"github.com/kiskey/stremio-mvshows-go/internal/utils"
 	"golang.org/x/net/http2"
@@ -130,16 +129,23 @@ func RunCrawler(cfg *config.Config) ([]CrawledThread, error) {
 
 	// Cloudflare challenge and anti-bot block page validation.
 	// Intercepts captcha pages, logs the blocked proxy, and schedules a retry with backoff.
+	// Uses request context storage to keep track of retries.
 	c.OnResponse(func(r *colly.Response) {
 		bodyStr := string(r.Body)
 		if strings.Contains(bodyStr, "cloudflare") && (strings.Contains(bodyStr, "captcha") || strings.Contains(bodyStr, "challenge-platform") || strings.Contains(bodyStr, "Access denied")) {
-			if r.Request.RetryCount < cfg.ScraperRetryCount {
-				r.Request.RetryCount++
-				backoff := time.Duration(r.Request.RetryCount*r.Request.RetryCount) * 2 * time.Second
+			retryCount := 0
+			if val, ok := r.Request.Ctx.GetAny("retry_count").(int); ok {
+				retryCount = val
+			}
+
+			if retryCount < cfg.ScraperRetryCount {
+				retryCount++
+				r.Request.Ctx.Put("retry_count", retryCount)
+				backoff := time.Duration(retryCount*retryCount) * 2 * time.Second
 				utils.Logger.Warn().
 					Str("url", r.Request.URL.String()).
 					Str("proxy", r.Request.ProxyURL).
-					Int("retry_count", r.Request.RetryCount).
+					Int("retry_count", retryCount).
 					Dur("backoff", backoff).
 					Msg("Cloudflare anti-bot block or challenge detected. Retrying request with backoff.")
 				time.Sleep(backoff)
@@ -155,13 +161,19 @@ func RunCrawler(cfg *config.Config) ([]CrawledThread, error) {
 
 	// Retry logic with exponential backoff on connection errors
 	c.OnError(func(r *colly.Response, err error) {
-		if r.Request.RetryCount < cfg.ScraperRetryCount {
-			r.Request.RetryCount++
-			backoff := time.Duration(r.Request.RetryCount*r.Request.RetryCount) * 2 * time.Second
+		retryCount := 0
+		if val, ok := r.Request.Ctx.GetAny("retry_count").(int); ok {
+			retryCount = val
+		}
+
+		if retryCount < cfg.ScraperRetryCount {
+			retryCount++
+			r.Request.Ctx.Put("retry_count", retryCount)
+			backoff := time.Duration(retryCount*retryCount) * 2 * time.Second
 			utils.Logger.Warn().
 				Str("url", r.Request.URL.String()).
 				Err(err).
-				Int("retry_count", r.Request.RetryCount).
+				Int("retry_count", retryCount).
 				Dur("backoff", backoff).
 				Msg("Request failed. Scheduling retry.")
 			time.Sleep(backoff)
@@ -186,13 +198,6 @@ func RunCrawler(cfg *config.Config) ([]CrawledThread, error) {
 		threadContainer := e.DOM.Closest(".ipsDataItem")
 		timeEl := threadContainer.Find("time[datetime]")
 		postedAtStr, _ := timeEl.Attr("datetime")
-
-		var postedAt *time.Time
-		if postedAtStr != "" {
-			if t, errDate := time.Parse(time.RFC3339, postedAtStr); errDate == nil {
-				postedAt = &t
-			}
-		}
 
 		if link != "" && rawTitle != "" {
 			// Propagate catalog attributes context thread-safely
