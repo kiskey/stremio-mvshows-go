@@ -68,7 +68,7 @@ type Thread struct {
 	RawTitle          string          `gorm:"not null" json:"raw_title"`
 	CleanTitle        string          `gorm:"index" json:"clean_title"`
 	Year              *int            `gorm:"index" json:"year"`
-	TmdbID            *string         `gorm:"index" json:"tmdb_id"`
+	TmdbID            *string         `gorm:"type:text;index" json:"tmdb_id"`
 	Status            string          `gorm:"not null;default:'linked';index" json:"status"`
 	Type              string          `gorm:"not null;default:'series';index" json:"type"`
 	PostedAt          *time.Time      `gorm:"index" json:"posted_at"`
@@ -85,7 +85,7 @@ type Thread struct {
 func (Thread) TableName() string { return "threads" }
 
 type TmdbMetadata struct {
-	TmdbID    string    `gorm:"primaryKey" json:"tmdb_id"`
+	TmdbID    string    `gorm:"primaryKey;type:text" json:"tmdb_id"`
 	ImdbID    *string   `gorm:"uniqueIndex" json:"imdb_id"` // Changed to pointer (*string) to allow safe database NULL inserts instead of conflicting ""
 	Year      *int      `gorm:"index" json:"year"`
 	Data      string    `gorm:"type:text;not null" json:"data"` // Full JSON metadata payload
@@ -98,7 +98,7 @@ func (TmdbMetadata) TableName() string { return "tmdb_metadata" }
 
 type Stream struct {
 	ID         uint   `gorm:"primaryKey;autoIncrement" json:"id"`
-	TmdbID     string `gorm:"uniqueIndex:idx_stream_unique;index;not null" json:"tmdb_id"`
+	TmdbID     string `gorm:"type:text;uniqueIndex:idx_stream_unique;index;not null" json:"tmdb_id"`
 	Season     *int   `gorm:"uniqueIndex:idx_stream_unique;index" json:"season"`
 	Episode    *int   `gorm:"uniqueIndex:idx_stream_unique;index" json:"episode"`
 	EpisodeEnd *int   `json:"episode_end"`
