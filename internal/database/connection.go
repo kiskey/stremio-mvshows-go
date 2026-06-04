@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"gorm.io/driver/sqlite"
+	"github.com/glebarez/sqlite" // Pure-Go GORM SQLite driver
 	"gorm.io/gorm"
 	gormlogger "gorm.io/gorm/logger"
 )
@@ -42,16 +42,18 @@ func Init(dbPath string, level gormlogger.LogLevel) (*gorm.DB, error) {
 		return nil, err
 	}
 
-	// Optimize SQLite performance and concurrent read/write throughput
-	sqlDB.SetMaxOpenConns(1) // SQLite works best with serialized writes
-	sqlDB.SetMaxIdleConns(1)
+	// Optimize SQLite performance for concurrent read throughput under multi-threaded Go execution.
+	// Raising MaxOpenConns from 1 to 20 unblocks concurrent reads, while SQLite's WAL mode and busy_timeout
+	// safely handle queueing any concurrent write transactions.
+	sqlDB.SetMaxOpenConns(20) 
+	sqlDB.SetMaxIdleConns(5)
 	sqlDB.SetConnMaxLifetime(time.Hour)
 
-	// Enable WAL (Write-Ahead Logging) for safe concurrent reads/writes
+	// Enable WAL (Write-Ahead Logging) for safe, concurrent read/write transactions
 	DB.Exec("PRAGMA journal_mode=WAL;")
 	DB.Exec("PRAGMA synchronous=NORMAL;")
 	DB.Exec("PRAGMA foreign_keys=ON;")
-	DB.Exec("PRAGMA busy_timeout=5000;")
+	DB.Exec("PRAGMA busy_timeout=5000;") // Wait up to 5s for locks to clear before throwing an error
 
 	// AutoMigrate all tables
 	err = DB.AutoMigrate(
