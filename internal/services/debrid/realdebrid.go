@@ -1,14 +1,17 @@
 package debrid
 
 import (
-	"encoding/json"
+	"crypto/tls"
 	"fmt"
+	"net"
+	"net/http"
 	"strings"
 	"time"
 
 	"github.com/go-resty/resty/v2"
 	"github.com/kiskey/stremio-mvshows-go/internal/config"
 	"github.com/kiskey/stremio-mvshows-go/internal/utils"
+	"golang.org/x/net/http2"
 )
 
 type RealDebridProvider struct {
@@ -17,12 +20,40 @@ type RealDebridProvider struct {
 	enabled bool
 }
 
+// createOptimizedRDHTTPClient configures an transport optimized for low latency and high concurrency
+func createOptimizedRDHTTPClient(timeout time.Duration) *http.Client {
+	transport := &http.Transport{
+		DialContext: (&net.Dialer{
+			Timeout:   5 * time.Second,  // Faster connect timeout
+			KeepAlive: 30 * time.Second, // Consistent keep-alive
+		}).DialContext,
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   100,              // Avoid connection starvation under concurrency
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   3 * time.Second,  // Faster TLS handshakes
+		ExpectContinueTimeout: 1 * time.Second,
+		ForceAttemptHTTP2:     true,             // Force HTTP/2 attempt
+		TLSClientConfig: &tls.Config{
+			MinVersion: tls.VersionTLS12,
+		},
+	}
+	// Explicitly configure HTTP/2 transport settings
+	_ = http2.ConfigureTransport(transport)
+
+	return &http.Client{
+		Transport: transport,
+		Timeout:   timeout,
+	}
+}
+
 func NewRealDebridProvider(cfg *config.Config) *RealDebridProvider {
+	httpClient := createOptimizedRDHTTPClient(15 * time.Second)
+	restyClient := resty.NewWithClient(httpClient).
+		SetBaseURL("https://api.real-debrid.com/rest/1.0").
+		SetHeader("Authorization", "Bearer "+cfg.RealDebridAPIKey)
+
 	return &RealDebridProvider{
-		client: resty.New().
-			SetBaseURL("https://api.real-debrid.com/rest/1.0").
-			SetTimeout(15 * time.Second).
-			SetHeader("Authorization", "Bearer "+cfg.RealDebridAPIKey),
+		client:  restyClient,
 		apiKey:  cfg.RealDebridAPIKey,
 		enabled: cfg.IsRDEnabled,
 	}
@@ -183,7 +214,6 @@ func (r *RealDebridProvider) CheckCached(hashes []string) (map[string]CacheInfo,
 }
 
 func (r *RealDebridProvider) GetCachedFileInfo(hash, fileName string) (*FileInfo, error) {
-	// Optional method, used internally if needed
 	return nil, ErrNotSupported
 }
 
