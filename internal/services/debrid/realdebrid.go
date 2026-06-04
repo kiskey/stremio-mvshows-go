@@ -1,268 +1,261 @@
 package debrid
 
 import (
-	"crypto/tls"
+	"context"
+	"encoding/json"
 	"fmt"
-	"net"
 	"net/http"
+	"net/url"
 	"strings"
+	"sync"
 	"time"
 
-	"github.com/go-resty/resty/v2"
 	"github.com/kiskey/stremio-mvshows-go/internal/config"
 	"github.com/kiskey/stremio-mvshows-go/internal/utils"
-	"golang.org/x/net/http2"
 )
 
-type RealDebridProvider struct {
-	client  *resty.Client
-	apiKey  string
-	enabled bool
-}
-
-// createOptimizedRDHTTPClient configures an transport optimized for low latency and high concurrency
-func createOptimizedRDHTTPClient(timeout time.Duration) *http.Client {
-	transport := &http.Transport{
-		DialContext: (&net.Dialer{
-			Timeout:   5 * time.Second,  // Faster connect timeout
-			KeepAlive: 30 * time.Second, // Consistent keep-alive
-		}).DialContext,
-		MaxIdleConns:          100,
-		MaxIdleConnsPerHost:   100,              // Avoid connection starvation under concurrency
-		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:   3 * time.Second,  // Faster TLS handshakes
-		ExpectContinueTimeout: 1 * time.Second,
-		ForceAttemptHTTP2:     true,             // Force HTTP/2 attempt
-		TLSClientConfig: &tls.Config{
-			MinVersion: tls.VersionTLS12,
-		},
-	}
-	// Explicitly configure HTTP/2 transport settings
-	_ = http2.ConfigureTransport(transport)
-
-	return &http.Client{
-		Transport: transport,
-		Timeout:   timeout,
+type realDebridProvider struct {
+	client       *http.Client
+	torrentCache struct {
+		mu        sync.RWMutex
+		data      []Torrent
+		fetchedAt time.Time
 	}
 }
 
-func NewRealDebridProvider(cfg *config.Config) *RealDebridProvider {
-	httpClient := createOptimizedRDHTTPClient(15 * time.Second)
-	restyClient := resty.NewWithClient(httpClient).
-		SetBaseURL("https://api.real-debrid.com/rest/1.0").
-		SetHeader("Authorization", "Bearer "+cfg.RealDebridAPIKey)
-
-	return &RealDebridProvider{
-		client:  restyClient,
-		apiKey:  cfg.RealDebridAPIKey,
-		enabled: cfg.IsRDEnabled,
+func NewRealDebrid() Provider {
+	return &realDebridProvider{
+		client: utils.NewOptimizedClient(15 * time.Second),
 	}
 }
 
-func (r *RealDebridProvider) IsEnabled() bool {
-	return r.enabled && r.apiKey != ""
+func (r *realDebridProvider) IsEnabled() bool {
+	return config.IsRDEnabled
 }
 
-// ── Real-Debrid API Models ──
-
-type rdAddMagnetResponse struct {
-	ID  string `json:"id"`
-	URI string `json:"uri"`
-}
-
-type rdTorrentFile struct {
-	ID       int    `json:"id"`
-	Path     string `json:"path"`
-	Bytes    int64  `json:"bytes"`
-	Selected int    `json:"selected"`
-}
-
-type rdTorrentInfo struct {
-	ID       string          `json:"id"`
-	Filename string          `json:"filename"`
-	Status   string          `json:"status"`
-	Files    []rdTorrentFile `json:"files"`
-	Links    []string        `json:"links"`
-}
-
-type rdUnrestrictResponse struct {
-	Download string `json:"download"`
-}
-
-// ── Provider Interface Implementation ──
-
-func (r *RealDebridProvider) AddMagnet(magnet string) (*AddResult, error) {
-	var result rdAddMagnetResponse
-	resp, err := r.client.R().
-		SetFormData(map[string]string{"magnet": magnet}).
-		SetResult(&result).
-		Post("/torrents/addMagnet")
-
+func (r *realDebridProvider) do(ctx context.Context, method, path string, body string) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, method, "https://api.real-debrid.com/rest/1.0"+path, strings.NewReader(body))
 	if err != nil {
 		return nil, err
 	}
-	if resp.StatusCode() != 201 {
-		return nil, fmt.Errorf("RD addMagnet failed with status %d: %s", resp.StatusCode(), resp.String())
+	req.Header.Set("Authorization", "Bearer "+config.RealDebridAPIKey)
+	if body != "" {
+		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	}
-
-	return &AddResult{
-		ID:   result.ID,
-		Hash: "", // RD doesn't return hash in addMagnet directly, retrieved in GetTorrentInfo if needed
-		Name: "",
-	}, nil
+	return r.client.Do(req)
 }
 
-func (r *RealDebridProvider) GetTorrentInfo(id string) (*TorrentInfo, error) {
-	var info rdTorrentInfo
-	resp, err := r.client.R().
-		SetResult(&info).
-		Get("/torrents/info/" + id)
-
+func (r *realDebridProvider) AddMagnet(ctx context.Context, magnet string) (*AddResult, error) {
+	body := "magnet=" + url.QueryEscape(magnet)
+	resp, err := r.do(ctx, "POST", "/torrents/addMagnet", body)
 	if err != nil {
 		return nil, err
 	}
-	if resp.StatusCode() == 404 {
+	defer resp.Body.Close()
+	if resp.StatusCode != 201 {
+		return nil, fmt.Errorf("addMagnet status %d", resp.StatusCode)
+	}
+	var data map[string]interface{}
+	if err := rdJsonDecode(resp, &data); err != nil {
+		return nil, err
+	}
+	id, _ := data["id"].(string)
+	utils.Logger.Info("real-debrid magnet added", "id", id)
+	return &AddResult{ID: id}, nil
+}
+
+func (r *realDebridProvider) GetTorrentInfo(ctx context.Context, id string) (*TorrentInfo, error) {
+	resp, err := r.do(ctx, "GET", "/torrents/info/"+id, "")
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == 404 {
 		return nil, ErrResourceNotFound
 	}
-	if resp.StatusCode() != 200 {
-		return nil, fmt.Errorf("RD getTorrentInfo failed with status %d: %s", resp.StatusCode(), resp.String())
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("getTorrentInfo status %d", resp.StatusCode)
 	}
-
-	files := make([]TorrentFile, len(info.Files))
-	for i, f := range info.Files {
-		files[i] = TorrentFile{
-			ID:       f.ID,
-			Path:     f.Path,
-			Bytes:    f.Bytes,
-			Selected: f.Selected,
-		}
+	var data map[string]interface{}
+	if err := rdJsonDecode(resp, &data); err != nil {
+		return nil, err
 	}
-
-	return &TorrentInfo{
-		ID:       info.ID,
-		Filename: info.Filename,
-		Status:   mapRealDebridStatus(info.Status),
-		Files:    files,
-		Links:    info.Links,
-	}, nil
+	return mapRDInfo(data), nil
 }
 
-func (r *RealDebridProvider) SelectFiles(id string, fileIds string) error {
-	resp, err := r.client.R().
-		SetFormData(map[string]string{"files": fileIds}).
-		Post("/torrents/selectFiles/" + id)
+func mapRDInfo(data map[string]interface{}) *TorrentInfo {
+	info := &TorrentInfo{}
+	info.ID, _ = data["id"].(string)
+	info.Filename, _ = data["filename"].(string)
+	info.Status, _ = data["status"].(string)
+	if b, ok := data["bytes"].(float64); ok {
+		info.Bytes = int64(b)
+	}
+	if s, ok := data["seeders"].(float64); ok {
+		info.Seeders = int(s)
+	}
+	if filesRaw, ok := data["files"].([]interface{}); ok {
+		for _, f := range filesRaw {
+			fm, _ := f.(map[string]interface{})
+			fid, _ := fm["id"].(float64)
+			path, _ := fm["path"].(string)
+			bytes, _ := fm["bytes"].(float64)
+			
+			selected := 0
+			if sVal, ok := fm["selected"].(float64); ok {
+				selected = int(sVal)
+			}
 
+			info.Files = append(info.Files, FileInfo{
+				ID:       int(fid),
+				Path:     path,
+				Bytes:    int64(bytes),
+				Selected: selected,
+			})
+		}
+	}
+	if linksRaw, ok := data["links"].([]interface{}); ok {
+		for _, l := range linksRaw {
+			if ls, ok := l.(string); ok {
+				info.Links = append(info.Links, ls)
+			}
+		}
+	}
+	return info
+}
+
+func (r *realDebridProvider) SelectFiles(ctx context.Context, id string, fileIDs []string) error {
+	param := "all"
+	if len(fileIDs) > 0 && fileIDs[0] != "all" {
+		param = strings.Join(fileIDs, ",")
+	}
+	body := "files=" + param
+	resp, err := r.do(ctx, "POST", "/torrents/selectFiles/"+id, body)
 	if err != nil {
 		return err
 	}
-	if resp.StatusCode() == 404 {
-		return ErrResourceNotFound
+	defer resp.Body.Close()
+	if resp.StatusCode == 202 {
+		utils.Logger.Info("real-debrid files already selected", "id", id)
+		return nil
 	}
-	// 204 No Content is standard for selectFiles
-	if resp.StatusCode() != 204 && resp.StatusCode() != 200 {
-		return fmt.Errorf("RD selectFiles failed with status %d: %s", resp.StatusCode(), resp.String())
+	if resp.StatusCode != 204 {
+		return fmt.Errorf("selectFiles status %d", resp.StatusCode)
 	}
-
 	return nil
 }
 
-func (r *RealDebridProvider) UnrestrictLink(link string) (*UnrestrictResult, error) {
-	var result rdUnrestrictResponse
-	resp, err := r.client.R().
-		SetFormData(map[string]string{"link": link}).
-		SetResult(&result).
-		Post("/unrestrict/link")
-
+func (r *realDebridProvider) UnrestrictLink(ctx context.Context, link string) (*UnrestrictResult, error) {
+	body := "link=" + url.QueryEscape(link)
+	resp, err := r.do(ctx, "POST", "/unrestrict/link", body)
 	if err != nil {
 		return nil, err
 	}
-	if resp.StatusCode() != 200 {
-		return nil, fmt.Errorf("RD unrestrictLink failed with status %d: %s", resp.StatusCode(), resp.String())
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return nil, fmt.Errorf("unrestrict status %d", resp.StatusCode)
 	}
-
-	return &UnrestrictResult{
-		Download: result.Download,
-	}, nil
+	var data map[string]interface{}
+	if err := rdJsonDecode(resp, &data); err != nil {
+		return nil, err
+	}
+	dl, _ := data["download"].(string)
+	return &UnrestrictResult{Download: dl}, nil
 }
 
-func (r *RealDebridProvider) AddAndSelect(magnet string) (*TorrentInfo, error) {
-	addRes, err := r.AddMagnet(magnet)
+func (r *realDebridProvider) DeleteTorrent(ctx context.Context, id string) error {
+	resp, err := r.do(ctx, "DELETE", "/torrents/delete/"+id, "")
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	utils.Logger.Info("real-debrid torrent deleted", "id", id)
+	return nil
+}
+
+func (r *realDebridProvider) GetTorrents(ctx context.Context) ([]Torrent, error) {
+	resp, err := r.do(ctx, "GET", "/torrents", "")
 	if err != nil {
 		return nil, err
 	}
+	defer resp.Body.Close()
+	var data []map[string]interface{}
+	if err := rdJsonDecode(resp, &data); err != nil {
+		return nil, err
+	}
+	var torrents []Torrent
+	for _, t := range data {
+		id, _ := t["id"].(string)
+		hash, _ := t["hash"].(string)
+		name, _ := t["filename"].(string)
+		status, _ := t["status"].(string)
+		torrents = append(torrents, Torrent{ID: id, Hash: hash, Name: name, Status: status})
+	}
+	return torrents, nil
+}
 
-	// Wait briefly for RD to process metadata
-	time.Sleep(1 * time.Second)
+func (r *realDebridProvider) getCachedTorrents(ctx context.Context) ([]Torrent, error) {
+	r.torrentCache.mu.RLock()
+	if time.Since(r.torrentCache.fetchedAt) < 30*time.Second && r.torrentCache.data != nil {
+		defer r.torrentCache.mu.RUnlock()
+		return r.torrentCache.data, nil
+	}
+	r.torrentCache.mu.RUnlock()
 
-	err = r.SelectFiles(addRes.ID, "all")
+	torrents, err := r.GetTorrents(ctx)
 	if err != nil {
-		// If immediate selection fails (e.g. metadata still converting), wait and retry once
-		utils.Logger.Debug().Str("id", addRes.ID).Msg("RD selectFiles 'all' failed initially. Retrying after 2s pause.")
-		time.Sleep(2 * time.Second)
-		if retryErr := r.SelectFiles(addRes.ID, "all"); retryErr != nil {
-			return nil, retryErr
+		return nil, err
+	}
+	r.torrentCache.mu.Lock()
+	r.torrentCache.data = torrents
+	r.torrentCache.fetchedAt = time.Now()
+	r.torrentCache.mu.Unlock()
+	return torrents, nil
+}
+
+func (r *realDebridProvider) CheckCached(ctx context.Context, hashes []string) (map[string]CacheStatus, error) {
+	result := make(map[string]CacheStatus)
+	for _, h := range hashes {
+		result[h] = CacheStatus{Cached: false}
+	}
+
+	torrents, err := r.getCachedTorrents(ctx)
+	if err != nil {
+		return result, nil // soft fail: mark all uncached
+	}
+
+	// Build hash lookup
+	hashMap := make(map[string]Torrent)
+	for _, t := range torrents {
+		hashMap[strings.ToLower(t.Hash)] = t
+	}
+
+	for _, h := range hashes {
+		hLower := strings.ToLower(h)
+		if t, ok := hashMap[hLower]; ok {
+			cs := CacheStatus{Cached: true, TorrentID: t.ID, Name: t.Name}
+			result[h] = cs
 		}
 	}
-
-	return r.GetTorrentInfo(addRes.ID)
+	return result, nil
 }
 
-func (r *RealDebridProvider) CheckCached(hashes []string) (map[string]CacheInfo, error) {
-	// Real-Debrid does not support a batch cache-check endpoint;
-	// we return ErrNotSupported to leverage the unified database cache fallback.
-	return nil, ErrNotSupported
-}
-
-func (r *RealDebridProvider) GetCachedFileInfo(hash, fileName string) (*FileInfo, error) {
-	return nil, ErrNotSupported
-}
-
-func (r *RealDebridProvider) GetDownloadLinkForFile(torrentID string, fileID int) (string, error) {
-	info, err := r.GetTorrentInfo(torrentID)
+func (r *realDebridProvider) AddAndSelect(ctx context.Context, magnet string) (*TorrentInfo, error) {
+	addRes, err := r.AddMagnet(ctx, magnet)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-
-	// Real-Debrid links array corresponds index-wise to files inside the torrent.
-	// Filter selected files and match the requested index.
-	linkIndex := 0
-	matched := false
-	for _, f := range info.Files {
-		if f.Selected == 1 {
-			if f.ID == fileID {
-				matched = true
-				break
-			}
-			linkIndex++
-		}
-	}
-
-	if !matched || linkIndex >= len(info.Links) {
-		return "", fmt.Errorf("requested file ID %d is either not selected or links array is out of range", fileID)
-	}
-
-	unrestricted, err := r.UnrestrictLink(info.Links[linkIndex])
+	err = r.SelectFiles(ctx, addRes.ID, []string{"all"})
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-
-	return unrestricted.Download, nil
+	return r.GetTorrentInfo(ctx, addRes.ID)
 }
 
-// ── Real-Debrid Status Mapping Helper ──
+func (r *realDebridProvider) GetCachedFileInfo(ctx context.Context, hash, fileName string) (*FileInfo, error) {
+	return nil, fmt.Errorf("not supported for real-debrid")
+}
 
-func mapRealDebridStatus(rdStatus string) string {
-	s := strings.ToLower(rdStatus)
-	switch s {
-	case "magnet_conversion", "waiting_files_selection", "queued":
-		return "downloading"
-	case "downloading":
-		return "downloading"
-	case "downloaded", "compressing", "uploading":
-		return "downloaded"
-	case "error", "magnet_error", "dead":
-		return "error"
-	default:
-		return "downloading"
-	}
+func rdJsonDecode(resp *http.Response, v interface{}) error {
+	return json.NewDecoder(resp.Body).Decode(v)
 }
