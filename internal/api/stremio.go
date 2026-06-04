@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -456,6 +457,8 @@ func rdAddHandler(c *gin.Context) {
 		return
 	}
 
+	reqCtx := c.Request.Context()
+
 	// Check if already completely downloaded and saved locally in DebridTorrent table
 	var torrentRecord database.DebridTorrent
 	errRecord := database.DB.Where("infohash = ?", infohash).First(&torrentRecord).Error
@@ -463,15 +466,15 @@ func rdAddHandler(c *gin.Context) {
 		// Update LastChecked timestamp to indicate active access hit (extending cache TTL)
 		database.DB.Model(&torrentRecord).Update("last_checked", time.Now())
 
-		dlLink := getDebridCachedLink(&torrentRecord, season, episode, isMovie)
-		if dlLink != "" {
+		dlLink, errCachedLink := getDebridCachedLink(reqCtx, &torrentRecord, season, episode, isMovie)
+		if errCachedLink == nil && dlLink != "" {
 			c.Redirect(http.StatusFound, dlLink)
 			return
 		}
 	}
 
 	// Add and Select magnet on Debrid Provider
-	info, errAdd := p.AddAndSelect(cache.Magnet)
+	info, errAdd := p.AddAndSelect(reqCtx, cache.Magnet)
 	if errAdd != nil {
 		utils.Logger.Error().Err(errAdd).Str("infohash", infohash).Msg("Debrid AddAndSelect failed.")
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to add magnet to debrid provider: " + errAdd.Error()})
@@ -484,7 +487,7 @@ func rdAddHandler(c *gin.Context) {
 	downloaded := false
 
 	for i := 0; i < maxPolls; i++ {
-		info, err = p.GetTorrentInfo(info.ID)
+		info, err = p.GetTorrentInfo(reqCtx, info.ID)
 		if err != nil {
 			utils.Logger.Warn().Err(err).Str("id", info.ID).Msg("Error polling debrid torrent status. Retrying.")
 		} else if info.Status == "downloaded" {
@@ -502,9 +505,45 @@ func rdAddHandler(c *gin.Context) {
 	// Find the matching video link
 	finalLink := ""
 	if isMovie {
-		// For movies, choose first download link or larger video link
-		if len(info.Links) > 0 {
-			finalLink = info.Links[0]
+		var selectedFiles []debrid.FileInfo
+		for _, f := range info.Files {
+			if f.Selected == 1 {
+				selectedFiles = append(selectedFiles, f)
+			}
+		}
+		if len(selectedFiles) > 0 {
+			var fileToPlay *debrid.FileInfo
+			var videoFiles []debrid.FileInfo
+			for _, f := range selectedFiles {
+				if strings.HasSuffix(strings.ToLower(f.Path), ".mkv") ||
+					strings.HasSuffix(strings.ToLower(f.Path), ".mp4") ||
+					strings.HasSuffix(strings.ToLower(f.Path), ".avi") ||
+					strings.HasSuffix(strings.ToLower(f.Path), ".mov") {
+					videoFiles = append(videoFiles, f)
+				}
+			}
+			if len(videoFiles) > 0 {
+				largest := &videoFiles[0]
+				for i := 1; i < len(videoFiles); i++ {
+					if videoFiles[i].Bytes > largest.Bytes {
+						largest = &videoFiles[i]
+					}
+				}
+				fileToPlay = largest
+			} else {
+				largest := &selectedFiles[0]
+				for i := 1; i < len(selectedFiles); i++ {
+					if selectedFiles[i].Bytes > largest.Bytes {
+						largest = &selectedFiles[i]
+					}
+				}
+				fileToPlay = largest
+			}
+
+			dl, errDl := getDownloadLinkForFile(reqCtx, p, info, fileToPlay.ID)
+			if errDl == nil {
+				finalLink = dl
+			}
 		}
 	} else {
 		// For series, map files to CandidateFile structures and run FindBestSeriesFile selection
@@ -519,7 +558,7 @@ func rdAddHandler(c *gin.Context) {
 
 		best, found := parser.FindBestSeriesFile(candidates, season, episode, season)
 		if found {
-			dl, errDl := p.GetDownloadLinkForFile(info.ID, best.ID)
+			dl, errDl := getDownloadLinkForFile(reqCtx, p, info, best.ID)
 			if errDl == nil {
 				finalLink = dl
 			}
@@ -558,20 +597,68 @@ func rdAddHandler(c *gin.Context) {
 
 // ── Stremio Route Helper Routines ──
 
-func getDebridCachedLink(r *database.DebridTorrent, season, episode int, isMovie bool) string {
+func getDebridCachedLink(ctx context.Context, r *database.DebridTorrent, season, episode int, isMovie bool) (string, error) {
 	cfg := config.Load()
 	p := debrid.GetProvider(cfg)
 
-	if isMovie {
-		if len(r.Links) > 0 {
-			return r.Links[0]
+	// Map DB record back to TorrentInfo shape to utilize our universal link resolver
+	info := &debrid.TorrentInfo{
+		ID:    r.TorrentID,
+		Links: r.Links,
+	}
+	info.Files = make([]debrid.FileInfo, len(r.Files))
+	for i, f := range r.Files {
+		info.Files[i] = debrid.FileInfo{
+			ID:       f.ID,
+			Path:     f.Path,
+			Bytes:    f.Bytes,
+			Selected: f.Selected,
 		}
-		return ""
+	}
+
+	if isMovie {
+		var selectedFiles []debrid.FileInfo
+		for _, f := range info.Files {
+			if f.Selected == 1 {
+				selectedFiles = append(selectedFiles, f)
+			}
+		}
+		if len(selectedFiles) == 0 {
+			return "", fmt.Errorf("no selected files")
+		}
+		var fileToPlay *debrid.FileInfo
+		var videoFiles []debrid.FileInfo
+		for _, f := range selectedFiles {
+			if strings.HasSuffix(strings.ToLower(f.Path), ".mkv") ||
+				strings.HasSuffix(strings.ToLower(f.Path), ".mp4") ||
+				strings.HasSuffix(strings.ToLower(f.Path), ".avi") {
+				videoFiles = append(videoFiles, f)
+			}
+		}
+		if len(videoFiles) > 0 {
+			largest := &videoFiles[0]
+			for i := 1; i < len(videoFiles); i++ {
+				if videoFiles[i].Bytes > largest.Bytes {
+					largest = &videoFiles[i]
+				}
+			}
+			fileToPlay = largest
+		} else {
+			largest := &selectedFiles[0]
+			for i := 1; i < len(selectedFiles); i++ {
+				if selectedFiles[i].Bytes > largest.Bytes {
+					largest = &selectedFiles[i]
+				}
+			}
+			fileToPlay = largest
+		}
+
+		return getDownloadLinkForFile(ctx, p, info, fileToPlay.ID)
 	}
 
 	// Build Series Candidates list
-	candidates := make([]parser.CandidateFile, len(r.Files))
-	for idx, f := range r.Files {
+	candidates := make([]parser.CandidateFile, len(info.Files))
+	for idx, f := range info.Files {
 		candidates[idx] = parser.CandidateFile{
 			ID:   f.ID,
 			Path: f.Path,
@@ -581,13 +668,43 @@ func getDebridCachedLink(r *database.DebridTorrent, season, episode int, isMovie
 
 	best, found := parser.FindBestSeriesFile(candidates, season, episode, season)
 	if found {
-		dl, err := p.GetDownloadLinkForFile(r.TorrentID, best.ID)
-		if err == nil {
-			return dl
+		return getDownloadLinkForFile(ctx, p, info, best.ID)
+	}
+
+	return "", fmt.Errorf("best file match not found")
+}
+
+// getDownloadLinkForFile dynamically asserts if the provider implements direct link resolution (TorBox) or index-based unrestrict (Real-Debrid)
+func getDownloadLinkForFile(ctx context.Context, p debrid.Provider, info *debrid.TorrentInfo, fileID int) (string, error) {
+	// 1. Try TorBox direct download link resolution
+	if dlProvider, ok := p.(interface {
+		GetDownloadLinkForFile(context.Context, string, string) (string, error)
+	}); ok {
+		return dlProvider.GetDownloadLinkForFile(ctx, info.ID, strconv.Itoa(fileID))
+	}
+
+	// 2. Real-Debrid / Fallback index-based link unrestriction
+	linkIndex := -1
+	selectedCount := 0
+	for _, f := range info.Files {
+		if f.Selected == 1 {
+			if f.ID == fileID {
+				linkIndex = selectedCount
+				break
+			}
+			selectedCount++
 		}
 	}
 
-	return ""
+	if linkIndex < 0 || linkIndex >= len(info.Links) {
+		return "", fmt.Errorf("file ID %d not selected or links index out of range", fileID)
+	}
+
+	unrestricted, err := p.UnrestrictLink(ctx, info.Links[linkIndex])
+	if err != nil {
+		return "", err
+	}
+	return unrestricted.Download, nil
 }
 
 func buildTrackerSources() []string {
