@@ -30,7 +30,7 @@ func NewRealDebrid() Provider {
 }
 
 func (r *realDebridProvider) IsEnabled() bool {
-	return config.IsRDEnabled
+	return config.Load().IsRDEnabled
 }
 
 func (r *realDebridProvider) do(ctx context.Context, method, path string, body string) (*http.Response, error) {
@@ -38,7 +38,7 @@ func (r *realDebridProvider) do(ctx context.Context, method, path string, body s
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+config.RealDebridAPIKey)
+	req.Header.Set("Authorization", "Bearer "+config.Load().RealDebridAPIKey)
 	if body != "" {
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	}
@@ -60,7 +60,7 @@ func (r *realDebridProvider) AddMagnet(ctx context.Context, magnet string) (*Add
 		return nil, err
 	}
 	id, _ := data["id"].(string)
-	utils.Logger.Info("real-debrid magnet added", "id", id)
+	utils.Logger.Info().Str("id", id).Msg("real-debrid magnet added")
 	return &AddResult{ID: id}, nil
 }
 
@@ -136,7 +136,7 @@ func (r *realDebridProvider) SelectFiles(ctx context.Context, id string, fileIDs
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == 202 {
-		utils.Logger.Info("real-debrid files already selected", "id", id)
+		utils.Logger.Info().Str("id", id).Msg("real-debrid files already selected")
 		return nil
 	}
 	if resp.StatusCode != 204 {
@@ -169,7 +169,7 @@ func (r *realDebridProvider) DeleteTorrent(ctx context.Context, id string) error
 		return err
 	}
 	defer resp.Body.Close()
-	utils.Logger.Info("real-debrid torrent deleted", "id", id)
+	utils.Logger.Info().Str("id", id).Msg("real-debrid torrent deleted")
 	return nil
 }
 
