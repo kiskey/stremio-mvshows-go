@@ -8,7 +8,7 @@ require (
 	github.com/go-resty/resty/v2 v2.12.0
 	github.com/gocolly/colly/v2 v2.1.0
 	github.com/glebarez/sqlite v1.11.0
-	github.com/gorm.io/gorm v1.25.7
+	gorm.io/gorm v1.25.7
 	github.com/joho/godotenv v1.5.1
 	github.com/ovrlord-app/releasetitleparser v1.0.0
 	github.com/robfig/cron/v3 v3.0.1
