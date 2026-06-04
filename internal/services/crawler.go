@@ -15,10 +15,10 @@ import (
 
 	"github.com/PuerkitoBio/goquery"
 	"github.com/gocolly/colly/v2"
-	"github.com/sevvian/smvshows-go/internal/config"
-	"github.com/sevvian/smvshows-go/internal/database"
-	"github.com/sevvian/smvshows-go/internal/services/parser"
-	"github.com/sevvian/smvshows-go/internal/utils"
+	"github.com/kiskey/stremio-mvshows-go/internal/config"
+	"github.com/kiskey/stremio-mvshows-go/internal/database"
+	"github.com/kiskey/stremio-mvshows-go/internal/services/parser"
+	"github.com/kiskey/stremio-mvshows-go/internal/utils"
 )
 
 type CrawledThread struct {
