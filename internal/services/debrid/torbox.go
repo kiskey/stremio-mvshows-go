@@ -170,40 +170,6 @@ func (t *torboxProvider) checkRateLimit() bool {
 	return true
 }
 
-func (t *torboxProvider) cleanupStaleActiveTorrents(ctx context.Context, maxActive int) error {
-	torrents, err := t.GetTorrents(ctx)
-	if err != nil {
-		return err
-	}
-	activeCount := 0
-	var stale []Torrent
-	for _, tr := range torrents {
-		if tr.Status == "downloading" {
-			activeCount++
-		}
-		if tr.Status == "error" {
-			stale = append(stale, tr)
-		}
-	}
-
-	for _, s := range stale {
-		_ = t.DeleteTorrent(ctx, s.ID)
-	}
-
-	if activeCount >= maxActive {
-		for i := len(torrents) - 1; i >= 0; i-- {
-			if torrents[i].Status == "downloading" {
-				_ = t.DeleteTorrent(ctx, torrents[i].ID)
-				activeCount--
-				if activeCount < maxActive {
-					break
-				}
-			}
-		}
-	}
-	return nil
-}
-
 func (t *torboxProvider) AddMagnet(ctx context.Context, magnet string) (*AddResult, error) {
 	hash := extractInfoHash(magnet)
 	if hash == "" {
@@ -219,13 +185,6 @@ func (t *torboxProvider) AddMagnet(ctx context.Context, magnet string) (*AddResu
 
 	if !t.checkRateLimit() {
 		return nil, fmt.Errorf("torbox addMagnet rate limit exceeded")
-	}
-
-	cfg := config.Load()
-	if cfg.TorboxMaxActiveTorrents > 0 {
-		if err := t.cleanupStaleActiveTorrents(ctx, cfg.TorboxMaxActiveTorrents); err != nil {
-			utils.Logger.Warn().Err(err).Msg("torbox cleanup failed")
-		}
 	}
 
 	var body bytes.Buffer
