@@ -27,19 +27,21 @@ jobs:
       - name: Normalize Directory Layout
         run: |
           # Self-Healing Directory Normalization:
-          # If the files are in a flat layout under internal/services/, we dynamically move
-          # them into their matching subdirectories to align with Go's compiler path rules.
+          # Creates nested subdirectory wrappers for all services to satisfy Go's package rules.
           mkdir -p internal/services/crawler \
                    internal/services/metadata \
                    internal/services/orchestrator \
                    internal/services/tracker \
-                   internal/services/maintenance
+                   internal/services/maintenance \
+                   internal/services/parser
           
+          # Moves flat files safely into their respective package directories
           [ -f internal/services/crawler.go ] && mv internal/services/crawler.go internal/services/crawler/crawler.go || true
           [ -f internal/services/metadata.go ] && mv internal/services/metadata.go internal/services/metadata/metadata.go || true
           [ -f internal/services/orchestrator.go ] && mv internal/services/orchestrator.go internal/services/orchestrator/orchestrator.go || true
           [ -f internal/services/tracker.go ] && mv internal/services/tracker.go internal/services/tracker/tracker.go || true
           [ -f internal/services/maintenance.go ] && mv internal/services/maintenance.go internal/services/maintenance/maintenance.go || true
+          [ -f internal/services/parser.go ] && mv internal/services/parser.go internal/services/parser/parser.go || true
           
           echo "Directory structure normalized successfully."
 
