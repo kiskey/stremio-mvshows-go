@@ -79,7 +79,7 @@ type Thread struct {
 	LastSeen          time.Time       `gorm:"autoUpdateTime;index" json:"last_seen"`
 	CreatedAt         time.Time       `json:"created_at"`
 	UpdatedAt         time.Time       `json:"updated_at"`
-	TmdbMetadata      *TmdbMetadata   `gorm:"foreignKey:TmdbID;references:TmdbID" json:"tmdb_metadata,omitempty"`
+	TmdbMetadata      *TmdbMetadata   `gorm:"foreignKey:TmdbID" json:"tmdb_metadata,omitempty"` // Corrected: removed redundant references tag
 }
 
 func (Thread) TableName() string { return "threads" }
@@ -91,7 +91,7 @@ type TmdbMetadata struct {
 	Data      string    `gorm:"type:text;not null" json:"data"` // Full JSON metadata payload
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
-	Threads   []Thread  `gorm:"foreignKey:TmdbID;references:TmdbID" json:"threads,omitempty"`
+	Threads   []Thread  `gorm:"foreignKey:TmdbID" json:"threads,omitempty"` // Corrected: removed redundant references tag
 }
 
 func (TmdbMetadata) TableName() string { return "tmdb_metadata" }
