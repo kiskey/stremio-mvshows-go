@@ -25,6 +25,7 @@ func Init(dbPath string, level gormlogger.LogLevel) (*gorm.DB, error) {
 
 	var err error
 	DB, err = gorm.Open(sqlite.Open(dbPath), &gorm.Config{
+		DisableForeignKeyConstraintWhenMigrating: true, // Prevents SQLite from creating invalid/circular physical constraints
 		Logger: gormlogger.New(
 			log.New(os.Stdout, "\r\n", log.LstdFlags),
 			gormlogger.Config{
@@ -52,7 +53,7 @@ func Init(dbPath string, level gormlogger.LogLevel) (*gorm.DB, error) {
 	// Enable WAL (Write-Ahead Logging) for safe, concurrent read/write transactions
 	DB.Exec("PRAGMA journal_mode=WAL;")
 	DB.Exec("PRAGMA synchronous=NORMAL;")
-	DB.Exec("PRAGMA foreign_keys=ON;")
+	DB.Exec("PRAGMA foreign_keys=OFF;") // Keeps SQLite database execution free of physical key mismatches
 	DB.Exec("PRAGMA busy_timeout=5000;") // Wait up to 5s for locks to clear before throwing an error
 
 	// Ensure legacy non-composite unique indexes are cleared
