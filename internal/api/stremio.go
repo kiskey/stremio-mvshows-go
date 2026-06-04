@@ -85,7 +85,7 @@ func manifestHandler(c *gin.Context) {
 				},
 			},
 		},
-		"idPrefixes": []string{"tt", "tv", "movie"},
+		"idPrefixes": []string{"tt", "tv", "movie", cfg.AddonID}, // Added AddonID to prefix route unlinked threads
 	})
 }
 
@@ -164,6 +164,9 @@ func catalogHandler(c *gin.Context) {
 					desc = tmdbData.Overview
 				}
 			}
+		} else {
+			// Unlinked threads are formatted with addonId:pending: prefix to trigger manifest idPrefix matching
+			metaID = fmt.Sprintf("%s:pending:%s", cfg.AddonID, t.ThreadHash)
 		}
 
 		if t.CustomPoster != nil && *t.CustomPoster != "" {
@@ -195,12 +198,19 @@ func metaHandler(c *gin.Context) {
 	id := strings.TrimSuffix(c.Param("id"), ".json")
 	cfg := config.Load()
 
+	// Strip pending prefixes if looking up unlinked threads
+	pendingPrefix := cfg.AddonID + ":pending:"
+	cleanID := id
+	if strings.HasPrefix(id, pendingPrefix) {
+		cleanID = strings.TrimPrefix(id, pendingPrefix)
+	}
+
 	var meta database.TmdbMetadata
-	err := database.DB.Where("imdb_id = ? OR tmdb_id = ?", id, id).Preload("Threads").First(&meta).Error
+	err := database.DB.Where("imdb_id = ? OR tmdb_id = ?", cleanID, cleanID).Preload("Threads").First(&meta).Error
 	if err != nil {
 		// If direct metadata lookup fails, check if the ID refers to a pending/unlinked ThreadHash
 		var t database.Thread
-		errThread := database.DB.Where("thread_hash = ?", id).First(&t).Error
+		errThread := database.DB.Where("thread_hash = ?", cleanID).First(&t).Error
 		if errThread == nil {
 			// Return a safe placeholder metadata response for pending items
 			metaObj := gin.H{
@@ -297,12 +307,20 @@ func metaHandler(c *gin.Context) {
 
 func streamHandler(c *gin.Context) {
 	id := strings.TrimSuffix(c.Param("id"), ".json")
+	cfg := config.Load()
+
+	// Strip pending prefix if looking up unlinked thread streams
+	pendingPrefix := cfg.AddonID + ":pending:"
+	cleanID := id
+	if strings.HasPrefix(id, pendingPrefix) {
+		cleanID = strings.TrimPrefix(id, pendingPrefix)
+	}
 
 	var imdbID string
 	season := -1
 	episode := -1
 
-	parts := strings.Split(id, ":")
+	parts := strings.Split(cleanID, ":")
 	imdbID = parts[0]
 	if len(parts) > 2 {
 		season, _ = strconv.Atoi(parts[1])
@@ -365,7 +383,6 @@ func streamHandler(c *gin.Context) {
 		return
 	}
 
-	cfg := config.Load()
 	p := debrid.GetProvider(cfg)
 
 	// Pre-fetch cache checks for matching infohashes to mark stream availability
