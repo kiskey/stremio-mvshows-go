@@ -188,9 +188,17 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 	errTx := database.DB.Transaction(func(tx *gorm.DB) error {
 		// Save TmdbMetadata records
 		rawDataBytes, _ := json.Marshal(tmdbResult.RawData)
+		
+		// CRITICAL FIX: Convert empty IMDb string to explicit NULL pointer for SQLite unique constraint
+		var imdbIDPtr *string
+		if tmdbResult.ImdbID != "" {
+			val := tmdbResult.ImdbID
+			imdbIDPtr = &val
+		}
+
 		tmdbMetadata := database.TmdbMetadata{
 			TmdbID: tmdbResult.TmdbID,
-			ImdbID: tmdbResult.ImdbID,
+			ImdbID: imdbIDPtr,
 			Data:   string(rawDataBytes),
 		}
 		if tmdbResult.Year > 0 {
