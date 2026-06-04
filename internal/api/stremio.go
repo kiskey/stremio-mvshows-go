@@ -58,11 +58,7 @@ func manifestHandler(c *gin.Context) {
 		"description": cfg.AddonDescription,
 		"resources": []interface{}{
 			"catalog",
-			gin.H{
-				"name":       "meta",
-				"types":      []string{"series", "movie"},
-				"idPrefixes": []string{cfg.AddonID},
-			},
+			"meta",
 			"stream",
 		},
 		"types":       []string{"series", "movie"},
@@ -92,7 +88,7 @@ func manifestHandler(c *gin.Context) {
 				},
 			},
 		},
-		"idPrefixes": []string{"tt", "tv", "movie", cfg.AddonID}, // Added AddonID to prefix route unlinked threads
+		"idPrefixes": []string{"tt"}, // Restored "tt" as the only idPrefix, completely matching the Node.js standard
 	})
 }
 
@@ -122,21 +118,24 @@ func catalogHandler(c *gin.Context) {
 	}
 
 	var threads []database.Thread
-	// Return both linked and pending threads, prioritizing linked ones at the top of lists
-	query := database.DB.Where("status IN ? AND type = ?", []string{"linked", "pending_tmdb"}, mediaType)
+	// EXPERT FIX: Retrieve ONLY successfully linked threads that possess a valid IMDb ID (tt...)
+	// This completely eliminates custom pending IDs (addonId:pending:...) from catalog pages,
+	// preventing layout issues and rendering professional Metahub-aligned cards.
+	query := database.DB.
+		Joins("Join tmdb_metadata on tmdb_metadata.tmdb_id = threads.tmdb_id").
+		Where("threads.status = ? AND threads.type = ? AND tmdb_metadata.imdb_id IS NOT NULL AND tmdb_metadata.imdb_id != ''", "linked", mediaType)
 
 	// Filter by specific catalogs matching manifest IDs
 	if catalogID == "tamilmv_hd_movies" {
-		query = query.Where("catalog = ?", "tamil-hd-movies")
+		query = query.Where("threads.catalog = ?", "tamil-hd-movies")
 	} else if catalogID == "tamilmv_dubbed_movies" {
-		query = query.Where("catalog = ?", "tamil-dubbed-movies")
+		query = query.Where("threads.catalog = ?", "tamil-dubbed-movies")
 	} else {
-		query = query.Where("catalog = ?", "top-series-from-forum")
+		query = query.Where("threads.catalog = ?", "top-series-from-forum")
 	}
 
 	err := query.
-		Order("CASE status WHEN 'linked' THEN 0 ELSE 1 END"). // Order linked threads first, then pending rescue items
-		Order("posted_at DESC").
+		Order("threads.posted_at DESC").
 		Offset(skip).
 		Limit(100).
 		Preload("TmdbMetadata").
@@ -151,7 +150,14 @@ func catalogHandler(c *gin.Context) {
 	metas := make([]gin.H, 0, len(threads))
 
 	for _, t := range threads {
-		metaID := t.ThreadHash
+		metaID := ""
+		if t.TmdbMetadata != nil && t.TmdbMetadata.ImdbID != nil {
+			metaID = *t.TmdbMetadata.ImdbID
+		}
+		if metaID == "" {
+			continue // Defensive: skip any record that doesn't have an IMDb ID
+		}
+
 		poster := cfg.PlaceholderPoster
 		desc := ""
 		title := t.CleanTitle
@@ -159,27 +165,15 @@ func catalogHandler(c *gin.Context) {
 			title = t.RawTitle
 		}
 
-		if t.TmdbMetadata != nil {
-			// Safely dereference ImdbID pointer
-			if t.TmdbMetadata.ImdbID != nil && *t.TmdbMetadata.ImdbID != "" {
-				metaID = *t.TmdbMetadata.ImdbID
-			} else {
-				metaID = t.TmdbMetadata.TmdbID
+		// Optimized unmarshaling to prevent thousands of reflection heap allocations per page
+		var tmdbData tmdbLightData
+		if json.Unmarshal([]byte(t.TmdbMetadata.Data), &tmdbData) == nil {
+			if tmdbData.PosterPath != "" {
+				poster = "https://image.tmdb.org/t/p/w500" + tmdbData.PosterPath
 			}
-
-			// Optimized unmarshaling to prevent thousands of reflection heap allocations per page
-			var tmdbData tmdbLightData
-			if json.Unmarshal([]byte(t.TmdbMetadata.Data), &tmdbData) == nil {
-				if tmdbData.PosterPath != "" {
-					poster = "https://image.tmdb.org/t/p/w500" + tmdbData.PosterPath
-				}
-				if tmdbData.Overview != "" {
-					desc = tmdbData.Overview
-				}
+			if tmdbData.Overview != "" {
+				desc = tmdbData.Overview
 			}
-		} else {
-			// Unlinked threads are formatted with addonId:pending: prefix to trigger manifest idPrefix matching
-			metaID = fmt.Sprintf("%s:pending:%s", cfg.AddonID, t.ThreadHash)
 		}
 
 		if t.CustomPoster != nil && *t.CustomPoster != "" {
@@ -211,39 +205,113 @@ func metaHandler(c *gin.Context) {
 	id := strings.TrimSuffix(c.Param("id"), ".json")
 	cfg := config.Load()
 
-	// Our addon should never handle metadata for linked items (IMDb/TMDB IDs).
-	// We only provide safe placeholder metadata for unrecognized, custom pending IDs.
-	if !strings.Contains(id, ":pending:") {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Metadata not found"})
-		return
-	}
-
 	cleanID := id
 	if idx := strings.Index(id, ":pending:"); idx != -1 {
 		cleanID = id[idx+len(":pending:"):]
 	}
 
-	// Verify if the ID refers to a pending/unlinked ThreadHash
+	// 1. First attempt to lookup as standard linked metadata by IMDb ID (tt...)
+	var meta database.TmdbMetadata
+	err := database.DB.Where("imdb_id = ? OR tmdb_id = ?", cleanID, cleanID).Preload("Threads").First(&meta).Error
+	if err == nil {
+		var details tmdbLightData
+		if errJson := json.Unmarshal([]byte(meta.Data), &details); errJson == nil {
+			poster := cfg.PlaceholderPoster
+			if details.PosterPath != "" {
+				poster = "https://image.tmdb.org/t/p/w500" + details.PosterPath
+			}
+			overview := details.Overview
+
+			mediaType := "movie"
+			if len(meta.Threads) > 0 {
+				mediaType = meta.Threads[0].Type
+			}
+
+			displayName := details.Title
+			if displayName == "" {
+				displayName = details.Name
+			}
+
+			// Apply custom metadata overrides if defined by the admin
+			if len(meta.Threads) > 0 {
+				t := meta.Threads[0]
+				if t.CustomPoster != nil && *t.CustomPoster != "" {
+					poster = *t.CustomPoster
+				}
+				if t.CustomDescription != nil && *t.CustomDescription != "" {
+					overview = *t.CustomDescription
+				}
+			}
+
+			metaObj := gin.H{
+				"id":          id,
+				"type":        mediaType,
+				"name":        displayName,
+				"poster":      poster,
+				"description": overview,
+				"year":        meta.Year,
+			}
+
+			if mediaType == "series" {
+				// Fetch linked streams to build Stremio series videos navigation
+				var streams []database.Stream
+				_ = database.DB.Where("tmdb_id = ?", meta.TmdbID).Order("season ASC, episode ASC").Find(&streams)
+
+				videos := make([]gin.H, 0)
+				seen := make(map[string]bool)
+
+				for _, s := range streams {
+					if s.Season != nil && s.Episode != nil {
+						sVal := *s.Season
+						eVal := *s.Episode
+						endVal := eVal
+						if s.EpisodeEnd != nil {
+							endVal = *s.EpisodeEnd
+						}
+
+						for ep := eVal; ep <= endVal; ep++ {
+							vKey := fmt.Sprintf("%d:%d", sVal, ep)
+							if seen[vKey] {
+								continue
+							}
+							seen[vKey] = true
+
+							videos = append(videos, gin.H{
+								"id":      fmt.Sprintf("%s:%d:%d", id, sVal, ep),
+								"season":  sVal,
+								"episode": ep,
+								"title":   fmt.Sprintf("Season %d - Episode %d", sVal, ep),
+							})
+						}
+					}
+				}
+				metaObj["videos"] = videos
+			}
+
+			c.JSON(http.StatusOK, gin.H{"meta": metaObj})
+			return
+		}
+	}
+
+	// 2. Second attempt: Check if the ID refers to an unlinked, pending ThreadHash (backward-compatibility)
 	var t database.Thread
 	errThread := database.DB.Where("thread_hash = ?", cleanID).First(&t).Error
-	if errThread != nil {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Metadata not found"})
+	if errThread == nil {
+		metaObj := gin.H{
+			"id":          id,
+			"type":        t.Type,
+			"name":        t.RawTitle,
+			"poster":      cfg.PlaceholderPoster,
+			"description": "Pending metadata match. You can link this manually in the administration rescue panel.",
+		}
+		if t.Year != nil {
+			metaObj["year"] = *t.Year
+		}
+		c.JSON(http.StatusOK, gin.H{"meta": metaObj})
 		return
 	}
 
-	// Return a safe placeholder metadata response for pending items
-	metaObj := gin.H{
-		"id":          id,
-		"type":        t.Type,
-		"name":        t.RawTitle,
-		"poster":      cfg.PlaceholderPoster,
-		"description": "Pending metadata match. You can link this manually in the administration rescue panel.",
-	}
-	if t.Year != nil {
-		metaObj["year"] = *t.Year
-	}
-	
-	c.JSON(http.StatusOK, gin.H{"meta": metaObj})
+	c.JSON(http.StatusNotFound, gin.H{"error": "Metadata not found"})
 }
 
 func streamHandler(c *gin.Context) {
