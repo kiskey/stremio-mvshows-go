@@ -55,6 +55,12 @@ func Init(dbPath string, level gormlogger.LogLevel) (*gorm.DB, error) {
 	DB.Exec("PRAGMA foreign_keys=ON;")
 	DB.Exec("PRAGMA busy_timeout=5000;") // Wait up to 5s for locks to clear before throwing an error
 
+	// ── CRITICAL FIX: Drop legacy non-composite unique index to resolve constraint failures ──
+	// GORM AutoMigrate does not drop old indexes. We must forcefully clear the old global index
+	// so that the new composite index (idx_stream_unique) can properly allow multi-episode pack inserts.
+	DB.Exec("DROP INDEX IF EXISTS idx_streams_infohash;")
+	DB.Exec("DROP INDEX IF EXISTS idx_streams_infohash_unique;")
+
 	// AutoMigrate all tables
 	err = DB.AutoMigrate(
 		&Thread{},
