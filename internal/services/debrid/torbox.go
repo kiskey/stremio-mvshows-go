@@ -2,8 +2,10 @@ package debrid
 
 import (
 	"context"
-	"encoding/json"
+	"crypto/tls"
 	"fmt"
+	"net"
+	"net/http"
 	"strconv"
 	"strings"
 	"sync"
@@ -13,6 +15,7 @@ import (
 	"github.com/kiskey/stremio-mvshows-go/internal/config"
 	"github.com/kiskey/stremio-mvshows-go/internal/database"
 	"github.com/kiskey/stremio-mvshows-go/internal/utils"
+	"golang.org/x/net/http2"
 	"golang.org/x/time/rate"
 )
 
@@ -25,12 +28,41 @@ type TorboxProvider struct {
 	torrentSelections sync.Map      // map[int]map[int]bool (torrentID -> set of selected fileIDs)
 }
 
+// createOptimizedTorboxHTTPClient configures an transport optimized for low latency and high concurrency
+func createOptimizedTorboxHTTPClient(timeout time.Duration) *http.Client {
+	transport := &http.Transport{
+		DialContext: (&net.Dialer{
+			Timeout:   5 * time.Second,  // Faster connect timeout
+			KeepAlive: 30 * time.Second, // Consistent keep-alive
+		}).DialContext,
+		MaxIdleConns:          100,
+		MaxIdleConnsPerHost:   100,              // Avoid connection starvation under concurrency
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   3 * time.Second,  // Faster TLS handshakes
+		ExpectContinueTimeout: 1 * time.Second,
+		ForceAttemptHTTP2:     true,             // Force HTTP/2 attempt
+		TLSClientConfig: &tls.Config{
+			MinVersion: tls.VersionTLS12,
+		},
+	}
+	// Explicitly configure HTTP/2 transport settings
+	_ = http2.ConfigureTransport(transport)
+
+	return &http.Client{
+		Transport: transport,
+		Timeout:   timeout,
+	}
+}
+
 func NewTorboxProvider(cfg *config.Config) *TorboxProvider {
+	// Initialize resty using our fine-tuned transport
+	httpClient := createOptimizedTorboxHTTPClient(20 * time.Second)
+	restyClient := resty.NewWithClient(httpClient).
+		SetBaseURL("https://api.torbox.app/v1/api").
+		SetHeader("Authorization", "Bearer "+cfg.TorboxApiKey)
+
 	return &TorboxProvider{
-		client: resty.New().
-			SetBaseURL("https://api.torbox.app/v1/api").
-			SetTimeout(20 * time.Second).
-			SetHeader("Authorization", "Bearer "+cfg.TorboxApiKey),
+		client:         restyClient,
 		apiKey:         cfg.TorboxApiKey,
 		enabled:        cfg.IsTorboxEnabled,
 		addLimiter:     rate.NewLimiter(rate.Every(time.Minute/8), 8),
@@ -278,4 +310,89 @@ func (t *TorboxProvider) CheckCached(hashes []string) (map[string]CacheInfo, err
 		return nil, err
 	}
 	if resp.StatusCode() != 200 {
-		retur
+		return nil, fmt.Errorf("TorBox checkcached failed with status %d: %s", resp.StatusCode(), resp.String())
+	}
+
+	resMap := make(map[string]CacheInfo)
+	for _, h := range hashes {
+		lowerH := strings.ToLower(h)
+		resMap[lowerH] = CacheInfo{Cached: false}
+	}
+
+	for rawH, rawVal := range result.Data {
+		lowerH := strings.ToLower(rawH)
+		cached := false
+
+		// Parse boolean or complex object shapes
+		if valBool, ok := rawVal.(bool); ok {
+			cached = valBool
+		} else if mapVal, ok := rawVal.(map[string]interface{}); ok {
+			if val, ok := mapVal["cached"].(bool); ok {
+				cached = val
+			} else {
+				// Fallback: presence of any matching data object indicates cached
+				cached = true
+			}
+		}
+
+		resMap[lowerH] = CacheInfo{Cached: cached}
+	}
+
+	return resMap, nil
+}
+
+func (t *TorboxProvider) GetCachedFileInfo(hash, fileName string) (*FileInfo, error) {
+	return nil, ErrNotSupported
+}
+
+func (t *TorboxProvider) GetDownloadLinkForFile(torrentID string, fileID int) (string, error) {
+	_ = t.generalLimiter.Wait(context.Background())
+
+	var data map[string]interface{}
+	resp, err := t.client.R().
+		SetQueryParams(map[string]string{
+			"token":      t.apiKey,
+			"torrent_id": torrentID,
+			"file_id":    strconv.Itoa(fileID),
+			"redirect":   "false",
+		}).
+		SetResult(&data).
+		Get("/torrents/requestdl")
+
+	if err != nil {
+		return "", err
+	}
+	if resp.StatusCode() != 200 {
+		return "", fmt.Errorf("TorBox requestdl failed with status %d: %s", resp.StatusCode(), resp.String())
+	}
+
+	// Unmarshal correctly
+	urlStr := ""
+	if success, ok := data["success"].(bool); ok && success {
+		if rawURL, ok := data["data"].(string); ok {
+			urlStr = rawURL
+		}
+	}
+
+	if urlStr == "" {
+		return "", fmt.Errorf("failed to retrieve direct URL from TorBox payload: %s", resp.String())
+	}
+
+	return urlStr, nil
+}
+
+// ── TorBox Status Mapping Helper ──
+
+func mapTorboxStatus(tbStatus string) string {
+	s := strings.ToLower(tbStatus)
+	switch s {
+	case "downloading", "metadl", "checkingresumedata", "paused", "stalled (no seeds)":
+		return "downloading"
+	case "completed", "cached", "uploading", "seeding":
+		return "downloaded"
+	case "error", "failed":
+		return "error"
+	default:
+		return "downloading"
+	}
+}
