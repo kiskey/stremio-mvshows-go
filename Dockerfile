@@ -1,13 +1,14 @@
 # -------- Build Stage --------
-FROM golang:1.22-alpine AS builder
+FROM golang:1.25-alpine AS builder
 
 WORKDIR /app
 
-# Copy module manifests first to optimize layer caching
-COPY go.mod go.sum ./
+# Copy module manifests first to optimize layer caching.
+# Wildcard prevents build failures if go.sum is missing.
+COPY go.mod go.su[m] ./
 RUN go mod download
 
-# Copy the remaining project sources
+# Copy the remaining project sources (already normalized by the GitHub Actions runner)
 COPY . .
 
 # Compile fully static independent binary with CGO disabled and stripping flags
