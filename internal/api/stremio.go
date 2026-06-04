@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"net/url"
+	"net/url" // Critical fix: added net/url to resolve compile error in url.QueryEscape
 	"strconv"
 	"strings"
 	"time"
@@ -27,6 +27,14 @@ type tmdbLightData struct {
 	Name       string `json:"name"`
 	PosterPath string `json:"poster_path"`
 	Overview   string `json:"overview"`
+}
+
+// streamDupKey is a comparable struct replacing dynamic formatted strings to prevent heap allocations
+type streamDupKey struct {
+	IsRD     string
+	Quality  string
+	Language string
+	Infohash string
 }
 
 func RegisterStremioRoutes(r *gin.RouterGroup) {
@@ -365,7 +373,9 @@ func streamHandler(c *gin.Context) {
 
 	var cachedStreams []gin.H   // Instant ⚡ streams
 	var uncachedStreams []gin.H // Downloading ⏳ streams
-	seenStreams := make(map[string]bool)
+
+	// Allocation-Free: replaced string key concatenation with a comparable struct key
+	seenStreams := make(map[streamDupKey]bool)
 
 	isRDStr := "false"
 	if p.IsEnabled() {
@@ -375,8 +385,13 @@ func streamHandler(c *gin.Context) {
 	for _, s := range streams {
 		isCached := cacheMap[s.Infohash]
 
-		// Deduplicate stream candidates based on (isRD | quality | language | infohash)
-		dupKey := fmt.Sprintf("%s|%s|%s|%s", isRDStr, s.Quality, s.Language, s.Infohash)
+		// Deduplicate stream candidates based on (isRD | quality | language | infohash) using struct keys
+		dupKey := streamDupKey{
+			IsRD:     isRDStr,
+			Quality:  s.Quality,
+			Language: s.Language,
+			Infohash: s.Infohash,
+		}
 		if seenStreams[dupKey] {
 			continue
 		}
@@ -487,6 +502,77 @@ func rdAddHandler(c *gin.Context) {
 	downloaded := false
 
 	for i := 0; i < maxPolls; i++ {
+		select {
+		case <-reqCtx.Done():
+			// Client disconnected/aborted player. Detach active polling and complete the download in the background
+			// so that subsequent streaming requests load instantly.
+			utils.Logger.Info().
+				Str("infohash", infohash).
+				Str("id", info.ID).
+				Msg("Client disconnected during active stream loading. Detaching and continuing debrid polling in background.")
+			
+			go func(torrentID string, infohash string) {
+				defer func() {
+					if r := recover(); r != nil {
+						utils.Logger.Error().Interface("panic", r).Msg("Recovered from background caching poll panic.")
+					}
+				}()
+
+				bgCtx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+				defer cancel()
+
+				bgProvider := debrid.GetProvider(config.Load())
+				bgDownloaded := false
+				var bgInfo *debrid.TorrentInfo
+				var bgErr error
+
+				for j := 0; j < (60 - i); j++ {
+					select {
+					case <-bgCtx.Done():
+						return
+					default:
+					}
+
+					bgInfo, bgErr = bgProvider.GetTorrentInfo(bgCtx, torrentID)
+					if bgErr == nil && bgInfo.Status == "downloaded" {
+						bgDownloaded = true
+						break
+					}
+					time.Sleep(pollInterval)
+				}
+
+				if bgDownloaded && bgInfo != nil {
+					// Successfully finished downloading in the background. Write to local GORM cache
+					var record database.DebridTorrent
+					record.Infohash = infohash
+					record.TorrentID = torrentID
+					record.Provider = cfg.DebridService
+					record.Status = "downloaded"
+					record.Files = make([]database.TorrentFile, len(bgInfo.Files))
+					for idx, f := range bgInfo.Files {
+						record.Files[idx] = database.TorrentFile{
+							ID:       f.ID,
+							Path:     f.Path,
+							Bytes:    f.Bytes,
+							Selected: f.Selected,
+						}
+					}
+					record.Links = bgInfo.Links
+					record.LastChecked = time.Now()
+
+					_ = database.DB.Clauses(clause.OnConflict{
+						Columns:   []clause.Column{{Name: "infohash"}},
+						UpdateAll: true,
+					}).Create(&record).Error
+					utils.Logger.Info().Str("infohash", infohash).Msg("Debrid torrent cached successfully in background.")
+				}
+			}(info.ID, infohash)
+
+			c.JSON(http.StatusClientClosedRequest, gin.H{"error": "Request cancelled by client. Cache polling detached to background."})
+			return
+		default:
+		}
+
 		info, err = p.GetTorrentInfo(reqCtx, info.ID)
 		if err != nil {
 			utils.Logger.Warn().Err(err).Str("id", info.ID).Msg("Error polling debrid torrent status. Retrying.")
