@@ -339,8 +339,18 @@ func cachePendingHandler(c *gin.Context) {
 		return
 	}
 
-	// Trigger debrid caching asynchronously to prevent blocking the admin panel UI thread
+	// Secure the asynchronous background caching goroutine with recovery handling to prevent server crashes
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				utils.Logger.Error().
+					Interface("panic", r).
+					Str("infohash", body.Infohash).
+					Msg("Unhandled panic rescued inside asynchronous cachePendingHandler worker goroutine.")
+				_ = database.DB.Where("infohash = ?", body.Infohash).Delete(&database.DebridCacheLock{})
+			}
+		}()
+
 		utils.Logger.Info().Str("infohash", body.Infohash).Msg("Asynchronously caching pending magnet in debrid...")
 		_, errAdd := p.AddAndSelect(cache.Magnet)
 		if errAdd != nil {
