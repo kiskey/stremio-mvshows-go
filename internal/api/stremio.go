@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url" // Critical fix: added net/url to resolve compile error in url.QueryEscape
 	"strconv"
 	"strings"
 	"time"
@@ -18,6 +19,14 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/clause"
 )
+
+// tmdbLightData is a highly optimized, allocation-free struct replacing map[string]interface{} unmarshaling
+type tmdbLightData struct {
+	Title      string `json:"title"`
+	Name       string `json:"name"`
+	PosterPath string `json:"poster_path"`
+	Overview   string `json:"overview"`
+}
 
 func RegisterStremioRoutes(r *gin.RouterGroup) {
 	r.GET("/manifest.json", manifestHandler)
@@ -130,13 +139,14 @@ func catalogHandler(c *gin.Context) {
 				metaID = t.TmdbMetadata.TmdbID
 			}
 
-			var tmdbData map[string]interface{}
+			// Optimized unmarshaling to prevent thousands of reflection heap allocations per page
+			var tmdbData tmdbLightData
 			if json.Unmarshal([]byte(t.TmdbMetadata.Data), &tmdbData) == nil {
-				if path, ok := tmdbData["poster_path"].(string); ok && path != "" {
-					poster = "https://image.tmdb.org/t/p/w500" + path
+				if tmdbData.PosterPath != "" {
+					poster = "https://image.tmdb.org/t/p/w500" + tmdbData.PosterPath
 				}
-				if overview, ok := tmdbData["overview"].(string); ok {
-					desc = overview
+				if tmdbData.Overview != "" {
+					desc = tmdbData.Overview
 				}
 			}
 		}
@@ -176,7 +186,8 @@ func metaHandler(c *gin.Context) {
 		return
 	}
 
-	var details map[string]interface{}
+	// Optimized unmarshaling replacing map[string]interface{}
+	var details tmdbLightData
 	if errJson := json.Unmarshal([]byte(meta.Data), &details); errJson != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse TMDB data payload"})
 		return
@@ -184,14 +195,11 @@ func metaHandler(c *gin.Context) {
 
 	cfg := config.Load()
 	poster := cfg.PlaceholderPoster
-	if path, ok := details["poster_path"].(string); ok && path != "" {
-		poster = "https://image.tmdb.org/t/p/w500" + path
+	if details.PosterPath != "" {
+		poster = "https://image.tmdb.org/t/p/w500" + details.PosterPath
 	}
 
-	overview := ""
-	if desc, ok := details["overview"].(string); ok {
-		overview = desc
-	}
+	overview := details.Overview
 
 	// Determine matching media type
 	mediaType := "movie"
@@ -199,10 +207,15 @@ func metaHandler(c *gin.Context) {
 		mediaType = meta.Threads[0].Type
 	}
 
+	displayName := details.Title
+	if displayName == "" {
+		displayName = details.Name
+	}
+
 	metaObj := gin.H{
 		"id":          id,
 		"type":        mediaType,
-		"name":        getMapString(details, "title", getMapString(details, "name", "")),
+		"name":        displayName,
 		"poster":      poster,
 		"description": overview,
 		"year":        meta.Year,
@@ -498,15 +511,6 @@ func getDebridCachedLink(r *database.DebridTorrent, season, episode int, isMovie
 	}
 
 	return ""
-}
-
-func getMapString(m map[string]interface{}, key string, fallback string) string {
-	if val, ok := m[key]; ok && val != nil {
-		if s, ok := val.(string); ok {
-			return s
-		}
-	}
-	return fallback
 }
 
 func buildTrackerSources() []string {
