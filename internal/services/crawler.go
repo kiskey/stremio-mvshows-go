@@ -120,7 +120,32 @@ func RunCrawler(cfg *config.Config) ([]CrawledThread, error) {
 		r.Headers.Set("Accept-Language", "en-US,en;q=0.5")
 	})
 
-	// Retry logic with exponential backoff on errors
+	// Cloudflare challenge and anti-bot block page validation.
+	// Intercepts captcha pages, logs the blocked proxy, and schedules a retry with backoff.
+	c.OnResponse(func(r *colly.Response) {
+		bodyStr := string(r.Body)
+		if strings.Contains(bodyStr, "cloudflare") && (strings.Contains(bodyStr, "captcha") || strings.Contains(bodyStr, "challenge-platform") || strings.Contains(bodyStr, "Access denied")) {
+			if r.Request.RetryCount < cfg.ScraperRetryCount {
+				r.Request.RetryCount++
+				backoff := time.Duration(r.Request.RetryCount*r.Request.RetryCount) * 2 * time.Second
+				utils.Logger.Warn().
+					Str("url", r.Request.URL.String()).
+					Str("proxy", r.Request.ProxyURL).
+					Int("retry_count", r.Request.RetryCount).
+					Dur("backoff", backoff).
+					Msg("Cloudflare anti-bot block or challenge detected. Retrying request with backoff.")
+				time.Sleep(backoff)
+				_ = r.Request.Visit(r.Request.URL.String())
+			} else {
+				utils.Logger.Error().
+					Str("url", r.Request.URL.String()).
+					Str("proxy", r.Request.ProxyURL).
+					Msg("Max retries exceeded for Cloudflare blocked URL.")
+			}
+		}
+	})
+
+	// Retry logic with exponential backoff on connection errors
 	c.OnError(func(r *colly.Response, err error) {
 		if r.Request.RetryCount < cfg.ScraperRetryCount {
 			r.Request.RetryCount++
