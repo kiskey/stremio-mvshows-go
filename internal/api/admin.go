@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context" // Added to support background context.Background() on async tasks
 	"encoding/json"
 	"net/http"
 	"os"
@@ -340,7 +341,8 @@ func cachePendingHandler(c *gin.Context) {
 		return
 	}
 
-	// Secure the asynchronous background caching goroutine with recovery handling to prevent server crashes
+	// Secure the asynchronous background caching goroutine with recovery handling to prevent server crashes.
+	// Uses background context as the original request context will be canceled when the HTTP request terminates!
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -353,7 +355,7 @@ func cachePendingHandler(c *gin.Context) {
 		}()
 
 		utils.Logger.Info().Str("infohash", body.Infohash).Msg("Asynchronously caching pending magnet in debrid...")
-		_, errAdd := p.AddAndSelect(cache.Magnet)
+		_, errAdd := p.AddAndSelect(context.Background(), cache.Magnet)
 		if errAdd != nil {
 			utils.Logger.Error().Err(errAdd).Str("infohash", body.Infohash).Msg("Asynchronous debrid cache-add failed.")
 			// Delete lock so admin can try again
