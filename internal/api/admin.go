@@ -1,5 +1,5 @@
-// Version: 1.0.1
-// Change log: Added /auto-match endpoint to allow manual triggering of TMDB metadata lookups and relational stream generation for pending threads.
+// Version: 1.0.2
+// Change log: Integrated granular, real-time progress logging (Info/Warn/Error) inside autoMatchHandler to allow immediate feedback during large bulk match operations.
 
 package api
 
@@ -340,9 +340,13 @@ func autoMatchHandler(c *gin.Context) {
 	failCount := 0
 	matchedTitles := make([]string, 0)
 
-	for _, id := range body.ThreadIDs {
+	// Real-time progress start log
+	utils.Logger.Info().Int("total_queued", len(body.ThreadIDs)).Msg("Bulk auto-match request received. Commencing matching sequence...")
+
+	for idx, id := range body.ThreadIDs {
 		var t database.Thread
 		if errDb := database.DB.First(&t, "id = ?", id).Error; errDb != nil {
+			utils.Logger.Warn().Int("thread_id", id).Msg("Thread ID not found in database. Skipping.")
 			failCount++
 			continue
 		}
@@ -350,12 +354,19 @@ func autoMatchHandler(c *gin.Context) {
 		// Aggressive Title Cleaning using our fine-tuned parser
 		parsed := parser.ParseTitle(t.RawTitle)
 		if parsed == nil || parsed.Title == "" {
+			utils.Logger.Warn().Str("raw_title", t.RawTitle).Msg("Parsing title failed (returned empty). Storing in failure register.")
 			failCount++
 			continue
 		}
 
 		tmdbResult, errTmdb := tmdbClient.Search(parsed.Title, parsed.Year, t.Type)
 		if errTmdb != nil {
+			utils.Logger.Warn().
+				Int("index", idx+1).
+				Str("clean_title", parsed.Title).
+				Int("year", parsed.Year).
+				Err(errTmdb).
+				Msg("TMDB search returned no confident match.")
 			failCount++
 			continue
 		}
@@ -452,12 +463,29 @@ func autoMatchHandler(c *gin.Context) {
 		})
 
 		if errTx == nil {
+			utils.Logger.Info().
+				Int("index", idx+1).
+				Str("raw_title", t.RawTitle).
+				Str("matched_as", tmdbResult.Title).
+				Str("imdb_id", tmdbResult.ImdbID).
+				Msg("Successfully linked thread and saved stream references.")
 			successCount++
 			matchedTitles = append(matchedTitles, tmdbResult.Title)
 		} else {
+			utils.Logger.Error().
+				Int("index", idx+1).
+				Str("raw_title", t.RawTitle).
+				Err(errTx).
+				Msg("Transaction failed while saving metadata to tables.")
 			failCount++
 		}
 	}
+
+	// Real-time progress end log
+	utils.Logger.Info().
+		Int("success_count", successCount).
+		Int("fail_count", failCount).
+		Msg("Bulk auto-match sequence completed.")
 
 	orchestrator.UpdateDashboardCache()
 
