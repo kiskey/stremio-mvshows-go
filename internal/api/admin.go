@@ -1,5 +1,5 @@
-// Version: 1.0.7
-// Change log: Redesigned autoMatchHandler to execute network TMDB queries in parallel while serializing database writes sequentially to completely eliminate SQLite_BUSY lock errors.
+// Version: 1.0.8
+// Change log: Restored the missing matchedTitles slice declaration in autoMatchHandler to resolve the compile-time undefined variable error.
 
 package api
 
@@ -330,7 +330,7 @@ func linkOfficialHandler(c *gin.Context) {
 }
 
 // autoMatchHandler handles manual trigger of auto-matching on selected thread IDs using clean title parsing.
-// Overhauled to decouple parallel network queries from serialized database writes, preventing SQLITE_BUSY locks.
+// Overhauled with bounded concurrency to process bulk queues cleanly under proxy timeouts.
 func autoMatchHandler(c *gin.Context) {
 	var body struct {
 		ThreadIDs []int `json:"threadIds"`
@@ -355,6 +355,7 @@ func autoMatchHandler(c *gin.Context) {
 
 	var successCount int
 	var failCount int
+	var matchedTitles []string
 	var results []matchTaskResult
 	var mu sync.Mutex
 
@@ -526,6 +527,7 @@ func autoMatchHandler(c *gin.Context) {
 				Str("imdb_id", res.Result.ImdbID).
 				Msg("Successfully linked thread and saved stream references.")
 			successCount++
+			matchedTitles = append(matchedTitles, res.Result.Title)
 		} else {
 			utils.Logger.Error().
 				Int("index", idx+1).
