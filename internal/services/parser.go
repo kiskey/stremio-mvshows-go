@@ -1,5 +1,5 @@
-// Version: 1.0.6
-// Change log: Implemented aggressive post-parsing title cleaning in RobustParseInfo via filterTorrentNoise to remove torrent-specific junk (file sizes, technical tags) from display titles.
+// Version: 1.0.7
+// Change log: Cleaned map duplicates in parserJunkWords to resolve compiler key-collision errors.
 
 package parser
 
@@ -135,7 +135,7 @@ var parserJunkWords = map[string]bool{
 	"51": true, "71": true, "20": true, "10bit": true, "8bit": true,
 	// Release Types/Generic Tags
 	"remux": true, "3d": true, "sdr": true,
-	"web": true, "dl": true, "hd": true, "webrip": true, "web-dl": true, "hdtv": true, "brrip": true, "brip": true, "rip": true,
+	"web": true, "dl": true, "hd": true, "web-dl": true, "brip": true, "rip": true,
 	// Season/Episode indicators, often found as trailing junk
 	"s": true, "e": true, "ep": true, "season": true, "episode": true, "pack": true, "complete": true, "full": true, "series": true, "episodes": true,
 	"proper": true, "repack": true, "extended": true, "cut": true,
@@ -282,7 +282,7 @@ func filterTorrentNoise(title string) string {
 		if parserJunkWords[w] || parserStopWords[w] || parserIsNumber(w) {
 			continue
 		}
-        // Additional filter for single-character or single-digit noise that might not be in maps
+		// Additional filter for single-character or single-digit noise that might not be in maps
 		if len(w) == 1 && (w[0] >= 'a' && w[0] <= 'z' || w[0] >= '0' && w[0] <= '9') {
 			continue
 		}
