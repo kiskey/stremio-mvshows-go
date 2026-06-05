@@ -1,3 +1,6 @@
+// Version: 1.0.4
+// Change log: Integrated a robust custom episode range parser and complete-season indicators, ensuring episodes are mapped correctly to episode ranges and season packs.
+
 package parser
 
 import (
@@ -21,7 +24,6 @@ type ParseResult struct {
 	Language     string
 	Quality      string
 	IsPack       bool
-	// Go port extension fields to prevent orchestrator compilation errors
 	EpisodeStart int
 	EpisodeEnd   int
 }
@@ -170,11 +172,38 @@ func SanitizeName(name string) string {
 	return s
 }
 
+// parseEpisodeRange extracts episode start/end indexes from strings like EP (01-08) or 01 to 07 safely.
+func parseEpisodeRange(s string) (int, int, bool) {
+	matches := rangeRegex.FindAllStringSubmatch(s, -1)
+	for _, match := range matches {
+		if len(match) >= 3 {
+			start, err1 := strconv.Atoi(match[1])
+			end, err2 := strconv.Atoi(match[2])
+			if err1 == nil && err2 == nil {
+				// Guardrail to exclude matching 4-digit release years (e.g. 2001-2008)
+				if start < 1000 && end < 1000 && start <= end {
+					return start, end, true
+				}
+			}
+		}
+	}
+	return 0, 0, false
+}
+
 func RobustParseInfo(title string, fallbackSeason int) *ParseResult {
 	clean := SanitizeName(title)
 
 	info := rtp.ParseSeriesTitle(clean)
-	if info != nil && (info.SeasonNumber != 0 || len(info.EpisodeNumbers) > 0) {
+	
+	res := &ParseResult{
+		Title:    clean,
+		Season:   fallbackSeason,
+		Episode:  0,
+		Language: "en",
+		Quality:  "sd",
+	}
+
+	if info != nil {
 		lang := "en"
 		if len(info.Languages) > 0 {
 			lang = getISO(info.Languages[0])
@@ -183,7 +212,7 @@ func RobustParseInfo(title string, fallbackSeason int) *ParseResult {
 		if len(info.EpisodeNumbers) > 0 {
 			episode = info.EpisodeNumbers[0]
 		}
-		res := &ParseResult{
+		res = &ParseResult{
 			Title:    info.SeriesTitle,
 			Season:   info.SeasonNumber,
 			Episode:  episode,
@@ -196,36 +225,51 @@ func RobustParseInfo(title string, fallbackSeason int) *ParseResult {
 			res.EpisodeStart = info.EpisodeNumbers[0]
 			res.EpisodeEnd = info.EpisodeNumbers[len(info.EpisodeNumbers)-1]
 		}
-		return res
+	} else {
+		movie := rtp.ParseMovieTitle(clean)
+		if movie != nil {
+			lang := "en"
+			if len(movie.Languages) > 0 {
+				lang = getISO(movie.Languages[0])
+			}
+			res = &ParseResult{
+				Title:    movie.PrimaryMovieTitle(),
+				Season:   0,
+				Episode:  0,
+				Year:     movie.Year,
+				Language: lang,
+				Quality:  getQuality(movie.Quality.Quality.Resolution),
+			}
+			return res
+		}
 	}
 
-	movie := rtp.ParseMovieTitle(clean)
-	if movie != nil {
-		lang := "en"
-		if len(movie.Languages) > 0 {
-			lang = getISO(movie.Languages[0])
-		}
-		return &ParseResult{
-			Title:    movie.PrimaryMovieTitle(),
-			Season:   0,
-			Episode:  0,
-			Year:     movie.Year,
-			Language: lang,
-			Quality:  getQuality(movie.Quality.Quality.Resolution),
+	// Try custom episode range extraction if EpisodeStart and EpisodeEnd are not yet set
+	if res.EpisodeStart == 0 && res.EpisodeEnd == 0 {
+		if start, end, found := parseEpisodeRange(clean); found {
+			res.EpisodeStart = start
+			res.EpisodeEnd = end
+			res.Episode = start
+			res.IsPack = true
 		}
 	}
 
-	return &ParseResult{
-		Title:    clean,
-		Season:   fallbackSeason,
-		Episode:  0,
-		Language: "en",
-		Quality:  "sd",
+	// If the season is still 0, try to parse the season number from the clean title
+	if res.Season == 0 {
+		if sMatch := seasonFolderRegex.FindStringSubmatch(clean); len(sMatch) >= 2 {
+			if sVal, err := strconv.Atoi(sMatch[1]); err == nil {
+				res.Season = sVal
+			}
+		}
 	}
+	if res.Season == 0 {
+		res.Season = 1 // default season fallback
+	}
+
+	return res
 }
 
 func ParseFilePath(path string, fallbackSeason int) *ParseResult {
-	// Extract the base filename to prevent parent folder names (e.g., S01 EP (01-08)) from polluting parsing
 	fileName := path
 	if idx := strings.LastIndexAny(path, "/\\"); idx != -1 {
 		fileName = path[idx+1:]
@@ -289,7 +333,6 @@ func isExtraOrSpecialRelaxed(path string) bool {
 }
 
 func matchRange(path string, targetEpisode int) bool {
-	// Extract base filename to prevent parent folder names from polluting range analysis
 	fileName := path
 	if idx := strings.LastIndexAny(path, "/\\"); idx != -1 {
 		fileName = path[idx+1:]
@@ -303,7 +346,6 @@ func matchRange(path string, targetEpisode int) bool {
 			endNumStart := match[4]
 			endNumEnd := match[5]
 
-			// Skip matches that are part of decimal numbers (e.g. 13.00-14.00)
 			if startNumStart > 0 && isDecimalDot(fileName, startNumStart-1) {
 				continue
 			}
@@ -343,13 +385,11 @@ func FindBestSeriesFile(candidates []CandidateFile, targetSeason, targetEpisode,
 	var found bool
 	var maxWeight int64 = -1
 
-	// Dynamically select target filters depending on requested season context
 	checkExtra := isExtraOrSpecial
 	if targetSeason == 0 {
 		checkExtra = isExtraOrSpecialRelaxed
 	}
 
-	// 1. Direct and Range-based Scanning with Size-weighting
 	for _, c := range candidates {
 		if checkExtra(c.Path) {
 			continue
@@ -359,24 +399,20 @@ func FindBestSeriesFile(candidates []CandidateFile, targetSeason, targetEpisode,
 		info := ParseFilePath(cleanPath, fallbackSeason)
 
 		matched := false
-		// Check standard parsing match
 		if info.Season == targetSeason && info.Episode == targetEpisode {
 			matched = true
 		}
 
-		// Check multi-episode parsed array by releasetitleparser (if available)
 		parsedInfo := ParseFilePath(c.Path, fallbackSeason)
 		if parsedInfo.Season == targetSeason && parsedInfo.Episode == targetEpisode {
 			matched = true
 		}
 
-		// Check Range Regex (e.g. S01E21-22)
 		if !matched && info.Season == targetSeason && matchRange(c.Path, targetEpisode) {
 			matched = true
 		}
 
 		if matched {
-			// Size-weighting check to prioritize actual episodes over samples/trailers
 			if c.Size > maxWeight {
 				bestCandidate = c
 				maxWeight = c.Size
@@ -389,14 +425,12 @@ func FindBestSeriesFile(candidates []CandidateFile, targetSeason, targetEpisode,
 		return bestCandidate, true
 	}
 
-	// 2. Index-Based Sequential Match Fallback (For absolute numbering in folder packs)
 	var seasonMatches []CandidateFile
 	for _, c := range candidates {
 		if checkExtra(c.Path) {
 			continue
 		}
 
-		// Ensure it doesn't belong to a different season folder
 		matches := seasonFolderRegex.FindAllStringSubmatch(c.Path, -1)
 		isDifferentSeason := false
 		for _, match := range matches {
@@ -416,7 +450,6 @@ func FindBestSeriesFile(candidates []CandidateFile, targetSeason, targetEpisode,
 	}
 
 	if len(seasonMatches) > 0 {
-		// Sort alphabetically by path to reconstruct original sequence
 		sort.Slice(seasonMatches, func(i, j int) bool {
 			return strings.Compare(strings.ToLower(seasonMatches[i].Path), strings.ToLower(seasonMatches[j].Path)) < 0
 		})
@@ -424,10 +457,8 @@ func FindBestSeriesFile(candidates []CandidateFile, targetSeason, targetEpisode,
 		if targetEpisode > 0 && targetEpisode <= len(seasonMatches) {
 			candidate := seasonMatches[targetEpisode-1]
 
-			// Defensive Verification: Ensure the sequential fallback has no explicit numeric mismatch
 			candParsed := ParseFilePath(candidate.Path, fallbackSeason)
 			if candParsed.Episode != 0 && candParsed.Episode != targetEpisode {
-				// Avoid aborting on valid conjoined multi-episode ranges containing this episode
 				if !matchRange(candidate.Path, targetEpisode) {
 					return CandidateFile{}, false
 				}
@@ -439,9 +470,6 @@ func FindBestSeriesFile(candidates []CandidateFile, targetSeason, targetEpisode,
 	return CandidateFile{}, false
 }
 
-// ── Go Port Required Stremio Addon Adaptors ──
-
-// GenerateThreadHash sorts the magnet URIs before hashing them with the title
 func GenerateThreadHash(title string, magnetURIs []string) string {
 	sorted := make([]string, len(magnetURIs))
 	copy(sorted, magnetURIs)
@@ -451,12 +479,10 @@ func GenerateThreadHash(title string, magnetURIs []string) string {
 	return hex.EncodeToString(h[:])
 }
 
-// ParseTitle is a high-performance proxy to RobustParseInfo
 func ParseTitle(rawTitle string) *ParseResult {
 	return RobustParseInfo(rawTitle, 0)
 }
 
-// ParseMagnet analyzes magnet URIs utilizing RobustParseInfo and rtp.ParseSeriesTitle
 func ParseMagnet(magnetURI string, contentType string) *ParsedMagnet {
 	infohash := extractInfohash(magnetURI)
 	if infohash == "" {
@@ -478,7 +504,6 @@ func ParseMagnet(magnetURI string, contentType string) *ParsedMagnet {
 	}
 
 	dn, _ = url.QueryUnescape(dn)
-	// Remove common web prefixes
 	rePrefix := regexp.MustCompile(`(?i)^www\.[a-z0-9-]+\.[a-z]{2,4}\s*-\s*`)
 	dn = rePrefix.ReplaceAllString(dn, "")
 	dn = strings.TrimSpace(dn)
@@ -502,44 +527,67 @@ func ParseMagnet(magnetURI string, contentType string) *ParsedMagnet {
 		return pm
 	}
 
-	// For series, determine the structural pack type using ovrlord-app's releasetitleparser
-	clean := SanitizeName(dn)
-	seriesInfo := rtp.ParseSeriesTitle(clean)
-
-	if seriesInfo != nil && (seriesInfo.SeasonNumber != 0 || len(seriesInfo.EpisodeNumbers) > 0) {
-		season := seriesInfo.SeasonNumber
-		if season == 0 {
-			season = parsed.Season
-		}
-
-		pm.Season = season
-		if len(seriesInfo.EpisodeNumbers) > 1 {
-			pm.Type = "EPISODE_PACK"
-			pm.EpisodeStart = seriesInfo.EpisodeNumbers[0]
-			pm.EpisodeEnd = seriesInfo.EpisodeNumbers[len(seriesInfo.EpisodeNumbers)-1]
-		} else if len(seriesInfo.EpisodeNumbers) == 0 {
-			pm.Type = "SEASON_PACK"
-		} else {
-			pm.Type = "SINGLE_EPISODE"
-			pm.Episode = seriesInfo.EpisodeNumbers[0]
-		}
+	// Try to extract range from raw magnet display name first (most reliable for direct episode ranges)
+	if start, end, found := parseEpisodeRange(dn); found {
+		pm.Type = "EPISODE_PACK"
+		pm.EpisodeStart = start
+		pm.EpisodeEnd = end
+		pm.Episode = start
 	} else {
-		// Fallback to regex-based parsed results
-		if parsed.IsPack {
-			if parsed.EpisodeStart > 0 && parsed.EpisodeEnd > 0 {
+		// Fallback to releasetitleparser structure parsing
+		clean := SanitizeName(dn)
+		seriesInfo := rtp.ParseSeriesTitle(clean)
+
+		if seriesInfo != nil && (seriesInfo.SeasonNumber != 0 || len(seriesInfo.EpisodeNumbers) > 0) {
+			season := seriesInfo.SeasonNumber
+			if season == 0 {
+				season = parsed.Season
+			}
+
+			pm.Season = season
+			if len(seriesInfo.EpisodeNumbers) > 1 {
 				pm.Type = "EPISODE_PACK"
-			} else {
+				pm.EpisodeStart = seriesInfo.EpisodeNumbers[0]
+				pm.EpisodeEnd = seriesInfo.EpisodeNumbers[len(seriesInfo.EpisodeNumbers)-1]
+			} else if len(seriesInfo.EpisodeNumbers) == 0 {
 				pm.Type = "SEASON_PACK"
+			} else {
+				pm.Type = "SINGLE_EPISODE"
+				pm.Episode = seriesInfo.EpisodeNumbers[0]
 			}
 		} else {
-			pm.Type = "SINGLE_EPISODE"
+			// Fallback to regex-based parsed results
+			if parsed.IsPack {
+				if parsed.EpisodeStart > 0 && parsed.EpisodeEnd > 0 {
+					pm.Type = "EPISODE_PACK"
+					pm.EpisodeStart = parsed.EpisodeStart
+					pm.EpisodeEnd = parsed.EpisodeEnd
+				} else {
+					pm.Type = "SEASON_PACK"
+				}
+			} else {
+				pm.Type = "SINGLE_EPISODE"
+			}
 		}
+	}
+
+	// Double check for complete season keyword triggers
+	dnLower := strings.ToLower(dn)
+	if strings.Contains(dnLower, "complete") || strings.Contains(dnLower, "season pack") || strings.Contains(dnLower, "full season") || strings.Contains(dnLower, "all episodes") {
+		pm.Type = "SEASON_PACK"
+		pm.Episode = 0
+		pm.EpisodeStart = 0
+		pm.EpisodeEnd = 0
+	}
+
+	// Ensure season is always set
+	if pm.Season == 0 {
+		pm.Season = 1
 	}
 
 	return pm
 }
 
-// extractInfohash parses the standard infohash from the magnet URI
 func extractInfohash(magnet string) string {
 	re := regexp.MustCompile(`(?i)btih:([a-f0-9]{40})`)
 	m := re.FindStringSubmatch(magnet)
