@@ -1,5 +1,5 @@
-// Version: 1.1.0
-// Change log: Enhanced truncationRegexes with separator boundaries and added dynamic audio/bitrate filters to filterTorrentNoise to sanitize complex and numeric release titles cleanly.
+// Version: 1.1.1
+// Change log: Integrated a zero-dependency, high-speed static Unicode foldRune mapper in SanitizeName to map accented characters (like ō, é) to their base ASCII equivalents.
 
 package parser
 
@@ -159,6 +159,92 @@ var parserStopWords = map[string]bool{
 	"la": true, "le": true, "les": true, "el": true, "un": true, "une": true,
 }
 
+// foldRune translates accented/diacritic characters to their base ASCII equivalents to preserve romanized titles cleanly.
+func foldRune(r rune) rune {
+	switch r {
+	// Lowercase accents
+	case 'à', 'á', 'â', 'ã', 'ä', 'å', 'ā', 'ă', 'ą', 'ǎ', 'ǻ', 'α':
+		return 'a'
+	case 'æ':
+		return 'e'
+	case 'ç', 'ć', 'ĉ', 'ċ', 'č':
+		return 'c'
+	case 'è', 'é', 'ê', 'ë', 'ē', 'ĕ', 'ė', 'ę', 'ě', 'ε':
+		return 'e'
+	case 'ĝ', 'ğ', 'ġ', 'ģ':
+		return 'g'
+	case 'ĥ', 'ħ':
+		return 'h'
+	case 'ì', 'í', 'î', 'ï', 'ĩ', 'ī', 'ĭ', 'į', 'ǐ', 'ι':
+		return 'i'
+	case 'ĵ':
+		return 'j'
+	case 'ķ', 'ĸ':
+		return 'k'
+	case 'ĺ', 'ļ', 'ľ', 'ŀ', 'ł':
+		return 'l'
+	case 'ñ', 'ń', 'ņ', 'ň', 'ŉ', 'ŋ':
+		return 'n'
+	case 'ò', 'ó', 'ô', 'õ', 'ö', 'ō', 'ŏ', 'ő', 'ǒ', 'ǿ', 'ο', 'ω':
+		return 'o'
+	case 'ŕ', 'ŗ', 'ř':
+		return 'r'
+	case 'ś', 'ŝ', 'ş', 'š', 'ș':
+		return 's'
+	case 'ţ', 'ť', 'ț':
+		return 't'
+	case 'ù', 'ú', 'û', 'ü', 'ũ', 'ū', 'ŭ', 'ů', 'ű', 'ų', 'ǔ', 'ǖ', 'ǘ', 'ǚ', 'ǜ':
+		return 'u'
+	case 'ŵ':
+		return 'w'
+	case 'ý', 'ÿ', 'ŷ':
+		return 'y'
+	case 'ź', 'ż', 'ž':
+		return 'z'
+
+	// Uppercase accents
+	case 'À', 'Á', 'Â', 'Ã', 'Ä', 'Å', 'Ā', 'Ă', 'Ą', 'Ǎ', '?', 'Α':
+		return 'A'
+	case 'Æ':
+		return 'E'
+	case 'Ç', 'Ć', 'Ĉ', 'Ċ', 'Č':
+		return 'C'
+	case 'È', 'É', 'Ê', 'Ë', 'Ē', 'Ĕ', 'Ė', 'Ę', 'Ě', 'Ε':
+		return 'E'
+	case 'Ĝ', 'Ğ', 'Ġ', 'Ģ':
+		return 'G'
+	case 'Ĥ', 'Ħ':
+		return 'H'
+	case 'Ì', 'Í', 'Î', 'Ï', 'Ĩ', 'Ī', 'Ĭ', 'Į', 'Ǐ', 'Ι':
+		return 'I'
+	case 'Ĵ':
+		return 'J'
+	case 'Ķ':
+		return 'K'
+	case 'Ĺ', 'Ļ', 'Ľ', 'Ŀ', 'Ł':
+		return 'L'
+	case 'Ñ', 'Ń', 'Ņ', 'Ň', 'Ŋ':
+		return 'N'
+	case 'Ò', 'Ó', 'Ô', 'Õ', 'Ö', 'Ō', 'Ŏ', 'Ő', 'Ǒ', 'Ǿ', 'Ο', 'Ω':
+		return 'O'
+	case 'Ŕ', 'Ŗ', 'Ř':
+		return 'R'
+	case 'Ś', 'Ŝ', 'Ş', 'Š', 'Ș':
+		return 'S'
+	case 'Ţ', 'Ť', 'Ț':
+		return 'T'
+	case 'Ù', 'Ú', 'Û', 'Ü', 'Ũ', 'Ū', 'Ŭ', 'Ů', 'Ű', 'Ų', 'Ǔ', 'Ǖ', 'Ǘ', 'Ǜ':
+		return 'U'
+	case 'Ŵ':
+		return 'W'
+	case 'Ý', 'Ÿ', 'Ŷ':
+		return 'Y'
+	case 'Ź', 'Ż', 'Ž':
+		return 'Z'
+	}
+	return r
+}
+
 func normalizeEpisodePatterns(s string) string {
 	return epPatternRegex.ReplaceAllString(s, "${1}E${2}")
 }
@@ -217,8 +303,17 @@ func SanitizeName(name string) string {
 	// 2. Normalize episode patterns (e.g. S02 EP(15) -> S02E15)
 	s = normalizeEpisodePatterns(s)
 
-	// 3. Remove non-ASCII scripts (Chinese, Cyrillic, Japanese, etc.)
+	// 3. Translate accented/diacritic characters to their base ASCII equivalents (Unicode Folding)
 	var b strings.Builder
+	b.Grow(len(s))
+	for _, r := range s {
+		b.WriteRune(foldRune(r))
+	}
+	s = b.String()
+
+	// 4. Remove non-ASCII scripts (Chinese, Cyrillic, Japanese, etc.)
+	b.Reset()
+	b.Grow(len(s))
 	for _, r := range s {
 		if r > unicode.MaxASCII {
 			b.WriteRune(' ')
@@ -228,16 +323,16 @@ func SanitizeName(name string) string {
 	}
 	s = b.String()
 
-	// 4. Remove residual URLs/domains (e.g. www.BTHDTV.com)
+	// 5. Remove residual URLs/domains (e.g. www.BTHDTV.com)
 	s = urlRegex.ReplaceAllString(s, " ")
 
-	// 5. Remove residual empty/garbage brackets
+	// 6. Remove residual empty/garbage brackets
 	s = bracketRegex.ReplaceAllString(s, " ")
 
-	// 6. Collapse spaces cleanly using our zero-allocation single-pass helper
+	// 7. Collapse spaces cleanly using our zero-allocation single-pass helper
 	s = collapseSpaces(s)
 	
-	// 7. Trim leftover leading/trailing punctuation
+	// 8. Trim leftover leading/trailing punctuation
 	s = strings.TrimLeft(s, " .-_[]()/\\")
 	s = strings.TrimRight(s, " .-_[]()/\\")
 	return s
