@@ -1,5 +1,5 @@
-# Version: 1.0.2
-# Change log: Fixed YAML indentation syntax and added an explicit "if" tag-guard on the release step to prevent standard branch commits from polluting your release dashboard.
+# Version: 1.0.3
+# Change log: Expanded the release step condition to allow manual UI triggers (workflow_dispatch) to force-publish releases alongside standard tag triggers.
 
 name: Build & Release Static Binaries
 
@@ -84,7 +84,7 @@ jobs:
 
       - name: Create Release and Upload Assets
         uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/v') # ◄ CRITICAL GUARD: Only creates the Release asset when triggered by a pushed git version tag!
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch' # ◄ UPDATED: Allows manual execution to force-publish releases!
         with:
           files: |
             stremio-mvshows-linux-amd64
