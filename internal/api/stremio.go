@@ -121,7 +121,8 @@ func catalogHandler(c *gin.Context) {
 	// EXPERT FIX: Retrieve ONLY successfully linked threads that possess a valid IMDb ID (tt...)
 	// This completely eliminates custom pending IDs (addonId:pending:...) from catalog pages,
 	// preventing layout issues and rendering professional Metahub-aligned cards.
-	query := database.DB.
+	// NOTE: Appending .Debug() to log GORM SQL execution trace directly to standard output.
+	query := database.DB.Debug().
 		Where("status = ? AND type = ? AND tmdb_id IN (SELECT tmdb_id FROM tmdb_metadata WHERE imdb_id IS NOT NULL AND imdb_id != '')", "linked", mediaType)
 
 	// Filter by specific catalogs matching manifest IDs
@@ -210,8 +211,9 @@ func metaHandler(c *gin.Context) {
 	}
 
 	// 1. First attempt to lookup as standard linked metadata by IMDb ID (tt...)
+	// NOTE: Appending .Debug() to log GORM SQL execution trace directly to standard output.
 	var meta database.TmdbMetadata
-	err := database.DB.Where("imdb_id = ? OR tmdb_id = ?", cleanID, cleanID).Preload("Threads").First(&meta).Error
+	err := database.DB.Debug().Where("imdb_id = ? OR tmdb_id = ?", cleanID, cleanID).Preload("Threads").First(&meta).Error
 	if err == nil {
 		var details tmdbLightData
 		if errJson := json.Unmarshal([]byte(meta.Data), &details); errJson == nil {
@@ -293,8 +295,9 @@ func metaHandler(c *gin.Context) {
 	}
 
 	// 2. Second attempt: Check if the ID refers to an unlinked, pending ThreadHash (backward-compatibility)
+	// NOTE: Appending .Debug() to log GORM SQL execution trace directly to standard output.
 	var t database.Thread
-	errThread := database.DB.Where("thread_hash = ?", cleanID).First(&t).Error
+	errThread := database.DB.Debug().Where("thread_hash = ?", cleanID).First(&t).Error
 	if errThread == nil {
 		metaObj := gin.H{
 			"id":          id,
@@ -344,12 +347,14 @@ func streamHandler(c *gin.Context) {
 		baseID = cleanID
 	}
 
+	// NOTE: Appending .Debug() to log GORM SQL execution trace directly to standard output.
 	var meta database.TmdbMetadata
-	err := database.DB.Where("imdb_id = ? OR tmdb_id = ?", baseID, baseID).First(&meta).Error
+	err := database.DB.Debug().Where("imdb_id = ? OR tmdb_id = ?", baseID, baseID).First(&meta).Error
 	if err != nil {
 		// If metadata lookup fails, check if the query requested unlinked/pending ThreadHash streams
+		// NOTE: Appending .Debug() to log GORM SQL execution trace directly to standard output.
 		var t database.Thread
-		errThread := database.DB.Where("thread_hash = ?", baseID).First(&t).Error
+		errThread := database.DB.Debug().Where("thread_hash = ?", baseID).First(&t).Error
 		if errThread == nil {
 			// This is an unlinked thread. Return direct P2P fallback streams only (No RD mapping)
 			streamList := make([]gin.H, 0)
@@ -388,13 +393,15 @@ func streamHandler(c *gin.Context) {
 	var streams []database.Stream
 	if season != -1 && episode != -1 {
 		// Series path: search direct episode match OR full season packs where episode is NULL
-		err = database.DB.Where("tmdb_id = ? AND ((season = ? AND episode <= ? AND episode_end >= ?) OR (season = ? AND episode IS NULL))",
+		// NOTE: Appending .Debug() to log GORM SQL execution trace directly to standard output.
+		err = database.DB.Debug().Where("tmdb_id = ? AND ((season = ? AND episode <= ? AND episode_end >= ?) OR (season = ? AND episode IS NULL))",
 			meta.TmdbID, season, episode, episode, season).
 			Order("quality DESC").
 			Find(&streams).Error
 	} else {
 		// Movie path
-		err = database.DB.Where("tmdb_id = ?", meta.TmdbID).Order("quality DESC").Find(&streams).Error
+		// NOTE: Appending .Debug() to log GORM SQL execution trace directly to standard output.
+		err = database.DB.Debug().Where("tmdb_id = ?", meta.TmdbID).Order("quality DESC").Find(&streams).Error
 	}
 
 	if err != nil {
