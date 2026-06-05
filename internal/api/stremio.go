@@ -1,5 +1,5 @@
-// Version: 1.1.3
-// Change log: Overhauled pickBestDebridFile to leverage parser.FindBestSeriesFile, unifying both instant and background paths to support full episode ranges and sorted alphabetical sequential fallbacks.
+// Version: 1.1.4
+// Change log: Migrated catalog poster resolution to Stremio's official Metahub CDN (images.metahub.space) to prevent TMDB hotlinking and CORS blocks on client apps.
 
 package api
 
@@ -352,8 +352,6 @@ func catalogHandler(c *gin.Context) {
 		}
 		seenIDs[metaID] = true
 
-		poster := ""
-		desc := ""
 		title := t.CleanTitle
 		if title == "" {
 			title = t.RawTitle
@@ -368,13 +366,6 @@ func catalogHandler(c *gin.Context) {
 			// Memory Optimization: decode directly from strings.NewReader to prevent []byte cast and allocations
 			dec := json.NewDecoder(strings.NewReader(t.TmdbMetadata.Data))
 			if dec.Decode(&tmdbData) == nil {
-				if tmdbData.PosterPath != "" {
-					poster = "https://image.tmdb.org/t/p/w500" + tmdbData.PosterPath
-				}
-				if tmdbData.Overview != "" {
-					desc = tmdbData.Overview
-				}
-
 				// Extract release year from TMDB date
 				dateStr := tmdbData.ReleaseDate
 				if dateStr == "" {
@@ -399,16 +390,24 @@ func catalogHandler(c *gin.Context) {
 			}
 		}
 
-		if t.CustomPoster != nil && *t.CustomPoster != "" {
-			poster = *t.CustomPoster
-		}
-		if t.CustomDescription != nil && *t.CustomDescription != "" {
-			desc = *t.CustomDescription
-		}
-
 		// Fallback releaseInfo from Thread.Year
 		if releaseInfo == "" && t.Year != nil {
 			releaseInfo = strconv.Itoa(*t.Year)
+		}
+
+		// HIGH-FIDELITY RESOLUTION: Dynamically generate official, CORS-whitelisted, Stremio-native Metahub poster CDN URLs
+		// This bypasses raw TMDB image paths entirely, resolving hotlink protections and rendering crisp artwork on all platforms (including Android TV & Web).
+		poster := "https://images.metahub.space/poster/medium/" + metaID + "/img"
+
+		if t.CustomPoster != nil && *t.CustomPoster != "" {
+			poster = *t.CustomPoster
+		}
+
+		// Set default description if TMDBoverview failed
+		desc := tmdbData.Overview
+
+		if t.CustomDescription != nil && *t.CustomDescription != "" {
+			desc = *t.CustomDescription
 		}
 
 		metaEntry := StremioMetaEntry{
@@ -416,13 +415,9 @@ func catalogHandler(c *gin.Context) {
 			Type:        t.Type,
 			Name:        title,
 			ReleaseInfo: releaseInfo,
+			Poster:      poster,
 		}
 
-		// Cinemeta inferred poster & description fallback rule:
-		// Only output poster and description keys if they possess explicitly loaded or overridden values.
-		if poster != "" {
-			metaEntry.Poster = poster
-		}
 		if desc != "" {
 			metaEntry.Description = desc
 		}
@@ -478,12 +473,6 @@ func metaHandler(c *gin.Context) {
 		// Memory Optimization: decode directly from strings.NewReader to prevent allocations
 		dec := json.NewDecoder(strings.NewReader(meta.Data))
 		if dec.Decode(&details) == nil {
-			poster := ""
-			if details.PosterPath != "" {
-				poster = "https://image.tmdb.org/t/p/w500" + details.PosterPath
-			}
-			overview := details.Overview
-
 			mediaType := "movie"
 			if len(meta.Threads) > 0 {
 				mediaType = meta.Threads[0].Type
@@ -494,7 +483,10 @@ func metaHandler(c *gin.Context) {
 				displayName = details.Name
 			}
 
+			poster := "https://images.metahub.space/poster/medium/" + cleanID + "/img"
+
 			// Apply custom metadata overrides if defined by the admin
+			overview := details.Overview
 			if len(meta.Threads) > 0 {
 				t := meta.Threads[0]
 				if t.CustomPoster != nil && *t.CustomPoster != "" {
@@ -522,11 +514,9 @@ func metaHandler(c *gin.Context) {
 				Type:        mediaType,
 				Name:        displayName,
 				ReleaseInfo: releaseInfo,
+				Poster:      poster,
 			}
 
-			if poster != "" {
-				metaObj.Poster = poster
-			}
 			if overview != "" {
 				metaObj.Description = overview
 			}
@@ -1416,7 +1406,7 @@ func buildTrackerSources() []string {
 				proto = "udp"
 				rest = strings.TrimPrefix(t, "udp://")
 			} else if strings.HasPrefix(t, "http://") {
-				rest = strings.TrimPrefix(t, "http://")
+				rest = strings.TrimPrefix(rest, "http://")
 			} else if strings.HasPrefix(t, "https://") {
 				rest = strings.TrimPrefix(rest, "https://")
 			}
