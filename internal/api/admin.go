@@ -1,5 +1,5 @@
-// Version: 1.0.8
-// Change log: Restored the missing matchedTitles slice declaration in autoMatchHandler to resolve the compile-time undefined variable error.
+// Version: 1.0.9
+// Change log: Initialized matchedTitles using make([]string, 0) to ensure empty bulk runs serialize as a clean JSON array [] instead of null.
 
 package api
 
@@ -355,7 +355,7 @@ func autoMatchHandler(c *gin.Context) {
 
 	var successCount int
 	var failCount int
-	var matchedTitles []string
+	matchedTitles := make([]string, 0) // Explicitly initialized using make to prevent null JSON serialization on 0 matches
 	var results []matchTaskResult
 	var mu sync.Mutex
 
@@ -363,7 +363,7 @@ func autoMatchHandler(c *gin.Context) {
 	sem := make(chan struct{}, 5)
 	var wg sync.WaitGroup
 
-	utils.Logger.Info().Int("total_queued", len(body.ThreadIDs)).Msg("Bulk auto-match network search initiated.")
+	utils.Logger.Info().Int("total_queued", len(body.ThreadIDs)).Msg("Bulk auto-match request received. Commencing matching sequence...")
 
 	for idx, id := range body.ThreadIDs {
 		wg.Add(1)
@@ -385,6 +385,7 @@ func autoMatchHandler(c *gin.Context) {
 			// Clean the title using our newly optimized parser logic
 			parsed := parser.ParseTitle(t.RawTitle)
 			if parsed == nil || parsed.Title == "" {
+				utils.Logger.Warn().Str("raw_title", t.RawTitle).Msg("Parsing title failed (returned empty). Storing in failure register.")
 				mu.Lock()
 				failCount++
 				mu.Unlock()
@@ -646,7 +647,7 @@ func rdCheckHandler(c *gin.Context) {
 func failuresHandler(c *gin.Context) {
 	failures, err := database.GetFailedThreads()
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve parse failures"})
+		c.Scanner(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve parse failures"})
 		return
 	}
 	c.JSON(http.StatusOK, failures)
