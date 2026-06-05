@@ -1,3 +1,6 @@
+// Version: 1.0.1
+// Change log: Overhauled AddAndSelect with a 10-attempt, 2-second sleep retry loop on selectFiles 404 errors to give Real-Debrid time to fetch torrent metadata over the DHT network.
+
 package debrid
 
 import (
@@ -240,15 +243,47 @@ func (r *realDebridProvider) CheckCached(ctx context.Context, hashes []string) (
 	return result, nil
 }
 
+// AddAndSelect includes an automatic, 10-attempt loop to handle metadata delay on uncached magnets cleanly.
 func (r *realDebridProvider) AddAndSelect(ctx context.Context, magnet string) (*TorrentInfo, error) {
 	addRes, err := r.AddMagnet(ctx, magnet)
 	if err != nil {
 		return nil, err
 	}
-	err = r.SelectFiles(ctx, addRes.ID, []string{"all"})
-	if err != nil {
-		return nil, err
+
+	// Real-Debrid metadata delay fallback:
+	// If the torrent was just added, Real-Debrid needs a few seconds to fetch metadata from the DHT network.
+	// We retry SelectFiles up to 10 times with a 2-second delay if it returns an HTTP 404 error.
+	var selectErr error
+	for attempt := 0; attempt < 10; attempt++ {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		default:
+		}
+
+		selectErr = r.SelectFiles(ctx, addRes.ID, []string{"all"})
+		if selectErr == nil {
+			break
+		}
+
+		// If it's a 404, log a warning, wait 2 seconds, and retry
+		if strings.Contains(selectErr.Error(), "status 404") {
+			utils.Logger.Warn().
+				Int("attempt", attempt+1).
+				Str("id", addRes.ID).
+				Msg("Real-Debrid selectFiles returned 404. Metadata is resolving over DHT. Retrying in 2 seconds...")
+			time.Sleep(2 * time.Second)
+			continue
+		}
+
+		// Other severe error, abort
+		return nil, selectErr
 	}
+
+	if selectErr != nil {
+		return nil, selectErr
+	}
+
 	return r.GetTorrentInfo(ctx, addRes.ID)
 }
 
