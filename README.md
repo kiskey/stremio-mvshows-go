@@ -64,7 +64,7 @@ You can simply download the binary from there.
 
 ### Network
 
-- Configure either:
+- Set up either:
   - Static IPv4
   - DHCP
 
@@ -72,10 +72,10 @@ You can simply download the binary from there.
 
 ## 4. Enabling SSH on the Alpine Container
 
-By default, Alpine templates block root SSH logins. To enable access:
+By default, Alpine default templates block root SSH logins. To enable access:
 
 1. Open the Proxmox container Console (NoVNC) as root.
-2. Execute the following commands:
+2. Execute the following commands to install OpenSSH, configure root password login, and start the daemon:
 
 ```bash
 # Update repositories and install OpenSSH
@@ -98,25 +98,39 @@ ssh root@<your_alpine_lxc_ip_address>
 
 ---
 
-## 5. Service Installation & Environment Configuration
+## 5. Service Installation & Configuration (Dynamic OpenRC)
 
-Transfer your compiled binary `stremio-mvshows` into the container's `/usr/local/bin/` directory using `scp` or SFTP, then make it executable:
+### Step 1: Deploy the Binary
+
+Transfer your compiled binary `stremio-mvshows` into the container's `/usr/local/bin/` folder using `scp` or SFTP, and make it executable:
 
 ```bash
 chmod +x /usr/local/bin/stremio-mvshows
 ```
 
-To prevent editing the system init file every time configuration changes, OpenRC's native `/etc/conf.d/` mechanism is used to separate configuration from execution.
+### Step 2: Deploy the Static Frontend Assets
 
-### Step 1: Create the Environment File
+Create the target public directory inside the executable directory and download the `admin.html` file cleanly:
 
-Create the configuration file:
+```bash
+# Create directory
+mkdir -p /usr/local/bin/public
+
+# Download the dashboard file (Note: Must use UPPERCASE -O)
+wget -O /usr/local/bin/public/admin.html https://raw.githubusercontent.com/kiskey/stremio-mvshows-go/refs/heads/main/public/admin.html
+```
+
+### Step 3: Create the Environment File
+
+To prevent having to edit the system init file every time you change configuration values, we separate configuration from execution using OpenRC's native `/etc/conf.d/` mapping.
+
+Create the config file at:
 
 ```bash
 vi /etc/conf.d/stremio-mvshows
 ```
 
-Paste your environment variables:
+Paste your custom environment variables:
 
 ```bash
 # /etc/conf.d/stremio-mvshows
@@ -137,25 +151,26 @@ CACHE_EXPIRY_ENABLED="true"
 CACHE_EXPIRY_DAYS="5"
 ```
 
-### Step 2: Create the OpenRC Service Script
+### Step 4: Create the OpenRC Service Script
 
-Create the OpenRC service file:
+Create the OpenRC service script at:
 
 ```bash
 vi /etc/init.d/stremio-mvshows
 ```
 
-Paste the following optimized service script. It uses a single-line shell pipeline to automatically extract and export all variable names declared in the configuration file, passing them directly to the running binary on startup.
+Paste this optimized script. It uses a single-line shell pipeline to automatically extract and export all variable names declared in your config file, and sets the working directory explicitly to `/usr/local/bin` to allow Gin to resolve your static frontend assets.
 
 ```bash
 #!/sbin/openrc-run
-# Version: 1.1.3
-# Description: Custom OpenRC service manager featuring automatic dynamic exporting of configuration variables.
+# Version: 1.1.4
+# Description: Custom OpenRC service manager featuring automatic dynamic exporting of configuration variables and forced binary-folder CWD.
 
 name="stremio-mvshows"
 description="Stremio MVShows Go standalone daemon"
 command="/usr/local/bin/stremio-mvshows"
 command_background="true"
+directory="/usr/local/bin" # Forces working directory to the binary folder to resolve ./public/ admin files
 pidfile="/run/${RC_SVCNAME}.pid"
 output_log="/var/log/stremio-mvshows.log"
 error_log="/var/log/stremio-mvshows.err"
@@ -176,7 +191,7 @@ start_pre() {
 
 ## 6. Managing the Service Lifecycle
 
-Make the service executable, enable it at boot, and manage its lifecycle:
+Make the service script executable, enable the daemon on boot, and start it:
 
 ```bash
 # 1. Apply executable permissions
@@ -196,7 +211,7 @@ rc-service stremio-mvshows status
 
 ### Monitoring the Outputs
 
-To monitor standard output and startup diagnostics in real time:
+To monitor standard outputs and server initialization diagnostics in real-time, run:
 
 ```bash
 tail -f /var/log/stremio-mvshows.log
