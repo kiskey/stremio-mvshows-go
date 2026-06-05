@@ -1,3 +1,6 @@
+<!-- Version: 1.0.1 -->
+<!-- Change log: Added "Auto-Match Focused" and "Bulk Auto-Match" buttons with fully connected JavaScript handlers to allow one-click metadata resolution from the admin dashboard. -->
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -78,15 +81,17 @@
         <label>Custom Description: <input type="text" id="customDescription" style="width:400px;"></label><br>
         <button id="saveFocused">Save Focused</button>
 
-        <h3>2B. Link Official ID</h3>
-        <p>Accepts IMDb (tt...) or TMDB (tv:... or movie:...).</p>
+        <h3>2B. Link Official ID &amp; Auto-Matching</h3>
+        <p>Accepts IMDb (tt...) or TMDB (tv:... or movie:...). Or run an instant optimized auto-match check.</p>
         <label>Official ID: <input type="text" id="officialId"></label>
         <button id="linkFocused">Link Focused</button>
+        <button id="autoMatchFocused" style="background: #2a69ac;">Auto-Match Focused</button>
 
         <hr>
         <h4>Bulk operations (Selected List)</h4>
         <button id="bulkLink">Bulk Link</button>
         <button id="bulkUpdateMeta">Bulk Update Meta</button>
+        <button id="bulkAutoMatch" style="background: #2a69ac;">Bulk Auto-Match</button>
         <p>Tip: Great for series like Bigg Boss where many threads need the same ID or metadata.</p>
 
         <h3>3. Choose a Stream to Cache in Debrid</h3>
@@ -232,6 +237,56 @@
                 const d = await r.json();
                 alert(d.message);
                 loadPending();
+            });
+
+            el('autoMatchFocused').addEventListener('click', async () => {
+                if (!focusedThreadId) return alert('Set a focused item first.');
+                el('autoMatchFocused').disabled = true;
+                try {
+                    const r = await fetch('/admin/api/auto-match', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ threadIds: [parseInt(focusedThreadId)] })
+                    });
+                    const d = await r.json();
+                    if (d.successCount > 0) {
+                        alert(`Successfully auto-matched: "${d.matchedTitles.join(', ')}"!`);
+                        focusedThreadId = null;
+                        el('focusedTitle').textContent = 'None';
+                        el('streamsBody').innerHTML = '<tr><td colspan="3">Set a focused item to see streams.</td></tr>';
+                        loadPending();
+                        fetchHealth();
+                    } else {
+                        alert('Auto-matching failed to locate a confident metadata candidate. Please enter a manual ID.');
+                    }
+                } catch (err) {
+                    alert('Error executing auto-match: ' + err.message);
+                } finally {
+                    el('autoMatchFocused').disabled = false;
+                }
+            });
+
+            el('bulkAutoMatch').addEventListener('click', async () => {
+                const sel = el('selectedList');
+                const ids = [...sel.options].map(opt => parseInt(opt.value));
+                if (ids.length === 0) return alert('Select and move items to the "Selected" column first.');
+                el('bulkAutoMatch').disabled = true;
+                try {
+                    const r = await fetch('/admin/api/auto-match', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ threadIds: ids })
+                    });
+                    const d = await r.json();
+                    alert(`Bulk Auto-Match complete!\nMatched: ${d.successCount}\nFailed: ${d.failCount}\nMatched Titles: ${d.matchedTitles.join(', ')}`);
+                    sel.innerHTML = '';
+                    loadPending();
+                    fetchHealth();
+                } catch (err) {
+                    alert('Error executing bulk auto-match: ' + err.message);
+                } finally {
+                    el('bulkAutoMatch').disabled = false;
+                }
             });
 
             el('saveFocused').addEventListener('click', async () => {
