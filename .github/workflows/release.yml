@@ -1,0 +1,54 @@
+# Version: 1.0.0
+# Description: GitHub Actions pipeline to automatically build fully static, stripped Go binaries for AMD64/ARM64 and attach them as release assets.
+
+name: Build & Release Static Binaries
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write # Grants write access to GITHUB_TOKEN to create and publish release assets
+
+jobs:
+  release:
+    name: Build & Release
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.23' # Fully compatible with standard and cutting-edge project files
+          cache: true        # Automatically caches Go modules and build directory structures
+
+      - name: Install Dependencies
+        run: |
+          go mod download
+
+      - name: Build Static Binary (Linux AMD64)
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -installsuffix cgo -o stremio-mvshows-linux-amd64 ./cmd/server
+
+      - name: Build Static Binary (Linux ARM64)
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -installsuffix cgo -o stremio-mvshows-linux-arm64 ./cmd/server
+
+      - name: Generate Checksums
+        run: |
+          sha256sum stremio-mvshows-linux-amd64 stremio-mvshows-linux-arm64 > checksums.txt
+
+      - name: Create Release and Upload Assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            stremio-mvshows-linux-amd64
+            stremio-mvshows-linux-arm64
+            checksums.txt
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
