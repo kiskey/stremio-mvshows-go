@@ -1,5 +1,5 @@
-// Version: 1.0.2
-// Change log: Integrated granular, real-time progress logging (Info/Warn/Error) inside autoMatchHandler to allow immediate feedback during large bulk match operations.
+// Version: 1.0.3
+// Change log: Overhauled autoMatchHandler to use a bounded concurrency worker pool (max 5 parallel goroutines) to eliminate 504 Gateway Timeout HTML proxy errors during bulk runs.
 
 package api
 
@@ -10,6 +10,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -319,6 +320,7 @@ func linkOfficialHandler(c *gin.Context) {
 }
 
 // autoMatchHandler handles manual trigger of auto-matching on selected thread IDs using clean title parsing.
+// Overhauled with bounded concurrency to process bulk queues cleanly under proxy timeouts.
 func autoMatchHandler(c *gin.Context) {
 	var body struct {
 		ThreadIDs []int `json:"threadIds"`
@@ -336,150 +338,173 @@ func autoMatchHandler(c *gin.Context) {
 	cfg := config.Load()
 	tmdbClient := metadata.NewTMDBClient(cfg)
 
-	successCount := 0
-	failCount := 0
-	matchedTitles := make([]string, 0)
+	var successCount int
+	var failCount int
+	var matchedTitles []string
+	var mu sync.Mutex
 
-	// Real-time progress start log
+	// Bounded Concurrency: limit parallel requests to maximum 5 workers to protect TMDB rate limits
+	sem := make(chan struct{}, 5)
+	var wg sync.WaitGroup
+
 	utils.Logger.Info().Int("total_queued", len(body.ThreadIDs)).Msg("Bulk auto-match request received. Commencing matching sequence...")
 
 	for idx, id := range body.ThreadIDs {
-		var t database.Thread
-		if errDb := database.DB.First(&t, "id = ?", id).Error; errDb != nil {
-			utils.Logger.Warn().Int("thread_id", id).Msg("Thread ID not found in database. Skipping.")
-			failCount++
-			continue
-		}
-
-		// Aggressive Title Cleaning using our fine-tuned parser
-		parsed := parser.ParseTitle(t.RawTitle)
-		if parsed == nil || parsed.Title == "" {
-			utils.Logger.Warn().Str("raw_title", t.RawTitle).Msg("Parsing title failed (returned empty). Storing in failure register.")
-			failCount++
-			continue
-		}
-
-		tmdbResult, errTmdb := tmdbClient.Search(parsed.Title, parsed.Year, t.Type)
-		if errTmdb != nil {
-			utils.Logger.Warn().
-				Int("index", idx+1).
-				Str("clean_title", parsed.Title).
-				Int("year", parsed.Year).
-				Err(errTmdb).
-				Msg("TMDB search returned no confident match.")
-			failCount++
-			continue
-		}
-
-		errTx := database.DB.Transaction(func(tx *gorm.DB) error {
-			rawDataBytes, _ := json.Marshal(tmdbResult.RawData)
+		wg.Add(1)
+		go func(index int, threadID int) {
+			defer wg.Done()
 			
-			var imdbIDPtr *string
-			if tmdbResult.ImdbID != "" {
-				val := tmdbResult.ImdbID
-				imdbIDPtr = &val
+			sem <- struct{}{}
+			defer func() { <-sem }()
+
+			var t database.Thread
+			if errDb := database.DB.First(&t, "id = ?", threadID).Error; errDb != nil {
+				utils.Logger.Warn().Int("thread_id", threadID).Msg("Thread ID not found in database. Skipping.")
+				mu.Lock()
+				failCount++
+				mu.Unlock()
+				return
 			}
 
-			tmdbMetadata := database.TmdbMetadata{
-				TmdbID: tmdbResult.TmdbID,
-				ImdbID: imdbIDPtr,
-				Data:   string(rawDataBytes),
-			}
-			if tmdbResult.Year > 0 {
-				tmdbMetadata.Year = &tmdbResult.Year
-			}
-
-			errMeta := tx.Clauses(clause.OnConflict{
-				Columns:   []clause.Column{{Name: "tmdb_id"}},
-				UpdateAll: true,
-			}).Create(&tmdbMetadata).Error
-			if errMeta != nil {
-				return errMeta
+			// Clean the title using our newly optimized parser logic
+			parsed := parser.ParseTitle(t.RawTitle)
+			if parsed == nil || parsed.Title == "" {
+				utils.Logger.Warn().Str("raw_title", t.RawTitle).Msg("Parsing title failed (returned empty). Storing in failure register.")
+				mu.Lock()
+				failCount++
+				mu.Unlock()
+				return
 			}
 
-			t.TmdbID = &tmdbResult.TmdbID
-			t.Status = "linked"
-			if tmdbResult.Year > 0 {
-				t.Year = &tmdbResult.Year
+			tmdbResult, errTmdb := tmdbClient.Search(parsed.Title, parsed.Year, t.Type)
+			if errTmdb != nil {
+				utils.Logger.Warn().
+					Int("index", index+1).
+					Str("clean_title", parsed.Title).
+					Int("year", parsed.Year).
+					Err(errTmdb).
+					Msg("TMDB search returned no confident match.")
+				mu.Lock()
+				failCount++
+				mu.Unlock()
+				return
 			}
 
-			errThr := tx.Save(&t).Error
-			if errThr != nil {
-				return errThr
-			}
-
-			for _, magnet := range t.MagnetURIs {
-				parsedMagnet := parser.ParseMagnet(magnet, t.Type)
-				if parsedMagnet == nil {
-					continue
+			errTx := database.DB.Transaction(func(tx *gorm.DB) error {
+				rawDataBytes, _ := json.Marshal(tmdbResult.RawData)
+				
+				var imdbIDPtr *string
+				if tmdbResult.ImdbID != "" {
+					val := tmdbResult.ImdbID
+					imdbIDPtr = &val
 				}
 
-				cacheRecord := database.MagnetCache{
-					Infohash: parsedMagnet.Infohash,
-					Magnet:   magnet,
+				tmdbMetadata := database.TmdbMetadata{
+					TmdbID: tmdbResult.TmdbID,
+					ImdbID: imdbIDPtr,
+					Data:   string(rawDataBytes),
 				}
-				_ = tx.Clauses(clause.OnConflict{
-					Columns:   []clause.Column{{Name: "infohash"}},
+				if tmdbResult.Year > 0 {
+					tmdbMetadata.Year = &tmdbResult.Year
+				}
+
+				errMeta := tx.Clauses(clause.OnConflict{
+					Columns:   []clause.Column{{Name: "tmdb_id"}},
 					UpdateAll: true,
-				}).Create(&cacheRecord)
-
-				stream := database.Stream{
-					TmdbID:   tmdbResult.TmdbID,
-					Infohash: parsedMagnet.Infohash,
-					Quality:  parsedMagnet.Quality,
-					Language: parsedMagnet.Language,
+				}).Create(&tmdbMetadata).Error
+				if errMeta != nil {
+					return errMeta
 				}
 
-				if t.Type == "series" {
-					seasonVal := parsedMagnet.Season
-					if seasonVal == 0 {
-						seasonVal = 1
-					}
-					stream.Season = &seasonVal
-
-					if parsedMagnet.Type == "SINGLE_EPISODE" {
-						epVal := parsedMagnet.Episode
-						stream.Episode = &epVal
-						stream.EpisodeEnd = &epVal
-					} else if parsedMagnet.Type == "EPISODE_PACK" {
-						startVal := parsedMagnet.EpisodeStart
-						endVal := parsedMagnet.EpisodeEnd
-						stream.Episode = &startVal
-						stream.EpisodeEnd = &endVal
-					} else {
-						stream.Episode = nil
-						stream.EpisodeEnd = nil
-					}
+				t.TmdbID = &tmdbResult.TmdbID
+				t.Status = "linked"
+				if tmdbResult.Year > 0 {
+					t.Year = &tmdbResult.Year
 				}
 
-				_ = tx.Clauses(clause.OnConflict{
-					Columns:   []clause.Column{{Name: "tmdb_id"}, {Name: "season"}, {Name: "episode"}, {Name: "infohash"}},
-					UpdateAll: true,
-				}).Create(&stream)
+				errThr := tx.Save(&t).Error
+				if errThr != nil {
+					return errThr
+				}
+
+				for _, magnet := range t.MagnetURIs {
+					parsedMagnet := parser.ParseMagnet(magnet, t.Type)
+					if parsedMagnet == nil {
+						continue
+					}
+
+					cacheRecord := database.MagnetCache{
+						Infohash: parsedMagnet.Infohash,
+						Magnet:   magnet,
+					}
+					_ = tx.Clauses(clause.OnConflict{
+						Columns:   []clause.Column{{Name: "infohash"}},
+						UpdateAll: true,
+					}).Create(&cacheRecord)
+
+					stream := database.Stream{
+						TmdbID:   tmdbResult.TmdbID,
+						Infohash: parsedMagnet.Infohash,
+						Quality:  parsedMagnet.Quality,
+						Language: parsedMagnet.Language,
+					}
+
+					if t.Type == "series" {
+						seasonVal := parsedMagnet.Season
+						if seasonVal == 0 {
+							seasonVal = 1
+						}
+						stream.Season = &seasonVal
+
+						if parsedMagnet.Type == "SINGLE_EPISODE" {
+							epVal := parsedMagnet.Episode
+							stream.Episode = &epVal
+							stream.EpisodeEnd = &epVal
+						} else if parsedMagnet.Type == "EPISODE_PACK" {
+							startVal := parsedMagnet.EpisodeStart
+							endVal := parsedMagnet.EpisodeEnd
+							stream.Episode = &startVal
+							stream.EpisodeEnd = &endVal
+						} else {
+							stream.Episode = nil
+							stream.EpisodeEnd = nil
+						}
+					}
+
+					_ = tx.Clauses(clause.OnConflict{
+						Columns:   []clause.Column{{Name: "tmdb_id"}, {Name: "season"}, {Name: "episode"}, {Name: "infohash"}},
+						UpdateAll: true,
+					}).Create(&stream)
+				}
+
+				_ = database.DeleteFailedThread(t.ThreadHash, tx)
+				return nil
+			})
+
+			mu.Lock()
+			if errTx == nil {
+				utils.Logger.Info().
+					Int("index", index+1).
+					Str("raw_title", t.RawTitle).
+					Str("matched_as", tmdbResult.Title).
+					Str("imdb_id", tmdbResult.ImdbID).
+					Msg("Successfully linked thread and saved stream references.")
+				successCount++
+				matchedTitles = append(matchedTitles, tmdbResult.Title)
+			} else {
+				utils.Logger.Error().
+					Int("index", index+1).
+					Str("raw_title", t.RawTitle).
+					Err(errTx).
+					Msg("Transaction failed while saving metadata to tables.")
+				failCount++
 			}
+			mu.Unlock()
 
-			_ = database.DeleteFailedThread(t.ThreadHash, tx)
-			return nil
-		})
-
-		if errTx == nil {
-			utils.Logger.Info().
-				Int("index", idx+1).
-				Str("raw_title", t.RawTitle).
-				Str("matched_as", tmdbResult.Title).
-				Str("imdb_id", tmdbResult.ImdbID).
-				Msg("Successfully linked thread and saved stream references.")
-			successCount++
-			matchedTitles = append(matchedTitles, tmdbResult.Title)
-		} else {
-			utils.Logger.Error().
-				Int("index", idx+1).
-				Str("raw_title", t.RawTitle).
-				Err(errTx).
-				Msg("Transaction failed while saving metadata to tables.")
-			failCount++
-		}
+		}(idx, id)
 	}
+
+	wg.Wait()
 
 	// Real-time progress end log
 	utils.Logger.Info().
