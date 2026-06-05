@@ -122,20 +122,19 @@ func catalogHandler(c *gin.Context) {
 	// This completely eliminates custom pending IDs (addonId:pending:...) from catalog pages,
 	// preventing layout issues and rendering professional Metahub-aligned cards.
 	query := database.DB.
-		Joins("Join tmdb_metadata on tmdb_metadata.tmdb_id = threads.tmdb_id").
-		Where("threads.status = ? AND threads.type = ? AND tmdb_metadata.imdb_id IS NOT NULL AND tmdb_metadata.imdb_id != ''", "linked", mediaType)
+		Where("status = ? AND type = ? AND tmdb_id IN (SELECT tmdb_id FROM tmdb_metadata WHERE imdb_id IS NOT NULL AND imdb_id != '')", "linked", mediaType)
 
 	// Filter by specific catalogs matching manifest IDs
 	if catalogID == "tamilmv_hd_movies" {
-		query = query.Where("threads.catalog = ?", "tamil-hd-movies")
+		query = query.Where("catalog = ?", "tamil-hd-movies")
 	} else if catalogID == "tamilmv_dubbed_movies" {
-		query = query.Where("threads.catalog = ?", "tamil-dubbed-movies")
+		query = query.Where("catalog = ?", "tamil-dubbed-movies")
 	} else {
-		query = query.Where("threads.catalog = ?", "top-series-from-forum")
+		query = query.Where("catalog = ?", "top-series-from-forum")
 	}
 
 	err := query.
-		Order("threads.posted_at DESC").
+		Order("posted_at DESC").
 		Offset(skip).
 		Limit(100).
 		Preload("TmdbMetadata").
