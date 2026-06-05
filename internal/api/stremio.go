@@ -1,3 +1,6 @@
+// Version: 1.0.1
+// Change log: Removed unused "net/url" import that was causing a compile error during build.
+
 package api
 
 import (
@@ -5,7 +8,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"net/url"
 	"regexp"
 	"sort"
 	"strconv"
@@ -768,7 +770,7 @@ func buildMovieTitle(tmdbTitle, quality, language string) string {
 
 // ── Debrid File Selection ──
 
-func pickBestDebridFile(files database.JSONFileList, links []string, mediaType string, season, episode int) (*database.TorrentFile, int) {
+func pickBestDebridFile(files database.JSONFileList, links database.JSONStringArray, mediaType string, season, episode int) (*database.TorrentFile, int) {
 	if len(files) == 0 || len(links) == 0 {
 		return nil, -1
 	}
