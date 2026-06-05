@@ -1,5 +1,5 @@
-<!-- Version: 1.1.0 -->
-<!-- Change log: Complete front-end redesign into a highly structured, command-line CRT terminal and retro-console dashboard with zero clutter and fully preserved event listeners. -->
+<!-- Version: 1.1.1 -->
+<!-- Change log: Added null-safe (d.matchedTitles || []) array fallbacks on both focused and bulk auto-matching handlers to prevent UI TypeError crashes on 0-success runs. -->
 
 <!DOCTYPE html>
 <html lang="en">
@@ -239,7 +239,7 @@
                             <label style="display:inline-block; width:150px; color:#888;">Custom Plot:</label>
                             <input type="text" id="customDescription" placeholder="Description overrides..." style="width: 250px;">
                         </div>
-                        <div style="margin-bottom: 10px;">
+                        <div style="margin-top: 10px;">
                             <button id="saveFocused">💾 Save Custom Meta</button>
                         </div>
                         
@@ -471,7 +471,7 @@
                     });
                     const d = await r.json();
                     if (d.successCount > 0) {
-                        alert(`Successfully auto-matched: "${d.matchedTitles.join(', ')}"!`);
+                        alert(`Successfully auto-matched: "${(d.matchedTitles || []).join(', ')}"!`); // ◄ Secure fallback applied
                         focusedThreadId = null;
                         el('focusedTitle').textContent = 'None';
                         el('streamsBody').innerHTML = '<tr><td colspan="3" style="color: #666; text-align: center;">Set a focused item above to query available streams.</td></tr>';
@@ -499,7 +499,7 @@
                         body: JSON.stringify({ threadIds: ids })
                     });
                     const d = await r.json();
-                    alert(`Bulk Auto-Match complete!\nMatched: ${d.successCount}\nFailed: ${d.failCount}\nMatched Titles: ${d.matchedTitles.join(', ')}`);
+                    alert(`Bulk Auto-Match complete!\nMatched: ${d.successCount}\nFailed: ${d.failCount}\nMatched Titles: ${(d.matchedTitles || []).join(', ')}`); // ◄ Secure fallback applied
                     sel.innerHTML = '';
                     loadPending();
                     fetchHealth();
