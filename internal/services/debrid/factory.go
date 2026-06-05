@@ -1,3 +1,6 @@
+// Version: 1.0.1
+// Change log: Enhanced CheckCached to run both external provider API cache-lookups and local database status overrides to ensure consistent instant playback badges.
+
 package debrid
 
 import (
@@ -163,18 +166,21 @@ func CheckCached(hashes []string, db *gorm.DB) map[string]bool {
 			for h, info := range result {
 				normalized[h] = info.Cached
 			}
-			return normalized
+		} else {
+			utils.Logger.Warn().Err(err).Msg("Provider CheckCached failed, falling back to local SQLite database cache status.")
 		}
-		utils.Logger.Warn().Err(err).Msg("Provider CheckCached failed, falling back to local SQLite database cache status.")
 	}
 
-	// SQLite Local DB Fallback path
+	// SQLite Local DB Fallback & Override path:
+	// If a torrent is already completely downloaded and tracked locally, force mark it as cached!
 	if db != nil && len(hashes) > 0 {
 		var records []database.DebridTorrent
 		err := db.Where("infohash IN ?", hashes).Find(&records).Error
 		if err == nil {
 			for _, r := range records {
-				normalized[r.Infohash] = (r.Status == "downloaded")
+				if r.Status == "downloaded" {
+					normalized[r.Infohash] = true
+				}
 			}
 		}
 	}
