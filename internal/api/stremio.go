@@ -1,5 +1,5 @@
-// Version: 1.0.4
-// Change log: Implemented in-memory catalog ID deduplication and added database fallbacks for NULL-season/episode complete series packs in streamHandler.
+// Version: 1.0.5
+// Change log: Applied extensive latency and GC optimizations including typed structs, global regexes, string-reader json decoders, reflection-free sorting, and index-based id slicing.
 
 package api
 
@@ -27,6 +27,64 @@ import (
 // Global concurrency semaphore: restricts background debrid pollers to maximum 3 concurrent goroutines.
 // This completely protects the server IP from ever hammering or throttling the debrid API providers.
 var backgroundPollSemaphore = make(chan struct{}, 3)
+
+// Hot Path regex pre-compiled to prevent CPU and heap allocations during file selections
+var epRegex = regexp.MustCompile(`[Ss]\d{1,2}\s*[Ee]\s*(\d{1,3})`)
+
+// ── Stremio Protocol Statically-Typed Struct Responses ──
+
+type StremioCatalogResponse struct {
+	Metas []StremioMetaEntry `json:"metas"`
+}
+
+type StremioMetaEntry struct {
+	ID          string   `json:"id"`
+	Type        string   `json:"type"`
+	Name        string   `json:"name"`
+	ReleaseInfo string   `json:"releaseInfo"`
+	Poster      string   `json:"poster,omitempty"`
+	Description string   `json:"description,omitempty"`
+	ImdbRating  string   `json:"imdbRating,omitempty"`
+	Genres      []string `json:"genres,omitempty"`
+}
+
+type StremioMetaResponse struct {
+	Meta StremioMetaDetail `json:"meta"`
+}
+
+type StremioMetaDetail struct {
+	ID          string               `json:"id"`
+	Type        string               `json:"type"`
+	Name        string               `json:"name"`
+	ReleaseInfo string               `json:"releaseInfo"`
+	Poster      string               `json:"poster,omitempty"`
+	Description string               `json:"description,omitempty"`
+	ImdbRating  string               `json:"imdbRating,omitempty"`
+	Genres      []string             `json:"genres,omitempty"`
+	Videos      []StremioVideoDetail `json:"videos,omitempty"`
+}
+
+type StremioVideoDetail struct {
+	ID      string `json:"id"`
+	Season  int    `json:"season"`
+	Episode int    `json:"episode"`
+	Title   string `json:"title"`
+}
+
+type StremioStreamResponse struct {
+	Streams []StremioStreamDetail `json:"streams"`
+}
+
+type StremioStreamDetail struct {
+	Name     string   `json:"name"`
+	Title    string   `json:"title"`
+	URL      string   `json:"url,omitempty"`
+	InfoHash string   `json:"infoHash,omitempty"`
+	Sources  []string `json:"sources,omitempty"`
+	// Internal tracking fields (excluded from JSON serialization)
+	Quality  string   `json:"-"`
+	Language string   `json:"-"`
+}
 
 // ── TMDB Data Structures ──
 
@@ -66,81 +124,85 @@ var qualityOrder = map[string]int{
 	"SD":    5,
 }
 
-// sortStreams replicates Node.js sortStreams: RD before P2P, then by quality, then language.
-func sortStreams(streams []gin.H) {
-	sort.SliceStable(streams, func(i, j int) bool {
-		a, b := streams[i], streams[j]
+// StreamSlice implements standard sort.Interface to achieve reflection-free sorting
+type StreamSlice []StremioStreamDetail
 
-		// RD streams (have "url" key) come before P2P (have "infoHash" key)
-		_, aIsP2P := a["infoHash"].(string)
-		_, bIsP2P := b["infoHash"].(string)
+func (s StreamSlice) Len() int      { return len(s) }
+func (s StreamSlice) Swap(i, j int) { s[i], s[j] = s[j], s[i] }
+func (s StreamSlice) Less(i, j int) bool {
+	a, b := s[i], s[j]
 
-		if !aIsP2P && bIsP2P {
-			return true // a is RD, b is P2P
-		}
-		if aIsP2P && !bIsP2P {
-			return false // a is P2P, b is RD
-		}
+	// RD streams (have non-empty URL) come before P2P (have non-empty InfoHash)
+	aIsP2P := a.InfoHash != ""
+	bIsP2P := b.InfoHash != ""
 
-		// Compare quality rank
-		aQuality, _ := a["_quality"].(string)
-		bQuality, _ := b["_quality"].(string)
-		if aQuality == "" {
-			aQuality = "SD"
-		}
-		if bQuality == "" {
-			bQuality = "SD"
-		}
-		aQRank := qualityOrder[aQuality]
-		bQRank := qualityOrder[bQuality]
-		if aQRank == 0 {
-			aQRank = 99
-		}
-		if bQRank == 0 {
-			bQRank = 99
-		}
-		if aQRank != bQRank {
-			return aQRank < bQRank
-		}
+	if !aIsP2P && bIsP2P {
+		return true // a is RD, b is P2P
+	}
+	if aIsP2P && !bIsP2P {
+		return false // a is P2P, b is RD
+	}
 
-		// Compare language alphabetically
-		aLang, _ := a["_language"].(string)
-		bLang, _ := b["_language"].(string)
-		if aLang == "" {
-			aLang = "zz"
-		}
-		if bLang == "" {
-			bLang = "zz"
-		}
-		return strings.ToLower(aLang) < strings.ToLower(bLang)
-	})
+	// Compare quality rank
+	aQuality := a.Quality
+	bQuality := b.Quality
+	if aQuality == "" {
+		aQuality = "SD"
+	}
+	if bQuality == "" {
+		bQuality = "SD"
+	}
+	aQRank := qualityOrder[aQuality]
+	bQRank := qualityOrder[bQuality]
+	if aQRank == 0 {
+		aQRank = 99
+	}
+	if bQRank == 0 {
+		bQRank = 99
+	}
+	if aQRank != bQRank {
+		return aQRank < bQRank
+	}
+
+	// Compare language alphabetically
+	aLang := a.Language
+	bLang := b.Language
+	if aLang == "" {
+		aLang = "zz"
+	}
+	if bLang == "" {
+		bLang = "zz"
+	}
+	return strings.ToLower(aLang) < strings.ToLower(bLang)
 }
 
-// dedupeStreams replicates Node.js dedupeStreams — removes duplicate entries
-// keyed by (isRD | quality | language | infohash).
-func dedupeStreams(streams []gin.H) []gin.H {
+// sortStreams stable-sorts stream array cleanly without reflective performance penalties.
+func sortStreams(streams []StremioStreamDetail) {
+	sort.Stable(StreamSlice(streams))
+}
+
+// dedupeStreams removes duplicate entries keyed by (isRD | quality | language | infohash).
+func dedupeStreams(streams []StremioStreamDetail) []StremioStreamDetail {
 	seen := make(map[string]bool)
-	out := make([]gin.H, 0, len(streams))
+	out := make([]StremioStreamDetail, 0, len(streams))
 	for _, s := range streams {
 		streamType := "p2p"
-		if _, hasURL := s["url"]; hasURL {
+		if s.URL != "" {
 			streamType = "rd"
 		}
 
-		quality, _ := s["_quality"].(string)
+		quality := s.Quality
 		if quality == "" {
 			quality = "SD"
 		}
-		lang, _ := s["_language"].(string)
+		lang := s.Language
 		if lang == "" {
 			lang = "NA"
 		}
 
-		hashOrURL := ""
-		if h, ok := s["infoHash"].(string); ok {
-			hashOrURL = h
-		} else if u, ok := s["url"].(string); ok {
-			hashOrURL = u
+		hashOrURL := s.InfoHash
+		if s.URL != "" {
+			hashOrURL = s.URL
 		}
 
 		key := fmt.Sprintf("%s|%s|%s|%s", streamType, quality, strings.ToLower(lang), hashOrURL)
@@ -264,7 +326,7 @@ func catalogHandler(c *gin.Context) {
 		return
 	}
 
-	metas := make([]gin.H, 0, len(threads))
+	metas := make([]StremioMetaEntry, 0, len(threads))
 	seenIDs := make(map[string]bool)
 
 	for _, t := range threads {
@@ -302,33 +364,37 @@ func catalogHandler(c *gin.Context) {
 		var imdbRating *string
 		var genresList []string
 
-		if t.TmdbMetadata != nil && json.Unmarshal([]byte(t.TmdbMetadata.Data), &tmdbData) == nil {
-			if tmdbData.PosterPath != "" {
-				poster = "https://image.tmdb.org/t/p/w500" + tmdbData.PosterPath
-			}
-			if tmdbData.Overview != "" {
-				desc = tmdbData.Overview
-			}
+		if t.TmdbMetadata != nil {
+			// Memory Optimization: decode directly from strings.NewReader to prevent []byte cast and allocations
+			dec := json.NewDecoder(strings.NewReader(t.TmdbMetadata.Data))
+			if dec.Decode(&tmdbData) == nil {
+				if tmdbData.PosterPath != "" {
+					poster = "https://image.tmdb.org/t/p/w500" + tmdbData.PosterPath
+				}
+				if tmdbData.Overview != "" {
+					desc = tmdbData.Overview
+				}
 
-			// Extract release year from TMDB date
-			dateStr := tmdbData.ReleaseDate
-			if dateStr == "" {
-				dateStr = tmdbData.FirstAirDate
-			}
-			if len(dateStr) >= 4 {
-				releaseInfo = dateStr[:4]
-			}
+				// Extract release year from TMDB date
+				dateStr := tmdbData.ReleaseDate
+				if dateStr == "" {
+					dateStr = tmdbData.FirstAirDate
+				}
+				if len(dateStr) >= 4 {
+					releaseInfo = dateStr[:4]
+				}
 
-			// Extract IMDb rating
-			if tmdbData.VoteAverage > 0 {
-				rating := fmt.Sprintf("%.1f", tmdbData.VoteAverage)
-				imdbRating = &rating
-			}
+				// Extract IMDb rating
+				if tmdbData.VoteAverage > 0 {
+					rating := fmt.Sprintf("%.1f", tmdbData.VoteAverage)
+					imdbRating = &rating
+				}
 
-			// Extract genre names
-			for _, g := range tmdbData.Genres {
-				if g.Name != "" {
-					genresList = append(genresList, g.Name)
+				// Extract genre names
+				for _, g := range tmdbData.Genres {
+					if g.Name != "" {
+						genresList = append(genresList, g.Name)
+					}
 				}
 			}
 		}
@@ -345,32 +411,32 @@ func catalogHandler(c *gin.Context) {
 			releaseInfo = strconv.Itoa(*t.Year)
 		}
 
-		metaEntry := gin.H{
-			"id":          metaID,
-			"type":        t.Type,
-			"name":        title,
-			"releaseInfo": releaseInfo,
+		metaEntry := StremioMetaEntry{
+			ID:          metaID,
+			Type:        t.Type,
+			Name:        title,
+			ReleaseInfo: releaseInfo,
 		}
 
 		// Cinemeta inferred poster & description fallback rule:
 		// Only output poster and description keys if they possess explicitly loaded or overridden values.
 		if poster != "" {
-			metaEntry["poster"] = poster
+			metaEntry.Poster = poster
 		}
 		if desc != "" {
-			metaEntry["description"] = desc
+			metaEntry.Description = desc
 		}
 		if imdbRating != nil {
-			metaEntry["imdbRating"] = *imdbRating
+			metaEntry.ImdbRating = *imdbRating
 		}
 		if len(genresList) > 0 {
-			metaEntry["genres"] = genresList
+			metaEntry.Genres = genresList
 		}
 
 		metas = append(metas, metaEntry)
 	}
 
-	c.JSON(http.StatusOK, gin.H{"metas": metas})
+	c.JSON(http.StatusOK, StremioCatalogResponse{Metas: metas})
 }
 
 // ── Meta ──
@@ -397,7 +463,9 @@ func metaHandler(c *gin.Context) {
 		}
 
 		var details tmdbLightData
-		if errJson := json.Unmarshal([]byte(meta.Data), &details); errJson == nil {
+		// Memory Optimization: decode directly from strings.NewReader to prevent allocations
+		dec := json.NewDecoder(strings.NewReader(meta.Data))
+		if dec.Decode(&details) == nil {
 			poster := ""
 			if details.PosterPath != "" {
 				poster = "https://image.tmdb.org/t/p/w500" + details.PosterPath
@@ -437,22 +505,22 @@ func metaHandler(c *gin.Context) {
 				releaseInfo = strconv.Itoa(*meta.Year)
 			}
 
-			metaObj := gin.H{
-				"id":          id,
-				"type":        mediaType,
-				"name":        displayName,
-				"releaseInfo": releaseInfo,
+			metaObj := StremioMetaDetail{
+				ID:          id,
+				Type:        mediaType,
+				Name:        displayName,
+				ReleaseInfo: releaseInfo,
 			}
 
 			if poster != "" {
-				metaObj["poster"] = poster
+				metaObj.Poster = poster
 			}
 			if overview != "" {
-				metaObj["description"] = overview
+				metaObj.Description = overview
 			}
 
 			if details.VoteAverage > 0 {
-				metaObj["imdbRating"] = fmt.Sprintf("%.1f", details.VoteAverage)
+				metaObj.ImdbRating = fmt.Sprintf("%.1f", details.VoteAverage)
 			}
 			if len(details.Genres) > 0 {
 				genreNames := make([]string, 0, len(details.Genres))
@@ -462,7 +530,7 @@ func metaHandler(c *gin.Context) {
 					}
 				}
 				if len(genreNames) > 0 {
-					metaObj["genres"] = genreNames
+					metaObj.Genres = genreNames
 				}
 			}
 
@@ -471,7 +539,7 @@ func metaHandler(c *gin.Context) {
 				var streams []database.Stream
 				_ = database.DB.Where("tmdb_id = ?", meta.TmdbID).Order("season ASC, episode ASC").Find(&streams)
 
-				videos := make([]gin.H, 0)
+				videos := make([]StremioVideoDetail, 0)
 				seen := make(map[string]bool)
 
 				for _, s := range streams {
@@ -490,19 +558,19 @@ func metaHandler(c *gin.Context) {
 							}
 							seen[vKey] = true
 
-							videos = append(videos, gin.H{
-								"id":      fmt.Sprintf("%s:%d:%d", id, sVal, ep),
-								"season":  sVal,
-								"episode": ep,
-								"title":   fmt.Sprintf("Season %d - Episode %d", sVal, ep),
+							videos = append(videos, StremioVideoDetail{
+								ID:      fmt.Sprintf("%s:%d:%d", id, sVal, ep),
+								Season:  sVal,
+								Episode: ep,
+								Title:   fmt.Sprintf("Season %d - Episode %d", sVal, ep),
 							})
 						}
 					}
 				}
-				metaObj["videos"] = videos
+				metaObj.Videos = videos
 			}
 
-			c.JSON(http.StatusOK, gin.H{"meta": metaObj})
+			c.JSON(http.StatusOK, StremioMetaResponse{Meta: metaObj})
 			return
 		}
 	}
@@ -510,17 +578,17 @@ func metaHandler(c *gin.Context) {
 	var t database.Thread
 	errThread := database.DB.Where("thread_hash = ?", cleanID).First(&t).Error
 	if errThread == nil {
-		metaObj := gin.H{
-			"id":          id,
-			"type":        t.Type,
-			"name":        t.RawTitle,
-			"poster":      cfg.PlaceholderPoster,
-			"description": "Pending metadata match. You can link this manually in the administration rescue panel.",
+		metaObj := StremioMetaDetail{
+			ID:          id,
+			Type:        t.Type,
+			Name:        t.RawTitle,
+			Poster:      cfg.PlaceholderPoster,
+			Description: "Pending metadata match. You can link this manually in the administration rescue panel.",
 		}
 		if t.Year != nil {
-			metaObj["year"] = *t.Year
+			metaObj.ReleaseInfo = strconv.Itoa(*t.Year)
 		}
-		c.JSON(http.StatusOK, gin.H{"meta": metaObj})
+		c.JSON(http.StatusOK, StremioMetaResponse{Meta: metaObj})
 		return
 	}
 
@@ -544,14 +612,20 @@ func streamHandler(c *gin.Context) {
 	episode := -1
 
 	// Smart ID Splitting: Accurately identifies base ID vs Season/Episode parameters.
-	parts := strings.Split(cleanID, ":")
-	if len(parts) >= 3 {
-		s, errS := strconv.Atoi(parts[len(parts)-2])
-		e, errE := strconv.Atoi(parts[len(parts)-1])
-		if errS == nil && errE == nil {
-			season = s
-			episode = e
-			baseID = strings.Join(parts[:len(parts)-2], ":")
+	// Allocation Optimization: Use strings.LastIndex to bypass heap-allocating Split arrays
+	lastColon := strings.LastIndex(cleanID, ":")
+	if lastColon != -1 {
+		secondLastColon := strings.LastIndex(cleanID[:lastColon], ":")
+		if secondLastColon != -1 {
+			sVal, errS := strconv.Atoi(cleanID[secondLastColon+1 : lastColon])
+			eVal, errE := strconv.Atoi(cleanID[lastColon+1:])
+			if errS == nil && errE == nil {
+				season = sVal
+				episode = eVal
+				baseID = cleanID[:secondLastColon]
+			} else {
+				baseID = cleanID
+			}
 		} else {
 			baseID = cleanID
 		}
@@ -567,7 +641,7 @@ func streamHandler(c *gin.Context) {
 		errThread := database.DB.Where("thread_hash = ?", baseID).First(&t).Error
 		if errThread == nil {
 			// This is an unlinked thread. Return direct P2P fallback streams only (No RD mapping)
-			streamList := make([]gin.H, 0)
+			streamList := make([]StremioStreamDetail, 0)
 			seenP2P := make(map[string]bool)
 
 			for _, magnet := range t.MagnetURIs {
@@ -584,19 +658,19 @@ func streamHandler(c *gin.Context) {
 				trackerSources := buildTrackerSources()
 				sources := withDhtSource(trackerSources, parsedMagnet.Infohash)
 
-				streamList = append(streamList, gin.H{
-					"name":     fmt.Sprintf("[P2P] %s", parsedMagnet.Quality),
-					"title":    t.RawTitle,
-					"infoHash": parsedMagnet.Infohash,
-					"sources":  sources,
+				streamList = append(streamList, StremioStreamDetail{
+					Name:     fmt.Sprintf("[P2P] %s", parsedMagnet.Quality),
+					Title:    t.RawTitle,
+					InfoHash: parsedMagnet.Infohash,
+					Sources:  sources,
 				})
 			}
-			c.JSON(http.StatusOK, gin.H{"streams": streamList})
+			c.JSON(http.StatusOK, StremioStreamResponse{Streams: streamList})
 			return
 		}
 
 		// STREMIO PROTOCOL FIX: Never return 404 on the stream endpoint! 
-		c.JSON(http.StatusOK, gin.H{"streams": []interface{}{}})
+		c.JSON(http.StatusOK, StremioStreamResponse{Streams: []StremioStreamDetail{}})
 		return
 	}
 
@@ -627,8 +701,8 @@ func streamHandler(c *gin.Context) {
 	}
 	cacheMap := debrid.CheckCached(allHashes, database.DB)
 
-	var cachedStreams []gin.H   // Instant ⚡ streams
-	var uncachedStreams []gin.H // Downloading ⏳ streams
+	var cachedStreams []StremioStreamDetail   // Instant ⚡ streams
+	var uncachedStreams []StremioStreamDetail // Downloading ⏳ streams
 
 	seenStreams := make(map[streamDupKey]bool)
 
@@ -641,7 +715,8 @@ func streamHandler(c *gin.Context) {
 	var tmdbTitle string
 	if mediaType == "movie" {
 		var tmdbData tmdbLightData
-		if json.Unmarshal([]byte(meta.Data), &tmdbData) == nil {
+		dec := json.NewDecoder(strings.NewReader(meta.Data))
+		if dec.Decode(&tmdbData) == nil {
 			tmdbTitle = tmdbData.Title
 			if tmdbTitle == "" {
 				tmdbTitle = tmdbData.Name
@@ -699,12 +774,12 @@ func streamHandler(c *gin.Context) {
 				if fileToStream != nil && linkIndex >= 0 && linkIndex < len(debridTorrent.Links) {
 					unrestricted, errUnrestrict := p.UnrestrictLink(c.Request.Context(), debridTorrent.Links[linkIndex])
 					if errUnrestrict == nil && unrestricted != nil && unrestricted.Download != "" {
-						item := gin.H{
-							"name":      fmt.Sprintf("[RD+] %s ⚡", s.Quality),
-							"title":     fmt.Sprintf("%s\n%s", titleDetail, fileToStream.Path),
-							"url":       unrestricted.Download,
-							"_quality":  s.Quality,
-							"_language": s.Language,
+						item := StremioStreamDetail{
+							Name:     fmt.Sprintf("[RD+] %s ⚡", s.Quality),
+							Title:    fmt.Sprintf("%s\n%s", titleDetail, fileToStream.Path),
+							URL:      unrestricted.Download,
+							Quality:  s.Quality,
+							Language: s.Language,
 						}
 						cachedStreams = append(cachedStreams, item)
 						continue // Skip the /rd-add/ fallback for this stream
@@ -724,12 +799,12 @@ func streamHandler(c *gin.Context) {
 			}
 			rdUrl := fmt.Sprintf("%s/rd-add/%s/%s", cfg.AppHost, s.Infohash, targetEpStr)
 
-			item := gin.H{
-				"name":      label,
-				"title":     fmt.Sprintf("%s\nClick to Download", titleDetail),
-				"url":       rdUrl,
-				"_quality":  s.Quality,
-				"_language": s.Language,
+			item := StremioStreamDetail{
+				Name:     label,
+				Title:    fmt.Sprintf("%s\nClick to Download", titleDetail),
+				URL:      rdUrl,
+				Quality:  s.Quality,
+				Language: s.Language,
 			}
 			if isCached {
 				cachedStreams = append(cachedStreams, item)
@@ -740,13 +815,13 @@ func streamHandler(c *gin.Context) {
 			// ---- Direct P2P Streams ----
 			trackerSources := buildTrackerSources()
 			sources := withDhtSource(trackerSources, s.Infohash)
-			item := gin.H{
-				"name":      fmt.Sprintf("[P2P] %s", s.Quality),
-				"title":     titleDetail,
-				"infoHash":  s.Infohash,
-				"sources":   sources,
-				"_quality":  s.Quality,
-				"_language": s.Language,
+			item := StremioStreamDetail{
+				Name:     fmt.Sprintf("[P2P] %s", s.Quality),
+				Title:    titleDetail,
+				InfoHash: s.Infohash,
+				Sources:  sources,
+				Quality:  s.Quality,
+				Language: s.Language,
 			}
 			uncachedStreams = append(uncachedStreams, item)
 		}
@@ -757,12 +832,7 @@ func streamHandler(c *gin.Context) {
 	streamList = dedupeStreams(streamList)
 	sortStreams(streamList)
 
-	for _, s := range streamList {
-		delete(s, "_quality")
-		delete(s, "_language")
-	}
-
-	c.JSON(http.StatusOK, gin.H{"streams": streamList})
+	c.JSON(http.StatusOK, StremioStreamResponse{Streams: streamList})
 }
 
 // ── Stream Title Builders ──
@@ -839,7 +909,6 @@ func pickBestDebridFile(files database.JSONFileList, links database.JSONStringAr
 
 	// For series: try to match requested episode in file paths
 	if mediaType == "series" && episode > 0 {
-		epRegex := regexp.MustCompile(`[Ss]\d{1,2}\s*[Ee]\s*(\d{1,3})`)
 		for _, sf := range selectedFiles {
 			if !isVideo(sf.file.Path) {
 				continue
