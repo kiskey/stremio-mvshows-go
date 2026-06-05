@@ -1,5 +1,5 @@
-# Version: 1.0.0
-# Description: GitHub Actions pipeline to automatically build fully static, stripped Go binaries for AMD64/ARM64 and attach them as release assets.
+# Version: 1.0.1
+# Description: Integrated flat directory normalization and Go sum-file sanitization to prevent compilation crashes on non-existent releasetitleparser v1.0.0 dependencies.
 
 name: Build & Release Static Binaries
 
@@ -8,7 +8,6 @@ on:
     tags:
       - 'v*'
   workflow_dispatch: 
-
 permissions:
   contents: write # Grants write access to GITHUB_TOKEN to create and publish release assets
 
@@ -23,11 +22,48 @@ jobs:
       - name: Set up Go
         uses: actions/setup-go@v5
         with:
-          go-version: '1.23' # Fully compatible with standard and cutting-edge project files
+          go-version: '1.25' # Upgraded to match the 1.25 constraint of the parser
           cache: true        # Automatically caches Go modules and build directory structures
 
-      - name: Install Dependencies
+      - name: Normalize Directory Layout
         run: |
+          # Self-Healing Directory Normalization:
+          # Creates nested subdirectory wrappers for all services to satisfy Go's package rules.
+          mkdir -p internal/services/crawler \
+                   internal/services/metadata \
+                   internal/services/orchestrator \
+                   internal/services/tracker \
+                   internal/services/maintenance \
+                   internal/services/parser
+          
+          # Moves flat files safely into their respective package directories
+          [ -f internal/services/crawler.go ] && mv internal/services/crawler.go internal/services/crawler/crawler.go || true
+          [ -f internal/services/metadata.go ] && mv internal/services/metadata.go internal/services/metadata/metadata.go || true
+          [ -f internal/services/orchestrator.go ] && mv internal/services/orchestrator.go internal/services/orchestrator/orchestrator.go || true
+          [ -f internal/services/tracker.go ] && mv internal/services/tracker.go internal/services/tracker/tracker.go || true
+          [ -f internal/services/maintenance.go ] && mv internal/services/maintenance.go internal/services/maintenance/maintenance.go || true
+          [ -f internal/services/parser.go ] && mv internal/services/parser.go internal/services/parser/parser.go || true
+          
+          echo "Directory structure normalized successfully."
+
+      - name: Generate Go Sum File
+        env:
+          GOPROXY: "https://proxy.golang.org,direct"
+          GOPRIVATE: ""
+        run: |
+          # Safe Reset: clear any conflicting global git redirect rules that force SSH/Auth on public repos
+          git config --global --unset-all url.git@github.com:.insteadOf || true
+          git config --global --unset-all url."git@github.com:".insteadOf || true
+          git config --global --unset-all url."https://github.com/".insteadOf || true
+
+          # Remove the hardcoded non-existent v1.0.0 version from go.mod first to prevent Go validation crash
+          sed -i '/releasetitleparser/d' go.mod || true
+
+          # Fetch the latest commit on master/main branch of releasetitleparser dynamically.
+          go get github.com/ovrlord-app/releasetitleparser@master || go get github.com/ovrlord-app/releasetitleparser@main
+
+          # Tidy up go.mod and download dependencies cleanly
+          go mod tidy
           go mod download
 
       - name: Build Static Binary (Linux AMD64)
