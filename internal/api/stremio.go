@@ -1,5 +1,5 @@
-// Version: 1.1.2
-// Change log: Fixed the undefined 'rdUrl' variable compilation error in standard debrid stream mapping.
+// Version: 1.1.3
+// Change log: Overhauled pickBestDebridFile to leverage parser.FindBestSeriesFile, unifying both instant and background paths to support full episode ranges and sorted alphabetical sequential fallbacks.
 
 package api
 
@@ -953,100 +953,85 @@ func formatQualityBadge(q string) string {
 
 // ── Debrid File Selection ──
 
+// pickBestDebridFile maps files list to CandidateFiles, executing identical premium-grade parser matching logic (ranges, absolute bounds, and sequential fallbacks) on the instant path.
 func pickBestDebridFile(files database.JSONFileList, links database.JSONStringArray, mediaType string, season, episode int) (*database.TorrentFile, int) {
 	if len(files) == 0 || len(links) == 0 {
 		return nil, -1
 	}
 
-	// Collect selected files with their original indices
-	selectedFiles := make([]struct {
-		file  database.TorrentFile
-		index int
-	}, 0)
+	// Map GORM database files list to parser.CandidateFile slice
+	candidates := make([]parser.CandidateFile, 0, len(files))
 	for i, f := range files {
 		if f.Selected == 1 {
-			selectedFiles = append(selectedFiles, struct {
-				file  database.TorrentFile
-				index int
-			}{file: f, index: i})
+			candidates = append(candidates, parser.CandidateFile{
+				ID:   i, // Store original slice index as CandidateID to maintain index reference
+				Path: f.Path,
+				Size: f.Bytes,
+			})
 		}
 	}
-	if len(selectedFiles) == 0 {
+
+	if len(candidates) == 0 {
 		return nil, -1
 	}
 
-	isVideo := func(path string) bool {
-		p := strings.ToLower(path)
-		return strings.HasSuffix(p, ".mkv") ||
-			strings.HasSuffix(p, ".mp4") ||
-			strings.HasSuffix(p, ".avi") ||
-			strings.HasSuffix(p, ".mov") ||
-			strings.HasSuffix(p, ".m4v")
-	}
+	var matchedIndex int = -1
 
-	// For series: try to match requested episode in file paths
 	if mediaType == "series" && episode > 0 {
-		for _, sf := range selectedFiles {
-			if !isVideo(sf.file.Path) {
+		// Leverage complete, optimized parser matching logic (ranges, absolute segments, alphabetical indexing)
+		bestFile, found := parser.FindBestSeriesFile(candidates, season, episode, season)
+		if found {
+			matchedIndex = bestFile.ID
+		}
+	} else {
+		// For movies: pick largest video file
+		isVideo := func(path string) bool {
+			p := strings.ToLower(path)
+			return strings.HasSuffix(p, ".mkv") ||
+				strings.HasSuffix(p, ".mp4") ||
+				strings.HasSuffix(p, ".avi") ||
+				strings.HasSuffix(p, ".mov") ||
+				strings.HasSuffix(p, ".m4v")
+		}
+		var largestID int = -1
+		var largestSize int64 = -1
+		for _, c := range candidates {
+			if !isVideo(c.Path) {
 				continue
 			}
-			matches := epRegex.FindStringSubmatch(sf.file.Path)
-			if len(matches) > 1 {
-				epNum, _ := strconv.Atoi(matches[1])
-				if epNum == episode {
-					linkIndex := 0
-					for j := 0; j <= sf.index; j++ {
-						if files[j].Selected == 1 {
-							if j == sf.index {
-								return &sf.file, linkIndex
-							}
-							linkIndex++
-						}
-					}
+			if c.Size > largestSize {
+				largestSize = c.Size
+				largestID = c.ID
+			}
+		}
+		if largestID == -1 && len(candidates) > 0 {
+			// Fallback to largest file overall
+			for _, c := range candidates {
+				if c.Size > largestSize {
+					largestSize = c.Size
+					largestID = c.ID
 				}
 			}
 		}
+		matchedIndex = largestID
 	}
 
-	// Fallback: largest video file
-	var largest *database.TorrentFile
-	largestIdx := -1
-	for _, sf := range selectedFiles {
-		if !isVideo(sf.file.Path) {
-			continue
-		}
-		if largest == nil || sf.file.Bytes > largest.Bytes {
-			largest = &sf.file
-			largestIdx = sf.index
-		}
-	}
-
-	if largest == nil {
-		// No video files — pick largest selected file overall
-		for _, sf := range selectedFiles {
-			if largest == nil || sf.file.Bytes > largest.Bytes {
-				largest = &sf.file
-				largestIdx = sf.index
-			}
-		}
-	}
-
-	if largest == nil {
+	if matchedIndex == -1 {
 		return nil, -1
 	}
 
-	// Compute link index (position among selected files)
+	// Resolve the linkIndex based on position among selected files
 	linkIndex := 0
-	for j := 0; j <= largestIdx; j++ {
+	for j := 0; j <= matchedIndex; j++ {
 		if files[j].Selected == 1 {
-			if j == largestIdx {
-				return largest, linkIndex
+			if j == matchedIndex {
+				return &files[matchedIndex], linkIndex
 			}
 			linkIndex++
 		}
 	}
 
-	return largest, linkIndex
+	return nil, -1
 }
 
 // ── rdAddHandler ──
