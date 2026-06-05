@@ -1,5 +1,5 @@
-// Version: 1.0.3
-// Change log: Integrated database thread-count evaluation and force-override configs to automatically switch between Full and Incremental crawling modes on workflow triggers.
+// Version: 1.0.4
+// Change log: Passed incremental state to processThread to dynamically re-try pending_tmdb lookups during Full Sync runs while keeping them skipped during Incremental runs.
 
 package orchestrator
 
@@ -134,13 +134,13 @@ func RunFullWorkflow(cfg *config.Config) {
 	tmdbClient := metadata.NewTMDBClient(cfg)
 
 	for _, thread := range scraped {
-		processThread(thread, tmdbClient)
+		processThread(thread, tmdbClient, incremental)
 	}
 
 	utils.Logger.Info().Int("total_scraped", len(scraped)).Msg("Workflow thread processing complete.")
 }
 
-func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient) {
+func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient, incremental bool) {
 	// Defensive panic recovery for individual thread processing
 	defer func() {
 		if r := recover(); r != nil {
@@ -155,14 +155,18 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 	var existing database.Thread
 	err := database.DB.Where("raw_title = ?", thread.RawTitle).First(&existing).Error
 	if err == nil {
-		// If thread hash matches exactly, nothing changed. Skip entirely.
+		// If thread hash matches exactly, nothing changed.
 		if existing.ThreadHash == thread.ThreadHash {
-			utils.Logger.Debug().Str("title", thread.RawTitle).Msg("Thread content unchanged. Skipping.")
-			return
+			// Self-Healing Rule: If the thread is in "pending_tmdb" status, only skip it during 
+			// lightweight incremental runs. On Full Sync runs, allow re-trying TMDB lookup to auto-heal!
+			if existing.Status != "pending_tmdb" || incremental {
+				utils.Logger.Debug().Str("title", thread.RawTitle).Msg("Thread content unchanged. Skipping.")
+				return
+			}
 		}
 
-		// Content has changed! Delete existing thread & cascade dependencies to recreate cleanly
-		utils.Logger.Info().Str("title", thread.RawTitle).Msg("Thread magnets changed. Purging old record to reprocess.")
+		// Content has changed or we are re-trying a pending match! Purge old record to reprocess cleanly
+		utils.Logger.Info().Str("title", thread.RawTitle).Msg("Purging old or pending record to reprocess.")
 		errPurge := database.DB.Transaction(func(tx *gorm.DB) error {
 			if existing.TmdbID != nil {
 				_ = tx.Where("tmdb_id = ?", *existing.TmdbID).Delete(&database.Stream{})
