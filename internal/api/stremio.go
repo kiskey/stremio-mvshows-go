@@ -1,5 +1,5 @@
-// Version: 1.0.9
-// Change log: Overhauled route mappings to standard clean wildcards to bypass Gin's suffix-matching limitation, and implemented manual .json suffix stripping inside handlers.
+// Version: 1.1.0
+// Change log: Removed the "meta" resource from manifest resources. This delegates metadata and TV series episode dropdown selection entirely to Cinemeta, resolving 404 UI lockouts and unblocking stream handling.
 
 package api
 
@@ -222,7 +222,6 @@ func RegisterStremioRoutes(r *gin.RouterGroup) {
 	r.GET("/manifest.json", manifestHandler)
 	r.GET("/catalog/:type/:id/:extra", catalogHandler)
 	r.GET("/catalog/:type/:id", catalogHandler)
-	r.GET("/meta/:type/:id", metaHandler)   // Bypasses Gin suffix wildcard match limitation
 	r.GET("/stream/:type/:id", streamHandler) // Bypasses Gin suffix wildcard match limitation
 	r.GET("/rd-add/:infohash/:episode", rdAddHandler)
 }
@@ -238,8 +237,7 @@ func manifestHandler(c *gin.Context) {
 		"description": cfg.AddonDescription,
 		"resources": []interface{}{
 			"catalog",
-			"meta",
-			"stream",
+			"stream", // Removed "meta" to let Cinemeta completely render descriptions and episode selectors
 		},
 		"types": []string{"series", "movie"},
 		"catalogs": []gin.H{
@@ -438,175 +436,6 @@ func catalogHandler(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, StremioCatalogResponse{Metas: metas})
-}
-
-// ── Meta ──
-
-func metaHandler(c *gin.Context) {
-	id := c.Param("id")
-	cfg := config.Load()
-
-	// URL-decode the ID parameter to handle percent-encoded colons (%3A) safely
-	if decoded, err := url.QueryUnescape(id); err == nil {
-		id = decoded
-	}
-
-	// Trim trailing extensions and whitespaces to prevent SQL mismatch
-	id = strings.TrimSpace(strings.TrimSuffix(id, ".json"))
-
-	cleanID := id
-	if idx := strings.Index(id, ":pending:"); idx != -1 {
-		cleanID = id[idx+len(":pending:"):]
-	}
-
-	// 1. Standard linked metadata lookup by IMDb ID (tt...)
-	// BULLETPROOF FIX: Overhauled query using standard GORM .Find() to avoid SQLite sorting and ORDER BY bugs
-	var meta database.TmdbMetadata
-	var metas []database.TmdbMetadata
-	err := database.DB.Where("imdb_id = ? OR tmdb_id = ?", cleanID, cleanID).Limit(1).Find(&metas).Error
-	if err == nil && len(metas) > 0 {
-		meta = metas[0]
-
-		// Self-healing Fallback: Fetch threads directly to bypass any GORM Preload mapping issues
-		if len(meta.Threads) == 0 {
-			var fetchedThreads []database.Thread
-			if database.DB.Where("tmdb_id = ?", meta.TmdbID).Find(&fetchedThreads).Error == nil {
-				meta.Threads = fetchedThreads
-			}
-		}
-
-		var details tmdbLightData
-		// Memory Optimization: decode directly from strings.NewReader to prevent allocations
-		dec := json.NewDecoder(strings.NewReader(meta.Data))
-		if dec.Decode(&details) == nil {
-			poster := ""
-			if details.PosterPath != "" {
-				poster = "https://image.tmdb.org/t/p/w500" + details.PosterPath
-			}
-			overview := details.Overview
-
-			mediaType := "movie"
-			if len(meta.Threads) > 0 {
-				mediaType = meta.Threads[0].Type
-			}
-
-			displayName := details.Title
-			if displayName == "" {
-				displayName = details.Name
-			}
-
-			// Apply custom metadata overrides if defined by the admin
-			if len(meta.Threads) > 0 {
-				t := meta.Threads[0]
-				if t.CustomPoster != nil && *t.CustomPoster != "" {
-					poster = *t.CustomPoster
-				}
-				if t.CustomDescription != nil && *t.CustomDescription != "" {
-					overview = *t.CustomDescription
-				}
-			}
-
-			releaseInfo := ""
-			dateStr := details.ReleaseDate
-			if dateStr == "" {
-				dateStr = details.FirstAirDate
-			}
-			if len(dateStr) >= 4 {
-				releaseInfo = dateStr[:4]
-			}
-			if releaseInfo == "" && meta.Year != nil {
-				releaseInfo = strconv.Itoa(*meta.Year)
-			}
-
-			metaObj := StremioMetaDetail{
-				ID:          id,
-				Type:        mediaType,
-				Name:        displayName,
-				ReleaseInfo: releaseInfo,
-			}
-
-			if poster != "" {
-				metaObj.Poster = poster
-			}
-			if overview != "" {
-				metaObj.Description = overview
-			}
-
-			if details.VoteAverage > 0 {
-				metaObj.ImdbRating = fmt.Sprintf("%.1f", details.VoteAverage)
-			}
-			if len(details.Genres) > 0 {
-				genreNames := make([]string, 0, len(details.Genres))
-				for _, g := range details.Genres {
-					if g.Name != "" {
-						genreNames = append(genreNames, g.Name)
-					}
-				}
-				if len(genreNames) > 0 {
-					metaObj.Genres = genreNames
-				}
-			}
-
-			if mediaType == "series" {
-				// Fetch linked streams to build Stremio series videos navigation
-				var streams []database.Stream
-				_ = database.DB.Where("tmdb_id = ?", meta.TmdbID).Order("season ASC, episode ASC").Find(&streams)
-
-				videos := make([]StremioVideoDetail, 0)
-				seen := make(map[string]bool)
-
-				for _, s := range streams {
-					if s.Season != nil && s.Episode != nil {
-						sVal := *s.Season
-						eVal := *s.Episode
-						endVal := eVal
-						if s.EpisodeEnd != nil {
-							endVal = *s.EpisodeEnd
-						}
-
-						for ep := eVal; ep <= endVal; ep++ {
-							vKey := fmt.Sprintf("%d:%d", sVal, ep)
-							if seen[vKey] {
-								continue
-							}
-							seen[vKey] = true
-
-							videos = append(videos, StremioVideoDetail{
-								ID:      fmt.Sprintf("%s:%d:%d", id, sVal, ep),
-								Season:  sVal,
-								Episode: ep,
-								Title:   fmt.Sprintf("Season %d - Episode %d", sVal, ep),
-							})
-						}
-					}
-				}
-				metaObj.Videos = videos
-			}
-
-			c.JSON(http.StatusOK, StremioMetaResponse{Meta: metaObj})
-			return
-		}
-	}
-
-	var threads []database.Thread
-	errThread := database.DB.Where("thread_hash = ?", cleanID).Limit(1).Find(&threads).Error
-	if errThread == nil && len(threads) > 0 {
-		t := threads[0]
-		metaObj := StremioMetaDetail{
-			ID:          id,
-			Type:        t.Type,
-			Name:        t.RawTitle,
-			Poster:      cfg.PlaceholderPoster,
-			Description: "Pending metadata match. You can link this manually in the administration rescue panel.",
-		}
-		if t.Year != nil {
-			metaObj.ReleaseInfo = strconv.Itoa(*t.Year)
-		}
-		c.JSON(http.StatusOK, StremioMetaResponse{Meta: metaObj})
-		return
-	}
-
-	c.JSON(http.StatusNotFound, gin.H{"error": "Metadata not found"})
 }
 
 // ── Stream ──
