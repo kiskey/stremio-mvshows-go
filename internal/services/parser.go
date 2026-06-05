@@ -1,5 +1,5 @@
-// Version: 1.0.9
-// Change log: Promoted fileSizeRegex to package global, replaced the local ParseMagnet prefix regex compile with the global pattern, and migrated the custom rune array allocation in filterTorrentNoise to a zero-slice strings.Map translation.
+// Version: 1.1.0
+// Change log: Enhanced truncationRegexes with separator boundaries and added dynamic audio/bitrate filters to filterTorrentNoise to sanitize complex and numeric release titles cleanly.
 
 package parser
 
@@ -110,12 +110,14 @@ var seasonFolderRegex = regexp.MustCompile(`(?i)\b(?:s|season|series)\s*0*(\d+)\
 var rePrefixRegex = regexp.MustCompile(`(?i)^www\.[a-z0-9-]+\.[a-z]{2,4}\s*-\s*`)
 var infohashRegex = regexp.MustCompile(`(?i)btih:([a-f0-9]{40})`)
 var fileSizeRegex = regexp.MustCompile(`\b\d+(\.\d+)?[gmk]b\b`)
+var channelRegex = regexp.MustCompile(`\b(?:ddp)?\d\.\d(?:\.\d)?\b`)
 
 // Patterns that identify the boundary of series/episode identifiers to truncate trailing metadata noise
 var truncationRegexes = []*regexp.Regexp{
 	regexp.MustCompile(`(?i)\b(?:s|season|series)[\s\-_]*\d+.*`),
 	regexp.MustCompile(`(?i)\b(?:e|ep|episode)[\s\-_]*[\(\[]?\s*\d+.*`),
 	regexp.MustCompile(`(?i)\b(?:complete|season\s*pack|full\s*season|all\s*episodes)\b.*`),
+	regexp.MustCompile(`[\s\-_]{2,}.*`), // Truncates trailing separators like " - - "
 }
 
 // parserJunkWords defines common torrent-specific words and tags to aggressively strip from display titles.
@@ -285,6 +287,9 @@ func filterTorrentNoise(title string) string {
 	// Remove common file size indicators (e.g., 2.6gb, 1.4gb, 6gb) using pre-compiled regex
 	title = fileSizeRegex.ReplaceAllString(title, " ")
 
+	// Remove decimal audio channel signatures (e.g. 5.1, 7.1, 2.0, ddp5.1) using pre-compiled regex
+	title = channelRegex.ReplaceAllString(title, " ")
+
 	// Punctuation-to-Space Isolation Sweep:
 	// Assembly-optimized strings.Map replaces runes with spaces without temporary heap allocations.
 	title = strings.Map(replacePunctuation, title)
@@ -297,6 +302,15 @@ func filterTorrentNoise(title string) string {
 		// Skip if it's a known junk word or stop word. 
 		// Critical Fix: Removed parserIsNumber and single-character constraints to preserve numeric/short titles (e.g. "45", "180", "12B")
 		if parserJunkWords[w] || parserStopWords[w] {
+			continue
+		}
+
+		// Dynamic check: Skip bitrate words ending with "kbps"
+		if strings.HasSuffix(w, "kbps") {
+			continue
+		}
+		// Dynamic check: Skip audio format words containing "ddp", "aac", "dts", "dolby", "atmos"
+		if strings.Contains(w, "ddp") || strings.Contains(w, "aac") || strings.Contains(w, "dts") || strings.Contains(w, "dolby") || strings.Contains(w, "atmos") {
 			continue
 		}
 		
