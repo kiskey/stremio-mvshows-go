@@ -1,5 +1,5 @@
-// Version: 1.0.4
-// Change log: Passed incremental state to processThread to dynamically re-try pending_tmdb lookups during Full Sync runs while keeping them skipped during Incremental runs.
+// Version: 1.0.5
+// Change log: Added GORM-safe collision pre-checks inside the background transaction to prevent SQLite UNIQUE constraint failures on imdb_id.
 
 package orchestrator
 
@@ -217,6 +217,15 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 
 	// 4. Resolve and save linked metadata and streams inside a safe transaction block
 	errTx := database.DB.Transaction(func(tx *gorm.DB) error {
+		// GORM-safe Collision Pre-check: Verify if this IMDb ID is already registered under an alternative TMDB ID
+		if tmdbResult.ImdbID != "" {
+			var fetched []database.TmdbMetadata
+			if tx.Where("imdb_id = ?", tmdbResult.ImdbID).Limit(1).Find(&fetched).Error == nil && len(fetched) > 0 {
+				// Re-route local pointers to use the pre-existing record, completely avoiding UNIQUE constraints issues
+				tmdbResult.TmdbID = fetched[0].TmdbID
+			}
+		}
+
 		// Save TmdbMetadata records
 		rawDataBytes, _ := json.Marshal(tmdbResult.RawData)
 		
