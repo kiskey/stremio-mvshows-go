@@ -1,5 +1,5 @@
-// Version: 1.0.5
-// Change log: Promoted hot-path regex compilation to package globals and replaced expensive strings.Fields allocations with a single-pass string builder space collapser.
+// Version: 1.0.6
+// Change log: Implemented aggressive post-parsing title cleaning in RobustParseInfo via filterTorrentNoise to remove torrent-specific junk (file sizes, technical tags) from display titles.
 
 package parser
 
@@ -110,6 +110,58 @@ var seasonFolderRegex = regexp.MustCompile(`(?i)\b(?:s|season|series)\s*0*(\d+)\
 var rePrefixRegex = regexp.MustCompile(`(?i)^www\.[a-z0-9-]+\.[a-z]{2,4}\s*-\s*`)
 var infohashRegex = regexp.MustCompile(`(?i)btih:([a-f0-9]{40})`)
 
+// parserJunkWords defines common torrent-specific words and tags to aggressively strip from display titles.
+var parserJunkWords = map[string]bool{
+	// Qualities/Resolutions
+	"1080p": true, "720p": true, "2160p": true, "480p": true, "360p": true,
+	"4k": true, "uhd": true, "bluray": true, "bdrip": true, "brrip": true,
+	"webdl": true, "webrip": true, "hdrip": true, "dvdrip": true, "pdtv": true,
+	"hdtv": true, "cam": true, "camrip": true, "hdcam": true, "ts": true,
+	"hdts": true, "tc": true, "predvd": true, "dvdscr": true, "screener": true,
+	"scr": true, "hq": true, "v2": true, "v3": true, "hc": true, "clean": true,
+	"imax": true, "h264": true, "x264": true, "h265": true, "x265": true,
+	"hevc": true, "aac": true, "aac3": true, "dts": true, "dd51": true,
+	"truehd": true, "ac3": true, "mp3": true, "xvid": true, "divx": true,
+	"av1": true, "vp9": true, "hdr10": true, "hdr": true, "dv": true,
+	"dolby": true, "vision": true, "atmos": true, "dts-hd": true, "ma": true,
+	// Audio/Subtitle/Language
+	"dual": true, "audio": true, "dubbed": true, "dub": true, "multi": true,
+	"hindi": true, "tamil": true, "telugu": true, "malayalam": true,
+	"kannada": true, "bengali": true, "marathi": true, "punjabi": true,
+	"english": true, "spanish": true, "french": true, "italian": true,
+	"russian": true, "korean": true, "japanese": true, "chinese": true,
+	"esub": true, "sub": true, "subs": true, "sott": true,
+	// Channels/Bit Depth
+	"51": true, "71": true, "20": true, "10bit": true, "8bit": true,
+	// Release Types/Generic Tags
+	"remux": true, "3d": true, "sdr": true,
+	"web": true, "dl": true, "hd": true, "webrip": true, "web-dl": true, "hdtv": true, "brrip": true, "brip": true, "rip": true,
+	// Season/Episode indicators, often found as trailing junk
+	"s": true, "e": true, "ep": true, "season": true, "episode": true, "pack": true, "complete": true, "full": true, "series": true, "episodes": true,
+	"proper": true, "repack": true, "extended": true, "cut": true,
+}
+
+// parserStopWords are common articles/prepositions to ignore for cleaning purposes.
+var parserStopWords = map[string]bool{
+	"the": true, "a": true, "an": true, "and": true, "or": true,
+	"of": true, "in": true, "on": true, "at": true, "to": true,
+	"for": true, "with": true, "by": true, "from": true, "aka": true,
+	"la": true, "le": true, "les": true, "el": true, "un": true, "une": true,
+}
+
+// parserIsNumber checks if a string is composed entirely of digits.
+func parserIsNumber(s string) bool {
+	if s == "" {
+		return false
+	}
+	for i := 0; i < len(s); i++ {
+		if s[i] < '0' || s[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 func normalizeEpisodePatterns(s string) string {
 	return epPatternRegex.ReplaceAllString(s, "${1}E${2}")
 }
@@ -212,6 +264,36 @@ func parseEpisodeRange(s string) (int, int, bool) {
 	return 0, 0, false
 }
 
+// filterTorrentNoise aggressively cleans a title string by removing common torrent junk words and patterns.
+func filterTorrentNoise(title string) string {
+	// First, ensure consistent spacing and convert to lowercase for uniform processing
+	title = collapseSpaces(strings.ToLower(title))
+	
+	// Remove common file size indicators (e.g., 2.6gb, 1.4gb, 6gb) using regex
+	// Replaced with a single space to prevent words from merging (e.g., "title26gb" -> "title")
+	title = regexp.MustCompile(`\b\d+(\.\d+)?[gmk]b\b`).ReplaceAllString(title, " ")
+
+	// Split into words based on spaces
+	words := strings.Fields(title)
+	filteredWords := make([]string, 0, len(words))
+
+	for _, w := range words {
+		// Skip if it's a known junk word, stop word, or a simple number
+		if parserJunkWords[w] || parserStopWords[w] || parserIsNumber(w) {
+			continue
+		}
+        // Additional filter for single-character or single-digit noise that might not be in maps
+		if len(w) == 1 && (w[0] >= 'a' && w[0] <= 'z' || w[0] >= '0' && w[0] <= '9') {
+			continue
+		}
+		
+		filteredWords = append(filteredWords, w)
+	}
+
+	// Rejoin the filtered words and collapse any new multiple spaces introduced by filtering
+	return collapseSpaces(strings.Join(filteredWords, " "))
+}
+
 func RobustParseInfo(title string, fallbackSeason int) *ParseResult {
 	clean := SanitizeName(title)
 
@@ -262,6 +344,8 @@ func RobustParseInfo(title string, fallbackSeason int) *ParseResult {
 				Language: lang,
 				Quality:  getQuality(movie.Quality.Quality.Resolution),
 			}
+			// Apply aggressive cleaning for movie titles too
+			res.Title = filterTorrentNoise(res.Title)
 			return res
 		}
 	}
@@ -287,6 +371,9 @@ func RobustParseInfo(title string, fallbackSeason int) *ParseResult {
 	if res.Season == 0 {
 		res.Season = 1 // default season fallback
 	}
+
+	// Apply aggressive cleaning to the final extracted title
+	res.Title = filterTorrentNoise(res.Title)
 
 	return res
 }
@@ -526,8 +613,7 @@ func ParseMagnet(magnetURI string, contentType string) *ParsedMagnet {
 	}
 
 	dn, _ = url.QueryUnescape(dn)
-	rePrefix := regexp.MustCompile(`(?i)^www\.[a-z0-9-]+\.[a-z]{2,4}\s*-\s*`)
-	dn = rePrefix.ReplaceAllString(dn, "")
+	dn = rePrefixRegex.ReplaceAllString(dn, "") // Use pre-compiled regex
 	dn = strings.TrimSpace(dn)
 
 	parsed := RobustParseInfo(dn, 0)
@@ -611,7 +697,7 @@ func ParseMagnet(magnetURI string, contentType string) *ParsedMagnet {
 }
 
 func extractInfohash(magnet string) string {
-	m := infohashRegex.FindStringSubmatch(magnet)
+	m := infohashRegex.FindStringSubmatch(magnet) // Use pre-compiled regex
 	if len(m) > 1 {
 		return strings.ToLower(m[1])
 	}
