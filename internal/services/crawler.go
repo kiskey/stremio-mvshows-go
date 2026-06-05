@@ -1,3 +1,6 @@
+// Version: 1.0.1
+// Change log: Updated RunCrawler to dynamically override page boundaries and query parameters during incremental runs.
+
 package crawler
 
 import (
@@ -105,7 +108,8 @@ func (pt *ProxyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 }
 
 // RunCrawler executes the asynchronous forum crawl based on the current configuration.
-func RunCrawler(cfg *config.Config) ([]CrawledThread, error) {
+// Accepts an 'incremental' boolean to run in lightweight, low-resource mode.
+func RunCrawler(cfg *config.Config, incremental bool) ([]CrawledThread, error) {
 	var crawled []CrawledThread
 	seenHashes := make(map[string]bool) // O(1) deduplication to replace inefficient slice sweeps
 	var mu sync.Mutex
@@ -244,8 +248,6 @@ func RunCrawler(cfg *config.Config) ([]CrawledThread, error) {
 	})
 
 	// Detail page magnet extraction handler.
-	// Optimisation: Utilises a context-level single-flight flag to prevent multiple triggers.
-	// This reduces DOM extraction overhead on pages with dozens of magnets by 1000%.
 	c.OnHTML("a[href^=\"magnet:?\"]", func(e *colly.HTMLElement) {
 		// Verify if this page was already scraped once during this request lifetime
 		if e.Request.Ctx.GetAny("detail_parsed") != nil {
@@ -292,27 +294,38 @@ func RunCrawler(cfg *config.Config) ([]CrawledThread, error) {
 		}
 	})
 
-	// Build start URLs and queue jobs
+	// Determine endpoints dynamic parameters (Option 1 & Option 3 mapping)
+	endPage := cfg.ScrapeEndPage
+	sortQuery := cfg.ForumSortQuery
+	if incremental {
+		endPage = cfg.IncrementalEndPage
+		sortQuery = cfg.IncrementalSortQuery
+	}
+
 	runTimestamp := time.Now().Unix()
+
+	buildURL := func(base string, i int) string {
+		var u string
+		if i == 1 {
+			u = base
+		} else {
+			u = fmt.Sprintf("%s/page/%d", base, i)
+		}
+		if sortQuery != "" {
+			sep := "&"
+			if !strings.Contains(u, "?") {
+				sep = "?"
+			}
+			u = u + sep + strings.TrimPrefix(sortQuery, "&")
+		}
+		return u
+	}
 
 	addTasks := func(urls []string, contentType, catalog string) {
 		for _, base := range urls {
 			base = strings.TrimSuffix(base, "/")
-			for i := cfg.ScrapeStartPage; i <= cfg.ScrapeEndPage; i++ {
-				var u string
-				if i == 1 {
-					u = base
-				} else {
-					u = fmt.Sprintf("%s/page/%d", base, i)
-				}
-				if cfg.ForumSortQuery != "" {
-					sep := "&"
-					if !strings.Contains(u, "?") {
-						sep = "?"
-					}
-					u = u + sep + strings.TrimPrefix(cfg.ForumSortQuery, "&")
-				}
-
+			for i := cfg.ScrapeStartPage; i <= endPage; i++ {
+				u := buildURL(base, i)
 				ctx := colly.NewContext()
 				ctx.Put("type", contentType)
 				ctx.Put("catalog_id", catalog)
