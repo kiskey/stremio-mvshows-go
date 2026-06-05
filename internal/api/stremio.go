@@ -1,5 +1,5 @@
-// Version: 1.0.3
-// Change log: Added GORM Preload Self-Healing Fallbacks and Selective Omission of Poster/Description keys to allow Cinemeta-inferred metadata fallback.
+// Version: 1.0.4
+// Change log: Implemented in-memory catalog ID deduplication and added database fallbacks for NULL-season/episode complete series packs in streamHandler.
 
 package api
 
@@ -265,6 +265,7 @@ func catalogHandler(c *gin.Context) {
 	}
 
 	metas := make([]gin.H, 0, len(threads))
+	seenIDs := make(map[string]bool)
 
 	for _, t := range threads {
 		// Self-healing Fallback: If GORM's Preload fail silently, resolve relationship via direct index query
@@ -282,6 +283,12 @@ func catalogHandler(c *gin.Context) {
 		if metaID == "" {
 			continue // Defensive: skip any record that doesn't have an IMDb ID
 		}
+
+		// Deduplicate: avoid duplicate cards per IMDb ID when multiple forum threads link to same ID
+		if seenIDs[metaID] {
+			continue
+		}
+		seenIDs[metaID] = true
 
 		poster := ""
 		desc := ""
@@ -347,7 +354,6 @@ func catalogHandler(c *gin.Context) {
 
 		// Cinemeta inferred poster & description fallback rule:
 		// Only output poster and description keys if they possess explicitly loaded or overridden values.
-		// Leaving these keys omitted or non-existent in the JSON payload triggers Stremio's Cinemeta-fallback beautifully.
 		if poster != "" {
 			metaEntry["poster"] = poster
 		}
@@ -596,8 +602,9 @@ func streamHandler(c *gin.Context) {
 
 	var streams []database.Stream
 	if season != -1 && episode != -1 {
-		// Series path: search direct episode match OR full season packs where episode is NULL
-		err = database.DB.Where("tmdb_id = ? AND ((season = ? AND episode <= ? AND episode_end >= ?) OR (season = ? AND episode IS NULL))",
+		// Series path: search direct episode match, range packs, OR full season/series packs where episode is NULL
+		// Crucial Fix: added fallback for complete series packs where both season AND episode are NULL in the database
+		err = database.DB.Where("tmdb_id = ? AND ((season = ? AND episode <= ? AND episode_end >= ?) OR (season = ? AND episode IS NULL) OR (season IS NULL AND episode IS NULL))",
 			meta.TmdbID, season, episode, episode, season).
 			Order("quality DESC").
 			Find(&streams).Error
