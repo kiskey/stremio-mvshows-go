@@ -1,5 +1,5 @@
-// Version: 1.0.3
-// Change log: Overhauled autoMatchHandler to use a bounded concurrency worker pool (max 5 parallel goroutines) to eliminate 504 Gateway Timeout HTML proxy errors during bulk runs.
+// Version: 1.0.4
+// Change log: Added collision pre-checks inside linkOfficialHandler and autoMatchHandler to re-route overlapping TMDB IDs and prevent SQLite UNIQUE constraint failures on imdb_id.
 
 package api
 
@@ -10,7 +10,6 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -216,6 +215,15 @@ func linkOfficialHandler(c *gin.Context) {
 	}
 
 	errTx := database.DB.Transaction(func(tx *gorm.DB) error {
+		// GORM-safe Collision Pre-check: Verify if this IMDb ID is already registered under an alternative TMDB ID
+		if tmdbResult.ImdbID != "" {
+			var fetched []database.TmdbMetadata
+			if tx.Where("imdb_id = ?", tmdbResult.ImdbID).Limit(1).Find(&fetched).Error == nil && len(fetched) > 0 {
+				// Re-route local pointers to use the pre-existing record, completely avoiding UNIQUE constraints issues
+				tmdbResult.TmdbID = fetched[0].TmdbID
+			}
+		}
+
 		// Save TmdbMetadata records
 		rawDataBytes, _ := json.Marshal(tmdbResult.RawData)
 		
@@ -391,6 +399,15 @@ func autoMatchHandler(c *gin.Context) {
 			}
 
 			errTx := database.DB.Transaction(func(tx *gorm.DB) error {
+				// GORM-safe Collision Pre-check: Verify if this IMDb ID is already registered under an alternative TMDB ID
+				if tmdbResult.ImdbID != "" {
+					var fetched []database.TmdbMetadata
+					if tx.Where("imdb_id = ?", tmdbResult.ImdbID).Limit(1).Find(&fetched).Error == nil && len(fetched) > 0 {
+						// Re-route local pointers to use the pre-existing record, completely avoiding UNIQUE constraints issues
+						tmdbResult.TmdbID = fetched[0].TmdbID
+					}
+				}
+
 				rawDataBytes, _ := json.Marshal(tmdbResult.RawData)
 				
 				var imdbIDPtr *string
