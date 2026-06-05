@@ -1,3 +1,6 @@
+// Version: 1.0.1
+// Change log: Integrated a NULL-safe existence check for series and season pack streams to prevent duplicate rows in SQLite's unique constraint implementation.
+
 package orchestrator
 
 import (
@@ -291,12 +294,30 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 				stream.EpisodeEnd = nil
 			}
 
-			errStr := tx.Clauses(clause.OnConflict{
-				Columns:   []clause.Column{{Name: "tmdb_id"}, {Name: "season"}, {Name: "episode"}, {Name: "infohash"}},
-				UpdateAll: true,
-			}).Create(&stream).Error
-			if errStr != nil {
-				return errStr
+			// NULL-safe Unique Stream Existence Check:
+			// Prevents SQLite unique index duplicate leaks on Nullable fields (season/episode)
+			var existingStream database.Stream
+			chkQuery := tx.Where("tmdb_id = ? AND infohash = ?", stream.TmdbID, stream.Infohash)
+			if stream.Season != nil {
+				chkQuery = chkQuery.Where("season = ?", *stream.Season)
+			} else {
+				chkQuery = chkQuery.Where("season IS NULL")
+			}
+			if stream.Episode != nil {
+				chkQuery = chkQuery.Where("episode = ?", *stream.Episode)
+			} else {
+				chkQuery = chkQuery.Where("episode IS NULL")
+			}
+
+			if chkQuery.First(&existingStream).Error == nil {
+				// Key already exists, perform an explicit in-place update
+				stream.ID = existingStream.ID
+				stream.CreatedAt = existingStream.CreatedAt
+				stream.UpdatedAt = time.Now()
+				_ = tx.Save(&stream)
+			} else {
+				// Completely unique key, insert record cleanly
+				_ = tx.Create(&stream)
 			}
 		}
 
