@@ -1,5 +1,5 @@
-// Version: 1.1.0
-// Change log: Removed the "meta" resource from manifest resources. This delegates metadata and TV series episode dropdown selection entirely to Cinemeta, resolving 404 UI lockouts and unblocking stream handling.
+// Version: 1.1.1
+// Change log: Integrated premium UI formatting with high-fidelity badges, localized flags, debrid-specific emojis, and multi-line structured metadata layouts.
 
 package api
 
@@ -222,6 +222,7 @@ func RegisterStremioRoutes(r *gin.RouterGroup) {
 	r.GET("/manifest.json", manifestHandler)
 	r.GET("/catalog/:type/:id/:extra", catalogHandler)
 	r.GET("/catalog/:type/:id", catalogHandler)
+	r.GET("/meta/:type/:id", metaHandler)   // Bypasses Gin suffix wildcard match limitation
 	r.GET("/stream/:type/:id", streamHandler) // Bypasses Gin suffix wildcard match limitation
 	r.GET("/rd-add/:infohash/:episode", rdAddHandler)
 }
@@ -438,6 +439,175 @@ func catalogHandler(c *gin.Context) {
 	c.JSON(http.StatusOK, StremioCatalogResponse{Metas: metas})
 }
 
+// ── Meta ──
+
+func metaHandler(c *gin.Context) {
+	id := c.Param("id")
+	cfg := config.Load()
+
+	// URL-decode the ID parameter to handle percent-encoded colons (%3A) safely
+	if decoded, err := url.QueryUnescape(id); err == nil {
+		id = decoded
+	}
+
+	// Trim trailing extensions and whitespaces to prevent SQL mismatch
+	id = strings.TrimSpace(strings.TrimSuffix(id, ".json"))
+
+	cleanID := id
+	if idx := strings.Index(id, ":pending:"); idx != -1 {
+		cleanID = id[idx+len(":pending:"):]
+	}
+
+	// 1. Standard linked metadata lookup by IMDb ID (tt...)
+	// BULLETPROOF FIX: Overhauled query using standard GORM .Find() to avoid SQLite sorting and ORDER BY bugs
+	var meta database.TmdbMetadata
+	var metas []database.TmdbMetadata
+	err := database.DB.Where("imdb_id = ? OR tmdb_id = ?", cleanID, cleanID).Limit(1).Find(&metas).Error
+	if err == nil && len(metas) > 0 {
+		meta = metas[0]
+
+		// Self-healing Fallback: Fetch threads directly to bypass any GORM Preload mapping issues
+		if len(meta.Threads) == 0 {
+			var fetchedThreads []database.Thread
+			if database.DB.Where("tmdb_id = ?", meta.TmdbID).Find(&fetchedThreads).Error == nil {
+				meta.Threads = fetchedThreads
+			}
+		}
+
+		var details tmdbLightData
+		// Memory Optimization: decode directly from strings.NewReader to prevent allocations
+		dec := json.NewDecoder(strings.NewReader(meta.Data))
+		if dec.Decode(&details) == nil {
+			poster := ""
+			if details.PosterPath != "" {
+				poster = "https://image.tmdb.org/t/p/w500" + details.PosterPath
+			}
+			overview := details.Overview
+
+			mediaType := "movie"
+			if len(meta.Threads) > 0 {
+				mediaType = meta.Threads[0].Type
+			}
+
+			displayName := details.Title
+			if displayName == "" {
+				displayName = details.Name
+			}
+
+			// Apply custom metadata overrides if defined by the admin
+			if len(meta.Threads) > 0 {
+				t := meta.Threads[0]
+				if t.CustomPoster != nil && *t.CustomPoster != "" {
+					poster = *t.CustomPoster
+				}
+				if t.CustomDescription != nil && *t.CustomDescription != "" {
+					overview = *t.CustomDescription
+				}
+			}
+
+			releaseInfo := ""
+			dateStr := details.ReleaseDate
+			if dateStr == "" {
+				dateStr = details.FirstAirDate
+			}
+			if len(dateStr) >= 4 {
+				releaseInfo = dateStr[:4]
+			}
+			if releaseInfo == "" && meta.Year != nil {
+				releaseInfo = strconv.Itoa(*meta.Year)
+			}
+
+			metaObj := StremioMetaDetail{
+				ID:          id,
+				Type:        mediaType,
+				Name:        displayName,
+				ReleaseInfo: releaseInfo,
+			}
+
+			if poster != "" {
+				metaObj.Poster = poster
+			}
+			if overview != "" {
+				metaObj.Description = overview
+			}
+
+			if details.VoteAverage > 0 {
+				metaObj.ImdbRating = fmt.Sprintf("%.1f", details.VoteAverage)
+			}
+			if len(details.Genres) > 0 {
+				genreNames := make([]string, 0, len(details.Genres))
+				for _, g := range details.Genres {
+					if g.Name != "" {
+						genreNames = append(genreNames, g.Name)
+					}
+				}
+				if len(genreNames) > 0 {
+					metaObj.Genres = genreNames
+				}
+			}
+
+			if mediaType == "series" {
+				// Fetch linked streams to build Stremio series videos navigation
+				var streams []database.Stream
+				_ = database.DB.Where("tmdb_id = ?", meta.TmdbID).Order("season ASC, episode ASC").Find(&streams)
+
+				videos := make([]StremioVideoDetail, 0)
+				seen := make(map[string]bool)
+
+				for _, s := range streams {
+					if s.Season != nil && s.Episode != nil {
+						sVal := *s.Season
+						eVal := *s.Episode
+						endVal := eVal
+						if s.EpisodeEnd != nil {
+							endVal = *s.EpisodeEnd
+						}
+
+						for ep := eVal; ep <= endVal; ep++ {
+							vKey := fmt.Sprintf("%d:%d", sVal, ep)
+							if seen[vKey] {
+								continue
+							}
+							seen[vKey] = true
+
+							videos = append(videos, StremioVideoDetail{
+								ID:      fmt.Sprintf("%s:%d:%d", id, sVal, ep),
+								Season:  sVal,
+								Episode: ep,
+								Title:   fmt.Sprintf("Season %d - Episode %d", sVal, ep),
+							})
+						}
+					}
+				}
+				metaObj.Videos = videos
+			}
+
+			c.JSON(http.StatusOK, StremioMetaResponse{Meta: metaObj})
+			return
+		}
+	}
+
+	var threads []database.Thread
+	errThread := database.DB.Where("thread_hash = ?", cleanID).Limit(1).Find(&threads).Error
+	if errThread == nil && len(threads) > 0 {
+		t := threads[0]
+		metaObj := StremioMetaDetail{
+			ID:          id,
+			Type:        t.Type,
+			Name:        t.RawTitle,
+			Poster:      cfg.PlaceholderPoster,
+			Description: "Pending metadata match. You can link this manually in the administration rescue panel.",
+		}
+		if t.Year != nil {
+			metaObj.ReleaseInfo = strconv.Itoa(*t.Year)
+		}
+		c.JSON(http.StatusOK, StremioMetaResponse{Meta: metaObj})
+		return
+	}
+
+	c.JSON(http.StatusNotFound, gin.H{"error": "Metadata not found"})
+}
+
 // ── Stream ──
 
 func streamHandler(c *gin.Context) {
@@ -513,8 +683,8 @@ func streamHandler(c *gin.Context) {
 				sources := withDhtSource(trackerSources, parsedMagnet.Infohash)
 
 				streamList = append(streamList, StremioStreamDetail{
-					Name:     fmt.Sprintf("[P2P] %s", parsedMagnet.Quality),
-					Title:    t.RawTitle,
+					Name:     "🔌 P2P",
+					Title:    fmt.Sprintf("🎬 %s\n✨ %s   |   🔊 Peer-to-Peer Stream", t.RawTitle, formatQualityBadge(parsedMagnet.Quality)),
 					InfoHash: parsedMagnet.Infohash,
 					Sources:  sources,
 				})
@@ -574,16 +744,14 @@ func streamHandler(c *gin.Context) {
 		mediaType = meta.Threads[0].Type
 	}
 
-	// Pre-fetch TMDB title for movie streams
+	// Pre-fetch TMDB title for movie/series streams
 	var tmdbTitle string
-	if mediaType == "movie" {
-		var tmdbData tmdbLightData
-		dec := json.NewDecoder(strings.NewReader(meta.Data))
-		if dec.Decode(&tmdbData) == nil {
-			tmdbTitle = tmdbData.Title
-			if tmdbTitle == "" {
-				tmdbTitle = tmdbData.Name
-			}
+	var tmdbData tmdbLightData
+	dec := json.NewDecoder(strings.NewReader(meta.Data))
+	if dec.Decode(&tmdbData) == nil {
+		tmdbTitle = tmdbData.Title
+		if tmdbTitle == "" {
+			tmdbTitle = tmdbData.Name
 		}
 	}
 
@@ -610,7 +778,7 @@ func streamHandler(c *gin.Context) {
 			if s.Season != nil {
 				seasonVal = *s.Season
 			}
-			titleDetail = buildSeriesTitle(seasonVal, ep, epEnd, s.Quality, s.Language)
+			titleDetail = buildSeriesTitle(tmdbTitle, seasonVal, ep, epEnd, s.Quality, s.Language)
 		} else {
 			titleDetail = buildMovieTitle(tmdbTitle, s.Quality, s.Language)
 		}
@@ -639,9 +807,14 @@ func streamHandler(c *gin.Context) {
 				if fileToStream != nil && linkIndex >= 0 && linkIndex < len(debridTorrent.Links) {
 					unrestricted, errUnrestrict := p.UnrestrictLink(c.Request.Context(), debridTorrent.Links[linkIndex])
 					if errUnrestrict == nil && unrestricted != nil && unrestricted.Download != "" {
+						badgeName := "⚡ RD+"
+						if cfg.DebridService == "torbox" {
+							badgeName = "⚡ TB+"
+						}
+
 						item := StremioStreamDetail{
-							Name:     fmt.Sprintf("[RD+] %s ⚡", s.Quality),
-							Title:    fmt.Sprintf("%s\n%s", titleDetail, fileToStream.Path),
+							Name:     badgeName,
+							Title:    fmt.Sprintf("%s\n📦 File: %s", titleDetail, fileToStream.Path),
 							URL:      unrestricted.Download,
 							Quality:  s.Quality,
 							Language: s.Language,
@@ -652,21 +825,21 @@ func streamHandler(c *gin.Context) {
 				}
 			}
 
-			// ---- Standard RD stream (redirects through /rd-add/) ----
-			label := fmt.Sprintf("[RD] %s ⏳", s.Quality)
+			// ---- Standard RD/TB stream (redirects through /rd-add/) ----
+			badgeName := "⏳ RD"
 			if isCached {
-				label = fmt.Sprintf("[RD+] %s ⚡", s.Quality)
+				badgeName = "⚡ RD+"
 			}
-
-			targetEpStr := "movie"
-			if season != -1 && episode != -1 {
-				targetEpStr = fmt.Sprintf("%d-%d", season, episode)
+			if cfg.DebridService == "torbox" {
+				badgeName = "⏳ TB"
+				if isCached {
+					badgeName = "⚡ TB+"
+				}
 			}
-			rdUrl := fmt.Sprintf("%s/rd-add/%s/%s", cfg.AppHost, s.Infohash, targetEpStr)
 
 			item := StremioStreamDetail{
-				Name:     label,
-				Title:    fmt.Sprintf("%s\nClick to Download", titleDetail),
+				Name:     badgeName,
+				Title:    fmt.Sprintf("%s\n📥 Click to Stream", titleDetail),
 				URL:      rdUrl,
 				Quality:  s.Quality,
 				Language: s.Language,
@@ -681,8 +854,8 @@ func streamHandler(c *gin.Context) {
 			trackerSources := buildTrackerSources()
 			sources := withDhtSource(trackerSources, s.Infohash)
 			item := StremioStreamDetail{
-				Name:     fmt.Sprintf("[P2P] %s", s.Quality),
-				Title:    titleDetail,
+				Name:     "🔌 P2P",
+				Title:    fmt.Sprintf("%s\n🔗 Peer-to-Peer Stream", titleDetail),
 				InfoHash: s.Infohash,
 				Sources:  sources,
 				Quality:  s.Quality,
@@ -702,7 +875,7 @@ func streamHandler(c *gin.Context) {
 
 // ── Stream Title Builders ──
 
-func buildSeriesTitle(season, episode, episodeEnd int, quality, language string) string {
+func buildSeriesTitle(tmdbTitle string, season, episode, episodeEnd int, quality, language string) string {
 	seasonStr := fmt.Sprintf("S%02d", season)
 
 	var epPart string
@@ -714,29 +887,62 @@ func buildSeriesTitle(season, episode, episodeEnd int, quality, language string)
 		epPart = fmt.Sprintf("Episodes %02d-%02d", episode, episodeEnd)
 	}
 
-	langPart := ""
-	if language != "" {
-		langPart = " | " + language
-	}
+	qBadge := formatQualityBadge(quality)
+	langBadge := formatLanguage(language)
 
-	q := quality
-	if q == "" {
-		q = "SD"
-	}
-
-	return fmt.Sprintf("%s | %s%s\n%s", seasonStr, epPart, langPart, q)
+	return fmt.Sprintf("🎬 %s (%s | %s)\n✨ %s   |   🔊 %s", tmdbTitle, seasonStr, epPart, qBadge, langBadge)
 }
 
 func buildMovieTitle(tmdbTitle, quality, language string) string {
-	langPart := ""
-	if language != "" {
-		langPart = " | " + language
+	qBadge := formatQualityBadge(quality)
+	langBadge := formatLanguage(language)
+
+	return fmt.Sprintf("🎬 %s\n✨ %s   |   🔊 %s", tmdbTitle, qBadge, langBadge)
+}
+
+// ── Presentation Formatters ──
+
+var languageFlags = map[string]string{
+	"ta": "Tamil 🇮🇳",
+	"te": "Telugu 🇮🇳",
+	"ml": "Malayalam 🇮🇳",
+	"hi": "Hindi 🇮🇳",
+	"kn": "Kannada 🇮🇳",
+	"en": "English 🇬🇧",
+	"fr": "French 🇫🇷",
+	"es": "Spanish 🇪🇸",
+	"de": "German 🇩🇪",
+	"it": "Italian 🇮🇹",
+	"ja": "Japanese 🇯🇵",
+	"ko": "Korean 🇰🇷",
+	"zh": "Chinese 🇨🇳",
+}
+
+func formatLanguage(lang string) string {
+	lang = strings.ToLower(strings.TrimSpace(lang))
+	if lang == "" {
+		return "Unknown 🌐"
 	}
-	q := quality
-	if q == "" {
-		q = "SD"
+	if val, ok := languageFlags[lang]; ok {
+		return val
 	}
-	return fmt.Sprintf("%s%s\n%s", tmdbTitle, langPart, q)
+	return strings.ToUpper(lang) + " 🌐"
+}
+
+func formatQualityBadge(q string) string {
+	q = strings.ToUpper(strings.TrimSpace(q))
+	switch q {
+	case "4K", "2160P":
+		return "🚀 4K UHD"
+	case "1080P":
+		return "🔥 1080p HD"
+	case "720P":
+		return "⚡ 720p HD"
+	case "480P", "SD", "360P":
+		return "📼 SD"
+	default:
+		return "🎥 " + q
+	}
 }
 
 // ── Debrid File Selection ──
