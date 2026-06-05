@@ -1,5 +1,5 @@
-// Version: 1.0.4
-// Change log: Added collision pre-checks inside linkOfficialHandler and autoMatchHandler to re-route overlapping TMDB IDs and prevent SQLite UNIQUE constraint failures on imdb_id.
+// Version: 1.0.5
+// Change log: Added "sync" to the imports block to resolve compiler errors for the bounded concurrency autoMatchHandler.
 
 package api
 
@@ -10,6 +10,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/gin-gonic/gin"
