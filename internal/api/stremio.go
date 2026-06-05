@@ -1,5 +1,5 @@
-// Version: 1.0.5
-// Change log: Applied extensive latency and GC optimizations including typed structs, global regexes, string-reader json decoders, reflection-free sorting, and index-based id slicing.
+// Version: 1.0.6
+// Change log: Added net/url import and URL QueryUnescape to decode percent-encoded colons (%3A) safely. Replaced .Preload("Threads") with manual self-healing fallbacks to prevent GORM silent relation errors.
 
 package api
 
@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"regexp"
 	"sort"
 	"strconv"
@@ -445,16 +446,22 @@ func metaHandler(c *gin.Context) {
 	id := strings.TrimSuffix(c.Param("id"), ".json")
 	cfg := config.Load()
 
+	// URL-decode the ID parameter to handle percent-encoded colons (%3A) safely
+	if decoded, err := url.QueryUnescape(id); err == nil {
+		id = decoded
+	}
+
 	cleanID := id
 	if idx := strings.Index(id, ":pending:"); idx != -1 {
 		cleanID = id[idx+len(":pending:"):]
 	}
 
 	// 1. First attempt to lookup as standard linked metadata by IMDb ID (tt...)
+	// REMOVED .Preload("Threads") to prevent GORM's relationship-loading errors from failing the query.
 	var meta database.TmdbMetadata
-	err := database.DB.Where("imdb_id = ? OR tmdb_id = ?", cleanID, cleanID).Preload("Threads").First(&meta).Error
+	err := database.DB.Where("imdb_id = ? OR tmdb_id = ?", cleanID, cleanID).First(&meta).Error
 	if err == nil {
-		// Self-healing Fallback: If GORM's Preload fails silently, resolve relation directly
+		// Self-healing Fallback: Fetch threads directly to bypass any GORM Preload mapping issues
 		if len(meta.Threads) == 0 {
 			var fetchedThreads []database.Thread
 			if database.DB.Where("tmdb_id = ?", meta.TmdbID).Find(&fetchedThreads).Error == nil {
@@ -601,6 +608,11 @@ func streamHandler(c *gin.Context) {
 	id := strings.TrimSuffix(c.Param("id"), ".json")
 	cfg := config.Load()
 
+	// URL-decode the ID parameter to handle percent-encoded colons (%3A) safely
+	if decoded, err := url.QueryUnescape(id); err == nil {
+		id = decoded
+	}
+
 	// Strip pending prefix robustly if looking up unlinked thread streams
 	cleanID := id
 	if idx := strings.Index(id, ":pending:"); idx != -1 {
@@ -672,6 +684,14 @@ func streamHandler(c *gin.Context) {
 		// STREMIO PROTOCOL FIX: Never return 404 on the stream endpoint! 
 		c.JSON(http.StatusOK, StremioStreamResponse{Streams: []StremioStreamDetail{}})
 		return
+	}
+
+	// Self-healing Fallback: Fetch threads directly to bypass any GORM Preload mapping issues
+	if len(meta.Threads) == 0 {
+		var fetchedThreads []database.Thread
+		if database.DB.Where("tmdb_id = ?", meta.TmdbID).Find(&fetchedThreads).Error == nil {
+			meta.Threads = fetchedThreads
+		}
 	}
 
 	var streams []database.Stream
