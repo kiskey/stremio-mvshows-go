@@ -1,3 +1,6 @@
+// Version: 1.0.1
+// Change log: Added /auto-match endpoint to allow manual triggering of TMDB metadata lookups and relational stream generation for pending threads.
+
 package api
 
 import (
@@ -29,6 +32,7 @@ func RegisterAdminRoutes(r *gin.RouterGroup) {
 	r.GET("/pending/:threadId/streams", pendingStreamsHandler)
 	r.POST("/custom-meta", customMetaHandler)
 	r.POST("/link-official", linkOfficialHandler)
+	r.POST("/auto-match", autoMatchHandler) // New endpoint for manual auto-matching
 	r.POST("/rd-cache-pending", cachePendingHandler)
 	r.POST("/rd-check", rdCheckHandler)
 	r.GET("/failures", failuresHandler)
@@ -314,6 +318,156 @@ func linkOfficialHandler(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "Thread manually linked to official metadata successfully!"})
 }
 
+// autoMatchHandler handles manual trigger of auto-matching on selected thread IDs using clean title parsing.
+func autoMatchHandler(c *gin.Context) {
+	var body struct {
+		ThreadIDs []int `json:"threadIds"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid payload parameters"})
+		return
+	}
+
+	if len(body.ThreadIDs) == 0 {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "No thread IDs provided"})
+		return
+	}
+
+	cfg := config.Load()
+	tmdbClient := metadata.NewTMDBClient(cfg)
+
+	successCount := 0
+	failCount := 0
+	matchedTitles := make([]string, 0)
+
+	for _, id := range body.ThreadIDs {
+		var t database.Thread
+		if errDb := database.DB.First(&t, "id = ?", id).Error; errDb != nil {
+			failCount++
+			continue
+		}
+
+		// Aggressive Title Cleaning using our fine-tuned parser
+		parsed := parser.ParseTitle(t.RawTitle)
+		if parsed == nil || parsed.Title == "" {
+			failCount++
+			continue
+		}
+
+		tmdbResult, errTmdb := tmdbClient.Search(parsed.Title, parsed.Year, t.Type)
+		if errTmdb != nil {
+			failCount++
+			continue
+		}
+
+		errTx := database.DB.Transaction(func(tx *gorm.DB) error {
+			rawDataBytes, _ := json.Marshal(tmdbResult.RawData)
+			
+			var imdbIDPtr *string
+			if tmdbResult.ImdbID != "" {
+				val := tmdbResult.ImdbID
+				imdbIDPtr = &val
+			}
+
+			tmdbMetadata := database.TmdbMetadata{
+				TmdbID: tmdbResult.TmdbID,
+				ImdbID: imdbIDPtr,
+				Data:   string(rawDataBytes),
+			}
+			if tmdbResult.Year > 0 {
+				tmdbMetadata.Year = &tmdbResult.Year
+			}
+
+			errMeta := tx.Clauses(clause.OnConflict{
+				Columns:   []clause.Column{{Name: "tmdb_id"}},
+				UpdateAll: true,
+			}).Create(&tmdbMetadata).Error
+			if errMeta != nil {
+				return errMeta
+			}
+
+			t.TmdbID = &tmdbResult.TmdbID
+			t.Status = "linked"
+			if tmdbResult.Year > 0 {
+				t.Year = &tmdbResult.Year
+			}
+
+			errThr := tx.Save(&t).Error
+			if errThr != nil {
+				return errThr
+			}
+
+			for _, magnet := range t.MagnetURIs {
+				parsedMagnet := parser.ParseMagnet(magnet, t.Type)
+				if parsedMagnet == nil {
+					continue
+				}
+
+				cacheRecord := database.MagnetCache{
+					Infohash: parsedMagnet.Infohash,
+					Magnet:   magnet,
+				}
+				_ = tx.Clauses(clause.OnConflict{
+					Columns:   []clause.Column{{Name: "infohash"}},
+					UpdateAll: true,
+				}).Create(&cacheRecord)
+
+				stream := database.Stream{
+					TmdbID:   tmdbResult.TmdbID,
+					Infohash: parsedMagnet.Infohash,
+					Quality:  parsedMagnet.Quality,
+					Language: parsedMagnet.Language,
+				}
+
+				if t.Type == "series" {
+					seasonVal := parsedMagnet.Season
+					if seasonVal == 0 {
+						seasonVal = 1
+					}
+					stream.Season = &seasonVal
+
+					if parsedMagnet.Type == "SINGLE_EPISODE" {
+						epVal := parsedMagnet.Episode
+						stream.Episode = &epVal
+						stream.EpisodeEnd = &epVal
+					} else if parsedMagnet.Type == "EPISODE_PACK" {
+						startVal := parsedMagnet.EpisodeStart
+						endVal := parsedMagnet.EpisodeEnd
+						stream.Episode = &startVal
+						stream.EpisodeEnd = &endVal
+					} else {
+						stream.Episode = nil
+						stream.EpisodeEnd = nil
+					}
+				}
+
+				_ = tx.Clauses(clause.OnConflict{
+					Columns:   []clause.Column{{Name: "tmdb_id"}, {Name: "season"}, {Name: "episode"}, {Name: "infohash"}},
+					UpdateAll: true,
+				}).Create(&stream)
+			}
+
+			_ = database.DeleteFailedThread(t.ThreadHash, tx)
+			return nil
+		})
+
+		if errTx == nil {
+			successCount++
+			matchedTitles = append(matchedTitles, tmdbResult.Title)
+		} else {
+			failCount++
+		}
+	}
+
+	orchestrator.UpdateDashboardCache()
+
+	c.JSON(http.StatusOK, gin.H{
+		"successCount":  successCount,
+		"failCount":     failCount,
+		"matchedTitles": matchedTitles,
+	})
+}
+
 func cachePendingHandler(c *gin.Context) {
 	var body struct {
 		ThreadID int    `json:"threadId"`
@@ -377,7 +531,6 @@ func cachePendingHandler(c *gin.Context) {
 }
 
 // rdCheckHandler queries the local GORM database only to check the download cache status of torrent files.
-// Satisfies the "POST /rd-check checks local DB only (no API call)" requirement.
 func rdCheckHandler(c *gin.Context) {
 	var body struct {
 		Hashes []string `json:"hashes"`
