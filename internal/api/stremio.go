@@ -1,5 +1,5 @@
-// Version: 1.1.5
-// Change log: Removed the unused PosterPath field from the local tmdbLightData struct to completely eliminate image parsing and reduce memory allocation overhead.
+// Version: 1.1.6
+// Change log: Secured rdAddHandler by storing info.ID in a persistent string variable to prevent nil-pointer dereference panics during transient network polling errors.
 
 package api
 
@@ -1089,16 +1089,17 @@ func rdAddHandler(c *gin.Context) {
 	maxPolls := 60
 	pollInterval := 3 * time.Second
 	downloaded := false
+	torrentID := info.ID // Store ID in a persistent string variable to prevent nil pointer dereference on transient errors
 
 	for i := 0; i < maxPolls; i++ {
 		select {
 		case <-reqCtx.Done():
 			utils.Logger.Info().
 				Str("infohash", infohash).
-				Str("id", info.ID).
+				Str("id", torrentID).
 				Msg("Client disconnected during active stream loading. Detaching and delegating debrid caching to background.")
 			
-			go func(torrentID string, infohash string) {
+			go func(tID string, infohash string) {
 				defer func() {
 					if r := recover(); r != nil {
 						utils.Logger.Error().Interface("panic", r).Msg("Recovered from background caching poll panic.")
@@ -1131,7 +1132,7 @@ func rdAddHandler(c *gin.Context) {
 					default:
 					}
 
-					bgInfo, bgErr = bgProvider.GetTorrentInfo(bgCtx, torrentID)
+					bgInfo, bgErr = bgProvider.GetTorrentInfo(bgCtx, tID)
 					if bgErr == nil && bgInfo.Status == "downloaded" {
 						bgDownloaded = true
 						break
@@ -1143,7 +1144,7 @@ func rdAddHandler(c *gin.Context) {
 					// Successfully finished downloading in the background. Write to local GORM cache
 					var record database.DebridTorrent
 					record.Infohash = infohash
-					record.TorrentID = torrentID
+					record.TorrentID = tID
 					record.Provider = cfg.DebridService
 					record.Status = "downloaded"
 					record.Files = make([]database.TorrentFile, len(bgInfo.Files))
@@ -1164,17 +1165,17 @@ func rdAddHandler(c *gin.Context) {
 					}).Create(&record).Error
 					utils.Logger.Info().Str("infohash", infohash).Msg("Debrid torrent cached successfully in background.")
 				}
-			}(info.ID, infohash)
+			}(torrentID, infohash)
 
 			c.JSON(499, gin.H{"error": "Request cancelled by client. Cache polling detached to background."})
 			return
 		default:
 		}
 
-		info, err = p.GetTorrentInfo(reqCtx, info.ID)
+		info, err = p.GetTorrentInfo(reqCtx, torrentID)
 		if err != nil {
-			utils.Logger.Warn().Err(err).Str("id", info.ID).Msg("Error polling debrid torrent status. Retrying.")
-		} else if info.Status == "downloaded" {
+			utils.Logger.Warn().Err(err).Str("id", torrentID).Msg("Error polling debrid torrent status. Retrying.")
+		} else if info != nil && info.Status == "downloaded" {
 			downloaded = true
 			break
 		}
