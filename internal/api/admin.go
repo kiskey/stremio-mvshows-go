@@ -1,5 +1,5 @@
-// Version: 1.0.5
-// Change log: Added "sync" to the imports block to resolve compiler errors for the bounded concurrency autoMatchHandler.
+// Version: 1.0.6
+// Change log: Explicitly update t.CleanTitle to tmdbResult.Title in both linkOfficialHandler and autoMatchHandler to overwrite old dirty crawled database strings upon successful linking.
 
 package api
 
@@ -253,6 +253,7 @@ func linkOfficialHandler(c *gin.Context) {
 		}
 
 		t.TmdbID = &tmdbResult.TmdbID
+		t.CleanTitle = tmdbResult.Title // Overwrite old dirty crawled title with the clean TMDB standard
 		t.Status = "linked"
 		t.Type = mediaType
 		if tmdbResult.Year > 0 {
@@ -435,6 +436,7 @@ func autoMatchHandler(c *gin.Context) {
 				}
 
 				t.TmdbID = &tmdbResult.TmdbID
+				t.CleanTitle = tmdbResult.Title // Overwrite old dirty crawled title with the clean TMDB standard
 				t.Status = "linked"
 				if tmdbResult.Year > 0 {
 					t.Year = &tmdbResult.Year
