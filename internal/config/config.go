@@ -1,3 +1,6 @@
+// Version: 1.0.1
+// Change log: Added SCRAPE_INCREMENTAL_END_PAGE, INCREMENTAL_SORT_QUERY, and FORCE_FULL_SCRAPE configuration fields to support smart incremental crawling.
+
 package config
 
 import (
@@ -43,6 +46,10 @@ type Config struct {
 	// Cache Expiry Configuration
 	CacheExpiryDays      int
 	CacheExpiryEnabled   bool
+	// Incremental Scraping Configuration
+	IncrementalEndPage   int
+	IncrementalSortQuery string
+	ForceFullScrape      bool
 }
 
 // Load reads settings from the environment and optional .env file.
@@ -90,6 +97,10 @@ func Load() *Config {
 		// Cache Expiry Defaults: expire cache if unaccessed for 5 days
 		CacheExpiryDays:      getEnvInt("CACHE_EXPIRY_DAYS", 5),
 		CacheExpiryEnabled:   getEnv("CACHE_EXPIRY_ENABLED", "true") == "true",
+		// Incremental Scraping Configuration
+		IncrementalEndPage:   getEnvInt("SCRAPE_INCREMENTAL_END_PAGE", 3),
+		IncrementalSortQuery: getEnv("INCREMENTAL_SORT_QUERY", "&sortby=last_post&sortdirection=desc"),
+		ForceFullScrape:      os.Getenv("FORCE_FULL_SCRAPE") == "true",
 	}
 
 	c.IsRDEnabled = c.RealDebridAPIKey != ""
