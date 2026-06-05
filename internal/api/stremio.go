@@ -1,5 +1,5 @@
-// Version: 1.0.1
-// Change log: Removed unused "net/url" import that was causing a compile error during build.
+// Version: 1.0.3
+// Change log: Added GORM Preload Self-Healing Fallbacks and Selective Omission of Poster/Description keys to allow Cinemeta-inferred metadata fallback.
 
 package api
 
@@ -240,7 +240,7 @@ func catalogHandler(c *gin.Context) {
 	// EXPERT FIX: Retrieve ONLY successfully linked threads that possess a valid IMDb ID (tt...)
 	// This completely eliminates custom pending IDs (addonId:pending:...) from catalog pages,
 	// preventing layout issues and rendering professional Metahub-aligned cards.
-	query := database.DB.Debug().
+	query := database.DB.
 		Where("status = ? AND type = ? AND tmdb_id IN (SELECT tmdb_id FROM tmdb_metadata WHERE imdb_id IS NOT NULL AND imdb_id != '')", "linked", mediaType)
 
 	// Filter by specific catalogs matching manifest IDs
@@ -264,10 +264,17 @@ func catalogHandler(c *gin.Context) {
 		return
 	}
 
-	cfg := config.Load()
 	metas := make([]gin.H, 0, len(threads))
 
 	for _, t := range threads {
+		// Self-healing Fallback: If GORM's Preload fail silently, resolve relationship via direct index query
+		if t.TmdbMetadata == nil && t.TmdbID != nil {
+			var fetchedMeta database.TmdbMetadata
+			if database.DB.Where("tmdb_id = ?", *t.TmdbID).First(&fetchedMeta).Error == nil {
+				t.TmdbMetadata = &fetchedMeta
+			}
+		}
+
 		metaID := ""
 		if t.TmdbMetadata != nil && t.TmdbMetadata.ImdbID != nil {
 			metaID = *t.TmdbMetadata.ImdbID
@@ -276,7 +283,7 @@ func catalogHandler(c *gin.Context) {
 			continue // Defensive: skip any record that doesn't have an IMDb ID
 		}
 
-		poster := cfg.PlaceholderPoster
+		poster := ""
 		desc := ""
 		title := t.CleanTitle
 		if title == "" {
@@ -288,7 +295,7 @@ func catalogHandler(c *gin.Context) {
 		var imdbRating *string
 		var genresList []string
 
-		if json.Unmarshal([]byte(t.TmdbMetadata.Data), &tmdbData) == nil {
+		if t.TmdbMetadata != nil && json.Unmarshal([]byte(t.TmdbMetadata.Data), &tmdbData) == nil {
 			if tmdbData.PosterPath != "" {
 				poster = "https://image.tmdb.org/t/p/w500" + tmdbData.PosterPath
 			}
@@ -335,9 +342,17 @@ func catalogHandler(c *gin.Context) {
 			"id":          metaID,
 			"type":        t.Type,
 			"name":        title,
-			"poster":      poster,
-			"description": desc,
 			"releaseInfo": releaseInfo,
+		}
+
+		// Cinemeta inferred poster & description fallback rule:
+		// Only output poster and description keys if they possess explicitly loaded or overridden values.
+		// Leaving these keys omitted or non-existent in the JSON payload triggers Stremio's Cinemeta-fallback beautifully.
+		if poster != "" {
+			metaEntry["poster"] = poster
+		}
+		if desc != "" {
+			metaEntry["description"] = desc
 		}
 		if imdbRating != nil {
 			metaEntry["imdbRating"] = *imdbRating
@@ -365,11 +380,19 @@ func metaHandler(c *gin.Context) {
 
 	// 1. First attempt to lookup as standard linked metadata by IMDb ID (tt...)
 	var meta database.TmdbMetadata
-	err := database.DB.Debug().Where("imdb_id = ? OR tmdb_id = ?", cleanID, cleanID).Preload("Threads").First(&meta).Error
+	err := database.DB.Where("imdb_id = ? OR tmdb_id = ?", cleanID, cleanID).Preload("Threads").First(&meta).Error
 	if err == nil {
+		// Self-healing Fallback: If GORM's Preload fails silently, resolve relation directly
+		if len(meta.Threads) == 0 {
+			var fetchedThreads []database.Thread
+			if database.DB.Where("tmdb_id = ?", meta.TmdbID).Find(&fetchedThreads).Error == nil {
+				meta.Threads = fetchedThreads
+			}
+		}
+
 		var details tmdbLightData
 		if errJson := json.Unmarshal([]byte(meta.Data), &details); errJson == nil {
-			poster := cfg.PlaceholderPoster
+			poster := ""
 			if details.PosterPath != "" {
 				poster = "https://image.tmdb.org/t/p/w500" + details.PosterPath
 			}
@@ -412,9 +435,14 @@ func metaHandler(c *gin.Context) {
 				"id":          id,
 				"type":        mediaType,
 				"name":        displayName,
-				"poster":      poster,
-				"description": overview,
 				"releaseInfo": releaseInfo,
+			}
+
+			if poster != "" {
+				metaObj["poster"] = poster
+			}
+			if overview != "" {
+				metaObj["description"] = overview
 			}
 
 			if details.VoteAverage > 0 {
@@ -473,9 +501,8 @@ func metaHandler(c *gin.Context) {
 		}
 	}
 
-	// 2. Second attempt: Check if the ID refers to an unlinked, pending ThreadHash (backward-compatibility)
 	var t database.Thread
-	errThread := database.DB.Debug().Where("thread_hash = ?", cleanID).First(&t).Error
+	errThread := database.DB.Where("thread_hash = ?", cleanID).First(&t).Error
 	if errThread == nil {
 		metaObj := gin.H{
 			"id":          id,
@@ -527,11 +554,11 @@ func streamHandler(c *gin.Context) {
 	}
 
 	var meta database.TmdbMetadata
-	err := database.DB.Debug().Where("imdb_id = ? OR tmdb_id = ?", baseID, baseID).First(&meta).Error
+	err := database.DB.Where("imdb_id = ? OR tmdb_id = ?", baseID, baseID).First(&meta).Error
 	if err != nil {
 		// If metadata lookup fails, check if the query requested unlinked/pending ThreadHash streams
 		var t database.Thread
-		errThread := database.DB.Debug().Where("thread_hash = ?", baseID).First(&t).Error
+		errThread := database.DB.Where("thread_hash = ?", baseID).First(&t).Error
 		if errThread == nil {
 			// This is an unlinked thread. Return direct P2P fallback streams only (No RD mapping)
 			streamList := make([]gin.H, 0)
@@ -548,12 +575,14 @@ func streamHandler(c *gin.Context) {
 				}
 				seenP2P[parsedMagnet.Infohash] = true
 
-				label := fmt.Sprintf("[P2P] TamilMV\n%s / %s", parsedMagnet.Quality, parsedMagnet.Language)
+				trackerSources := buildTrackerSources()
+				sources := withDhtSource(trackerSources, parsedMagnet.Infohash)
+
 				streamList = append(streamList, gin.H{
-					"name":     label,
+					"name":     fmt.Sprintf("[P2P] %s", parsedMagnet.Quality),
 					"title":    t.RawTitle,
 					"infoHash": parsedMagnet.Infohash,
-					"sources":  tracker.GetTrackers(),
+					"sources":  sources,
 				})
 			}
 			c.JSON(http.StatusOK, gin.H{"streams": streamList})
@@ -568,13 +597,13 @@ func streamHandler(c *gin.Context) {
 	var streams []database.Stream
 	if season != -1 && episode != -1 {
 		// Series path: search direct episode match OR full season packs where episode is NULL
-		err = database.DB.Debug().Where("tmdb_id = ? AND ((season = ? AND episode <= ? AND episode_end >= ?) OR (season = ? AND episode IS NULL))",
+		err = database.DB.Where("tmdb_id = ? AND ((season = ? AND episode <= ? AND episode_end >= ?) OR (season = ? AND episode IS NULL))",
 			meta.TmdbID, season, episode, episode, season).
 			Order("quality DESC").
 			Find(&streams).Error
 	} else {
 		// Movie path
-		err = database.DB.Debug().Where("tmdb_id = ?", meta.TmdbID).Order("quality DESC").Find(&streams).Error
+		err = database.DB.Where("tmdb_id = ?", meta.TmdbID).Order("quality DESC").Find(&streams).Error
 	}
 
 	if err != nil {
