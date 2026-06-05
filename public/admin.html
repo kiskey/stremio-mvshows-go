@@ -1,125 +1,338 @@
-<!-- Version: 1.0.1 -->
-<!-- Change log: Added "Auto-Match Focused" and "Bulk Auto-Match" buttons with fully connected JavaScript handlers to allow one-click metadata resolution from the admin dashboard. -->
+<!-- Version: 1.1.0 -->
+<!-- Change log: Complete front-end redesign into a highly structured, command-line CRT terminal and retro-console dashboard with zero clutter and fully preserved event listeners. -->
 
 <!DOCTYPE html>
 <html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Stremio Addon Admin</title>
+    <title>► MVSHOWS ADMIN TERMINAL ◄</title>
     <style>
-        body { font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 20px; background: #1a1a2e; color: #eee; }
-        h2 { color: #e94560; }
-        table { border-collapse: collapse; margin: 10px 0; }
-        td { padding: 6px 12px; border-bottom: 1px solid #333; }
-        button { background: #e94560; color: white; border: none; padding: 8px 16px; cursor: pointer; border-radius: 4px; margin: 4px; }
-        button:hover { background: #c23152; }
-        button:disabled { background: #555; cursor: not-allowed; }
-        select, input { padding: 6px; margin: 4px; border-radius: 4px; border: 1px solid #555; background: #16213e; color: #eee; }
-        .section { margin: 20px 0; padding: 15px; background: #16213e; border-radius: 8px; }
-        .stream-item { display: flex; align-items: center; gap: 8px; padding: 4px 0; }
+        @import url('https://fonts.googleapis.com/css2?family=VT323&display=swap');
+
+        body { 
+            font-family: 'VT323', 'Courier New', monospace; 
+            font-size: 1.35rem;
+            line-height: 1.3;
+            margin: 20px; 
+            background: #050505; 
+            color: #e0e0e0; 
+            letter-spacing: 1px;
+            text-shadow: 0 0 3px rgba(224, 224, 224, 0.25);
+        }
+        
+        h1 { 
+            text-align: center; 
+            color: #00ff66; 
+            font-size: 3rem; 
+            margin-bottom: 25px;
+            text-shadow: 0 0 8px rgba(0, 255, 102, 0.5);
+            text-transform: uppercase;
+        }
+
+        table { 
+            width: 100%;
+            border-collapse: collapse; 
+            margin: 5px 0; 
+        }
+
+        td, th { 
+            padding: 6px 12px; 
+            border-bottom: 1px dashed #333; 
+            text-align: left;
+        }
+
+        th {
+            color: #00e5ff;
+            text-transform: uppercase;
+        }
+
+        /* Monospaced Retro Inputs and Buttons */
+        button { 
+            font-family: 'VT323', 'Courier New', monospace;
+            font-size: 1.25rem;
+            background: #000; 
+            color: #00ff66; 
+            border: 2px solid #00ff66; 
+            padding: 5px 14px; 
+            cursor: pointer; 
+            border-radius: 0;
+            text-transform: uppercase;
+            box-shadow: 2px 2px 0 #004411;
+            margin: 4px;
+            transition: all 0.1s ease;
+        }
+
+        button:hover { 
+            background: #00ff66; 
+            color: #000; 
+            box-shadow: none;
+            transform: translate(2px, 2px);
+        }
+
+        button:disabled { 
+            background: #111;
+            border-color: #444;
+            color: #444; 
+            box-shadow: none;
+            cursor: not-allowed; 
+            transform: none;
+        }
+
+        select, input[type="text"] { 
+            font-family: 'VT323', 'Courier New', monospace;
+            font-size: 1.25rem;
+            padding: 4px 8px; 
+            margin: 4px; 
+            border-radius: 0; 
+            border: 2px solid #00e5ff; 
+            background: #0a0a0c; 
+            color: #00e5ff; 
+            box-shadow: inset 1px 1px 0 #000;
+        }
+
+        select:focus, input[type="text"]:focus {
+            outline: none;
+            border-color: #ff9900;
+            color: #ff9900;
+        }
+
+        /* Command Line CRT Terminal Windows */
+        .section { 
+            border: 2px solid #e0e0e0;
+            background-color: #0a0a0c;
+            padding: 15px; 
+            box-shadow: 4px 4px 0 #222;
+            position: relative;
+            margin-bottom: 20px;
+        }
+
+        .terminal-header {
+            background: #e0e0e0;
+            color: #000;
+            font-weight: bold;
+            padding: 3px 10px;
+            margin: -15px -15px 15px -15px;
+            text-transform: uppercase;
+            font-size: 1.15rem;
+            display: flex;
+            justify-content: space-between;
+        }
+
+        /* Dashboard Flex Grid Layout */
+        .dashboard-grid {
+            display: grid;
+            grid-template-columns: repeat(12, 1fr);
+            gap: 20px;
+        }
+
+        .span-4 { grid-column: span 4; }
+        .span-6 { grid-column: span 6; }
+        .span-8 { grid-column: span 8; }
+        .span-12 { grid-column: span 12; }
+
+        @media (max-width: 1024px) {
+            .span-4, .span-6, .span-8 { grid-column: span 12; }
+        }
+
+        /* Color Codes for Retro Statuses */
+        .glow-green { color: #00ff66; text-shadow: 0 0 4px rgba(0, 255, 102, 0.3); }
+        .glow-cyan { color: #00e5ff; text-shadow: 0 0 4px rgba(0, 229, 255, 0.3); }
+        .glow-amber { color: #ff9900; text-shadow: 0 0 4px rgba(255, 153, 0, 0.3); }
+        .glow-red { color: #ff2a5f; text-shadow: 0 0 4px rgba(255, 42, 95, 0.3); }
+
+        .rescue-flex {
+            display: flex;
+            gap: 25px;
+            flex-wrap: wrap;
+        }
+
+        .rescue-col {
+            flex: 1;
+            min-width: 280px;
+        }
     </style>
 </head>
 <body>
-    <h1>Stremio Addon Admin</h1>
+    <h1>► MVSHOWS ADMIN TERMINAL v1.1.2 ◄</h1>
 
-    <div class="section">
-        <h2>Status</h2>
-        <table>
-            <tr><td>Workflow running:</td><td id="isCrawling">-</td></tr>
-            <tr><td>Last workflow update:</td><td id="lastUpdated">-</td></tr>
-            <tr><td>Debrid provider:</td><td id="debridService">-</td></tr>
-            <tr><td>Cache check:</td><td id="cacheCheckMethod">-</td></tr>
-            <tr><td>RD enabled:</td><td id="rdEnabled">-</td></tr>
-            <tr><td>TorBox enabled:</td><td id="torboxEnabled">-</td></tr>
-            <tr><td>TMDB configured:</td><td id="tmdbConfigured">-</td></tr>
-            <tr><td>Tracker count:</td><td id="trackerCount">-</td></tr>
-            <tr><td>DB size:</td><td id="dbSize">-</td></tr>
-        </table>
-        <p>Health endpoint provides a quick snapshot. Use the Actions below to trigger a manual crawl.</p>
-    </div>
-
-    <div class="section">
-        <h2>Dashboard</h2>
-        <table>
-            <tr><td>Total Linked:</td><td id="linkedCount">0</td></tr>
-            <tr><td>Pending TMDB Match:</td><td id="pendingCount">0</td></tr>
-            <tr><td>Critical Parse Failures:</td><td id="failedCount">0</td></tr>
-        </table>
-    </div>
-
-    <div class="section">
-        <h2>Actions</h2>
-        <button id="triggerCrawl">Trigger Manual Crawl</button>
-    </div>
-
-    <div class="section">
-        <h2>Edit &amp; Rescue Pending Items</h2>
-        <h3>1. Pick Pending Items</h3>
-        <div style="display:flex; gap:20px;">
-            <div>
-                <h4>Available</h4>
-                <select id="availableList" size="10" style="min-width:300px;"></select>
-                <br>
-                <button id="moveBtn">→ Move</button>
-                <button id="removeBtn">← Remove</button>
-                <button id="moveAllBtn">→→ Move All</button>
-                <button id="clearAllBtn">←← Clear</button>
+    <div class="dashboard-grid">
+        
+        <!-- SYSTEM STATUS MODULE -->
+        <div class="section span-6">
+            <div class="terminal-header">
+                <span>► SYSTEM_HEALTH_SNAPSHOT</span>
+                <span>STATUS: OK</span>
             </div>
-            <div>
-                <h4>Selected</h4>
-                <select id="selectedList" size="10" style="min-width:300px;"></select>
-                <br>
-                <button id="setFocusBtn">Set Focus</button>
-                <span>Focused item drives RD caching below.</span>
-            </div>
-        </div>
-
-        <h3>2A. Edit Metadata (Focused Item)</h3>
-        <p>Focused Title: <span id="focusedTitle">None</span></p>
-        <label>Custom Poster URL: <input type="text" id="customPoster" style="width:400px;"></label><br>
-        <label>Custom Description: <input type="text" id="customDescription" style="width:400px;"></label><br>
-        <button id="saveFocused">Save Focused</button>
-
-        <h3>2B. Link Official ID &amp; Auto-Matching</h3>
-        <p>Accepts IMDb (tt...) or TMDB (tv:... or movie:...). Or run an instant optimized auto-match check.</p>
-        <label>Official ID: <input type="text" id="officialId"></label>
-        <button id="linkFocused">Link Focused</button>
-        <button id="autoMatchFocused" style="background: #2a69ac;">Auto-Match Focused</button>
-
-        <hr>
-        <h4>Bulk operations (Selected List)</h4>
-        <button id="bulkLink">Bulk Link</button>
-        <button id="bulkUpdateMeta">Bulk Update Meta</button>
-        <button id="bulkAutoMatch" style="background: #2a69ac;">Bulk Auto-Match</button>
-        <p>Tip: Great for series like Bigg Boss where many threads need the same ID or metadata.</p>
-
-        <h3>3. Choose a Stream to Cache in Debrid</h3>
-        <p>Operates on the focused item only. Select exactly one stream; already-initiated streams are marked and disabled.</p>
-        <div id="streamsContainer">
             <table>
-                <thead><tr><th>Title</th><th>Quality / Language</th><th>Select</th></tr></thead>
-                <tbody id="streamsBody"><tr><td colspan="3">Set a focused item to see streams.</td></tr></tbody>
+                <tr><td>Workflow running:</td><td id="isCrawling" class="glow-amber">-</td></tr>
+                <tr><td>Last workflow update:</td><td id="lastUpdated" class="glow-cyan">-</td></tr>
+                <tr><td>Debrid provider:</td><td id="debridService" class="glow-cyan">-</td></tr>
+                <tr><td>Cache check:</td><td id="cacheCheckMethod" class="glow-cyan">-</td></tr>
+                <tr><td>RD enabled:</td><td id="rdEnabled">-</td></tr>
+                <tr><td>TorBox enabled:</td><td id="torboxEnabled">-</td></tr>
+                <tr><td>TMDB configured:</td><td id="tmdbConfigured">-</td></tr>
+                <tr><td>Tracker count:</td><td id="trackerCount" class="glow-green">-</td></tr>
+                <tr><td>DB size:</td><td id="dbSize" class="glow-green">-</td></tr>
             </table>
         </div>
-        <button id="cacheSelected">Cache selected in Debrid</button>
-    </div>
 
-    <div class="section">
-        <h2>Recent Activity</h2>
-        <p>Linked (paginated): <button id="prevPage">Prev</button> <span id="currentPage">1</span> <button id="nextPage">Next</button></p>
-        <table>
-            <thead><tr><th>Type</th><th>Title / Reason</th><th>When</th></tr></thead>
-            <tbody id="recentBody"></tbody>
-        </table>
-    </div>
+        <!-- AGGREGATE METRICS & CONTROL MODULE -->
+        <div class="section span-6">
+            <div class="terminal-header">
+                <span>► DATABASE_METRICS_LOG</span>
+                <span>SECURE</span>
+            </div>
+            <table>
+                <tr><td>Total Linked items:</td><td id="linkedCount" class="glow-green" style="font-size: 1.8rem; font-weight: bold;">0</td></tr>
+                <tr><td>Pending TMDB Match:</td><td id="pendingCount" class="glow-cyan" style="font-size: 1.8rem; font-weight: bold;">0</td></tr>
+                <tr><td>Critical Parse Failures:</td><td id="failedCount" class="glow-red" style="font-size: 1.8rem; font-weight: bold;">0</td></tr>
+            </table>
+            <div style="margin-top: 25px; text-align: center;">
+                <button id="triggerCrawl" style="font-size: 1.5rem; border-color: #ff9900; color: #ff9900; box-shadow: 2px 2px 0 #553300;">⚡ Trigger Manual Crawl</button>
+            </div>
+        </div>
 
-    <div class="section">
-        <h2>Critical Parse Failures</h2>
-        <table>
-            <thead><tr><th>Failed Title</th><th>Reason</th><th>Last Attempt</th><th>Actions</th></tr></thead>
-            <tbody id="failuresBody"></tbody>
-        </table>
+        <!-- EDIT AND RESCUE MODULE -->
+        <div class="section span-12">
+            <div class="terminal-header">
+                <span>► METADATA_RESCUE_BAY</span>
+                <span>ACTIVE_OVERRIDE</span>
+            </div>
+            
+            <div class="rescue-flex">
+                <!-- PICK LISTS -->
+                <div class="rescue-col">
+                    <h3 class="glow-cyan">01. Pick Pending Items</h3>
+                    <div style="display:flex; gap:10px; align-items: stretch;">
+                        <div style="flex: 1;">
+                            <div style="font-size: 1.1rem; margin-bottom: 4px; text-transform: uppercase; color: #888;">Available Queue</div>
+                            <select id="availableList" size="10" style="width:100%; min-height:220px;"></select>
+                        </div>
+                        <div style="display: flex; flex-direction: column; justify-content: center; gap: 6px;">
+                            <button id="moveBtn">→</button>
+                            <button id="removeBtn">←</button>
+                            <button id="moveAllBtn">→→</button>
+                            <button id="clearAllBtn">←←</button>
+                        </div>
+                        <div style="flex: 1;">
+                            <div style="font-size: 1.1rem; margin-bottom: 4px; text-transform: uppercase; color: #888;">Selected Queue</div>
+                            <select id="selectedList" size="10" style="width:100%; min-height:220px;"></select>
+                        </div>
+                    </div>
+                    <div style="margin-top: 10px; text-align: right;">
+                        <button id="setFocusBtn" style="border-color: #00e5ff; color: #00e5ff; box-shadow: 2px 2px 0 #005577;">🎯 Set Focus On Selected</button>
+                    </div>
+                </div>
+
+                <!-- ACTIONS BAY -->
+                <div class="rescue-col">
+                    <h3 class="glow-amber">02. Meta Actions (Focused)</h3>
+                    <p style="margin: 5px 0 15px 0;">Focused Title: <span id="focusedTitle" class="glow-green" style="font-size: 1.4rem; font-weight: bold;">None</span></p>
+                    
+                    <div style="display: flex; flex-direction: column; gap: 8px;">
+                        <div>
+                            <label style="display:inline-block; width:150px; color:#888;">Custom Poster:</label>
+                            <input type="text" id="customPoster" placeholder="https://image-url..." style="width: 250px;">
+                        </div>
+                        <div>
+                            <label style="display:inline-block; width:150px; color:#888;">Custom Plot:</label>
+                            <input type="text" id="customDescription" placeholder="Description overrides..." style="width: 250px;">
+                        </div>
+                        <div style="margin-bottom: 10px;">
+                            <button id="saveFocused">💾 Save Custom Meta</button>
+                        </div>
+                        
+                        <div style="border-top: 1px dashed #333; padding-top: 12px;">
+                            <label style="display:inline-block; width:150px; color:#888;">Official ID:</label>
+                            <input type="text" id="officialId" placeholder="tt12345 or movie:123" style="width: 250px;">
+                        </div>
+                        <div>
+                            <button id="linkFocused" style="border-color: #ff2a5f; color: #ff2a5f; box-shadow: 2px 2px 0 #550011;">🔗 Link Focused ID</button>
+                            <button id="autoMatchFocused" style="border-color: #2a69ac; color: #2a69ac; box-shadow: 2px 2px 0 #112b4b;">🤖 Auto-Match Focused</button>
+                        </div>
+                    </div>
+
+                    <div style="border-top: 1px dashed #333; margin-top: 15px; padding-top: 12px;">
+                        <span class="glow-cyan" style="font-size: 1.15rem; text-transform: uppercase;">Bulk operations (Selected Queue)</span>
+                        <div style="margin-top: 5px;">
+                            <button id="bulkLink">Bulk Link IDs</button>
+                            <button id="bulkUpdateMeta">Bulk Update Meta</button>
+                            <button id="bulkAutoMatch" style="border-color: #2a69ac; color: #2a69ac; box-shadow: 2px 2px 0 #112b4b;">🤖 Bulk Auto-Match</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- CHOOSE STREAM PANEL -->
+            <div style="border-top: 2px solid #e0e0e0; margin-top: 25px; padding-top: 15px;">
+                <h3 class="glow-green">03. Debrid Caching Pipeline</h3>
+                <p style="color: #888; font-size: 1.1rem; margin: 0 0 10px 0;">Select a single stream below to push and cache into your configured Debrid provider cloud.</p>
+                <div id="streamsContainer">
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Torrent Info Hash</th>
+                                <th>Quality / Language</th>
+                                <th>Selection</th>
+                            </tr>
+                        </thead>
+                        <tbody id="streamsBody">
+                            <tr><td colspan="3" style="color: #666; text-align: center;">Set a focused item above to query available streams.</td></tr>
+                        </tbody>
+                    </table>
+                </div>
+                <div style="margin-top: 15px; text-align: right;">
+                    <button id="cacheSelected" style="font-size: 1.3rem;">📥 Push &amp; Cache Selected Stream</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- RECENT ACTIVITY MODULE -->
+        <div class="section span-6">
+            <div class="terminal-header">
+                <span>► RECENT_ACTIVITY_LOG</span>
+                <span>PAGINATED</span>
+            </div>
+            <div style="margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center;">
+                <span style="color:#888;">Page List logs</span>
+                <div>
+                    <button id="prevPage">◀ Prev</button> 
+                    <span id="currentPage" class="glow-cyan" style="padding: 0 10px; font-weight: bold;">1</span> 
+                    <button id="nextPage">Next ▶</button>
+                </div>
+            </div>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Event Type</th>
+                        <th>Clean Title / Error Reason</th>
+                        <th>Timestamp</th>
+                    </tr>
+                </thead>
+                <tbody id="recentBody"></tbody>
+            </table>
+        </div>
+
+        <!-- CRITICAL PARSE FAILURES MODULE -->
+        <div class="section span-6">
+            <div class="terminal-header">
+                <span>► CRITICAL_PARSING_FAILURES</span>
+                <span>ACTION_REQUIRED</span>
+            </div>
+            <table>
+                <thead>
+                    <tr>
+                        <th>Raw Scraped Title</th>
+                        <th>Exception Reason</th>
+                        <th>Last Attempt</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody id="failuresBody"></tbody>
+            </table>
+        </div>
+
     </div>
 
     <script>
@@ -139,13 +352,18 @@
                 try {
                     const r = await fetch('/admin/api/health');
                     const d = await r.json();
-                    el('isCrawling').textContent = d.isCrawling ? 'Yes' : 'No';
+                    el('isCrawling').textContent = d.isCrawling ? 'ACTIVE' : 'IDLE';
+                    el('isCrawling').className = d.isCrawling ? 'glow-amber' : 'glow-green';
                     el('lastUpdated').textContent = d.lastUpdated || '-';
-                    el('debridService').textContent = d.debridService || 'none';
-                    el('cacheCheckMethod').textContent = d.debridCacheCheck === 'instant' ? '⚡ Instant (API)' : '🗄️ Database';
-                    el('rdEnabled').textContent = d.realDebridEnabled ? '✓' : '✗';
-                    el('torboxEnabled').textContent = d.torboxEnabled ? '✓' : '✗';
-                    el('tmdbConfigured').textContent = d.tmdbConfigured ? '✓' : '✗';
+                    el('debridService').textContent = (d.debridService || 'none').toUpperCase();
+                    el('cacheCheckMethod').textContent = d.debridCacheCheck === 'instant' ? '⚡ INSTANT (API)' : '🗄️ LOCAL DATABASE';
+                    el('cacheCheckMethod').className = d.debridCacheCheck === 'instant' ? 'glow-green' : 'glow-amber';
+                    el('rdEnabled').textContent = d.realDebridEnabled ? 'YES' : 'NO';
+                    el('rdEnabled').className = d.realDebridEnabled ? 'glow-green' : 'glow-red';
+                    el('torboxEnabled').textContent = d.torboxEnabled ? 'YES' : 'NO';
+                    el('torboxEnabled').className = d.torboxEnabled ? 'glow-green' : 'glow-red';
+                    el('tmdbConfigured').textContent = d.tmdbConfigured ? 'YES' : 'NO';
+                    el('tmdbConfigured').className = d.tmdbConfigured ? 'glow-green' : 'glow-red';
                     el('trackerCount').textContent = d.trackerCount;
                     el('dbSize').textContent = d.dbSizeBytes ? (d.dbSizeBytes / 1024 / 1024).toFixed(1) + ' MB' : '-';
 
@@ -161,7 +379,8 @@
             // ── Trigger Crawl ────────────────────────────────────
             el('triggerCrawl').addEventListener('click', async () => {
                 await fetch('/admin/api/trigger-crawl', { method: 'POST' });
-                alert('Crawl triggered!');
+                alert('Crawl sequence initiated in background.');
+                fetchHealth();
             });
 
             // ── Pending Items ────────────────────────────────────
@@ -193,19 +412,19 @@
                 const tbody = el('streamsBody');
                 tbody.innerHTML = '';
                 if (!data.items || data.items.length === 0) {
-                    tbody.innerHTML = '<tr><td colspan="3">No streams found.</td></tr>';
+                    tbody.innerHTML = '<tr><td colspan="3" style="color:#ff2a5f; text-align:center;">No streams found.</td></tr>';
                     return;
                 }
                 data.items.forEach((item, i) => {
                     const tr = document.createElement('tr');
                     tr.innerHTML = `
                         <td>${item.label}</td>
-                        <td>${item.quality || 'SD'} / ${item.language || 'NA'}</td>
+                        <td class="glow-cyan">${item.quality || 'SD'} / ${item.language || 'NA'}</td>
                         <td><input type="radio" name="streamSelect" value="${item.infohash}" ${data.locked.includes(item.infohash) ? 'disabled' : ''}></td>
                     `;
                     if (data.locked.includes(item.infohash)) {
-                        tr.style.opacity = '0.5';
-                        tr.title = 'Already initiated';
+                        tr.style.opacity = '0.4';
+                        tr.title = 'Cache locked / already initiated';
                     }
                     tbody.appendChild(tr);
                 });
@@ -215,6 +434,7 @@
                 if (!focusedThreadId) return alert('Set a focused item first.');
                 const radio = document.querySelector('input[name="streamSelect"]:checked');
                 const infohash = radio ? radio.value : null;
+                if (!infohash) return alert('Select exactly one stream to cache.');
                 const r = await fetch('/admin/api/rd-cache-pending', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
@@ -237,6 +457,7 @@
                 const d = await r.json();
                 alert(d.message);
                 loadPending();
+                fetchHealth();
             });
 
             el('autoMatchFocused').addEventListener('click', async () => {
@@ -253,7 +474,7 @@
                         alert(`Successfully auto-matched: "${d.matchedTitles.join(', ')}"!`);
                         focusedThreadId = null;
                         el('focusedTitle').textContent = 'None';
-                        el('streamsBody').innerHTML = '<tr><td colspan="3">Set a focused item to see streams.</td></tr>';
+                        el('streamsBody').innerHTML = '<tr><td colspan="3" style="color: #666; text-align: center;">Set a focused item above to query available streams.</td></tr>';
                         loadPending();
                         fetchHealth();
                     } else {
@@ -329,7 +550,7 @@
                 tbody.innerHTML = items.map(f => `
                     <tr>
                         <td>${f.raw_title}</td>
-                        <td>${f.reason}</td>
+                        <td class="glow-red">${f.reason}</td>
                         <td>${f.last_attempt}</td>
                         <td><button onclick="retryParse('${f.thread_hash}')">Retry</button></td>
                     </tr>
@@ -352,8 +573,8 @@
                 const d = await r.json();
                 el('currentPage').textContent = page;
                 const rows = [];
-                (d.linked || []).forEach(l => rows.push(`<tr><td>Linked</td><td>${l.title}</td><td>${l.updatedAt}</td></tr>`));
-                (d.failures || []).forEach(f => rows.push(`<tr><td>Failed</td><td>${f.title}</td><td>${f.last_attempt}</td></tr>`));
+                (d.linked || []).forEach(l => rows.push(`<tr><td class="glow-green">LINKED</td><td>${l.title}</td><td>${l.updatedAt}</td></tr>`));
+                (d.failures || []).forEach(f => rows.push(`<tr><td class="glow-red">FAILED</td><td>${f.title}</td><td>${f.last_attempt}</td></tr>`));
                 el('recentBody').innerHTML = rows.join('');
             }
 
