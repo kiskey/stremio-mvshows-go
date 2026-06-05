@@ -1,5 +1,5 @@
-// Version: 1.1.4
-// Change log: Migrated catalog poster resolution to Stremio's official Metahub CDN (images.metahub.space) to prevent TMDB hotlinking and CORS blocks on client apps.
+// Version: 1.1.5
+// Change log: Removed the unused PosterPath field from the local tmdbLightData struct to completely eliminate image parsing and reduce memory allocation overhead.
 
 package api
 
@@ -92,7 +92,6 @@ type StremioStreamDetail struct {
 type tmdbLightData struct {
 	Title        string  `json:"title"`
 	Name         string  `json:"name"`
-	PosterPath   string  `json:"poster_path"`
 	Overview     string  `json:"overview"`
 	ReleaseDate  string  `json:"release_date"`
 	FirstAirDate string  `json:"first_air_date"`
@@ -1406,7 +1405,7 @@ func buildTrackerSources() []string {
 				proto = "udp"
 				rest = strings.TrimPrefix(t, "udp://")
 			} else if strings.HasPrefix(t, "http://") {
-				rest = strings.TrimPrefix(rest, "http://")
+				rest = strings.TrimPrefix(t, "http://")
 			} else if strings.HasPrefix(t, "https://") {
 				rest = strings.TrimPrefix(rest, "https://")
 			}
