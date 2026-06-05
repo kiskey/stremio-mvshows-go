@@ -1,5 +1,5 @@
-// Version: 1.1.1
-// Change log: Integrated premium UI formatting with high-fidelity badges, localized flags, debrid-specific emojis, and multi-line structured metadata layouts.
+// Version: 1.1.2
+// Change log: Fixed the undefined 'rdUrl' variable compilation error in standard debrid stream mapping.
 
 package api
 
@@ -826,6 +826,12 @@ func streamHandler(c *gin.Context) {
 			}
 
 			// ---- Standard RD/TB stream (redirects through /rd-add/) ----
+			targetEpStr := "movie"
+			if season != -1 && episode != -1 {
+				targetEpStr = fmt.Sprintf("%d-%d", season, episode)
+			}
+			rdUrl := fmt.Sprintf("%s/rd-add/%s/%s", cfg.AppHost, s.Infohash, targetEpStr)
+
 			badgeName := "⏳ RD"
 			if isCached {
 				badgeName = "⚡ RD+"
