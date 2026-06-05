@@ -1,5 +1,5 @@
-// Version: 1.0.4
-// Change log: Integrated a robust custom episode range parser and complete-season indicators, ensuring episodes are mapped correctly to episode ranges and season packs.
+// Version: 1.0.5
+// Change log: Promoted hot-path regex compilation to package globals and replaced expensive strings.Fields allocations with a single-pass string builder space collapser.
 
 package parser
 
@@ -101,13 +101,14 @@ var languageToISO = map[rtp.Language]string{
 	rtp.LanguageUzbek:         "uz",
 }
 
-// Collapses spaces and symbols between SXX and EP(XX) to force standard SXXEXX grouping
+// Pre-compiled regular expressions at package-level to completely avoid hot-path compile penalties
 var epPatternRegex = regexp.MustCompile(`(?i)(S\d+)?[\s\-_]*\bEP[\s\-_]*[\(\[]?\s*(\d+)\s*[\)\]]?\b`)
 var urlRegex = regexp.MustCompile(`\b(https?://\S+|www\.\S+\.\w+|[\w.-]+@[\w.-]+)\b`)
 var bracketRegex = regexp.MustCompile(`\[.*?[^\w\s-].*?\]`)
-
 var rangeRegex = regexp.MustCompile(`(?i)\b(?:e|ep|episode)?\s*(\d+)\s*(?:-|to)\s*(?:e|ep|episode)?\s*(\d+)\b`)
 var seasonFolderRegex = regexp.MustCompile(`(?i)\b(?:s|season|series)\s*0*(\d+)\b`)
+var rePrefixRegex = regexp.MustCompile(`(?i)^www\.[a-z0-9-]+\.[a-z]{2,4}\s*-\s*`)
+var infohashRegex = regexp.MustCompile(`(?i)btih:([a-f0-9]{40})`)
 
 func normalizeEpisodePatterns(s string) string {
 	return epPatternRegex.ReplaceAllString(s, "${1}E${2}")
@@ -137,6 +138,26 @@ func getQuality(res int) string {
 	}
 }
 
+// collapseSpaces replaces multiple consecutive whitespace characters with a single space.
+// Bypasses Strings.Fields slices allocation.
+func collapseSpaces(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	inSpace := false
+	for _, r := range s {
+		if unicode.IsSpace(r) {
+			if !inSpace {
+				b.WriteRune(' ')
+				inSpace = true
+			}
+		} else {
+			b.WriteRune(r)
+			inSpace = false
+		}
+	}
+	return b.String()
+}
+
 func SanitizeName(name string) string {
 	s := name
 
@@ -164,9 +185,10 @@ func SanitizeName(name string) string {
 	// 5. Remove residual empty/garbage brackets
 	s = bracketRegex.ReplaceAllString(s, " ")
 
-	s = strings.Join(strings.Fields(s), " ")
+	// 6. Collapse spaces cleanly using our zero-allocation single-pass helper
+	s = collapseSpaces(s)
 	
-	// 6. Trim leftover leading/trailing punctuation
+	// 7. Trim leftover leading/trailing punctuation
 	s = strings.TrimLeft(s, " .-_[]()/\\")
 	s = strings.TrimRight(s, " .-_[]()/\\")
 	return s
@@ -589,8 +611,7 @@ func ParseMagnet(magnetURI string, contentType string) *ParsedMagnet {
 }
 
 func extractInfohash(magnet string) string {
-	re := regexp.MustCompile(`(?i)btih:([a-f0-9]{40})`)
-	m := re.FindStringSubmatch(magnet)
+	m := infohashRegex.FindStringSubmatch(magnet)
 	if len(m) > 1 {
 		return strings.ToLower(m[1])
 	}
