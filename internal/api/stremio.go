@@ -1,5 +1,5 @@
-// Version: 1.0.7
-// Change log: Implemented bulletproof Raw SQL queries in streamHandler and metaHandler to completely bypass GORM model relationship/collation bugs. Added robust trim and sanitation guardrails.
+// Version: 1.0.8
+// Change log: Overhauled GORM query engine by replacing all .First() calls with .Limit(1).Find() to prevent SQLite primary-key sorting and ordering bugs.
 
 package api
 
@@ -333,9 +333,9 @@ func catalogHandler(c *gin.Context) {
 	for _, t := range threads {
 		// Self-healing Fallback: If GORM's Preload fail silently, resolve relationship via direct index query
 		if t.TmdbMetadata == nil && t.TmdbID != nil {
-			var fetchedMeta database.TmdbMetadata
-			if database.DB.Where("tmdb_id = ?", *t.TmdbID).First(&fetchedMeta).Error == nil {
-				t.TmdbMetadata = &fetchedMeta
+			var fetchedMetas []database.TmdbMetadata
+			if database.DB.Where("tmdb_id = ?", *t.TmdbID).Limit(1).Find(&fetchedMetas).Error == nil && len(fetchedMetas) > 0 {
+				t.TmdbMetadata = &fetchedMetas[0]
 			}
 		}
 
@@ -460,10 +460,13 @@ func metaHandler(c *gin.Context) {
 	}
 
 	// 1. Standard linked metadata lookup by IMDb ID (tt...)
-	// BULLETPROOF FIX: Use raw SQL query to completely bypass GORM relationship preloading and mapping bugs
+	// BULLETPROOF FIX: Overhauled query using standard GORM .Find() to avoid SQLite sorting and ORDER BY bugs
 	var meta database.TmdbMetadata
-	err := database.DB.Raw("SELECT * FROM tmdb_metadata WHERE imdb_id = ? OR tmdb_id = ? LIMIT 1", cleanID, cleanID).Scan(&meta).Error
-	if err == nil && meta.TmdbID != "" {
+	var metas []database.TmdbMetadata
+	err := database.DB.Where("imdb_id = ? OR tmdb_id = ?", cleanID, cleanID).Limit(1).Find(&metas).Error
+	if err == nil && len(metas) > 0 {
+		meta = metas[0]
+
 		// Self-healing Fallback: Fetch threads directly to bypass any GORM Preload mapping issues
 		if len(meta.Threads) == 0 {
 			var fetchedThreads []database.Thread
@@ -585,9 +588,10 @@ func metaHandler(c *gin.Context) {
 		}
 	}
 
-	var t database.Thread
-	errThread := database.DB.Where("thread_hash = ?", cleanID).First(&t).Error
-	if errThread == nil {
+	var threads []database.Thread
+	errThread := database.DB.Where("thread_hash = ?", cleanID).Limit(1).Find(&threads).Error
+	if errThread == nil && len(threads) > 0 {
+		t := threads[0]
 		metaObj := StremioMetaDetail{
 			ID:          id,
 			Type:        t.Type,
@@ -651,14 +655,16 @@ func streamHandler(c *gin.Context) {
 		baseID = cleanID
 	}
 
-	// BULLETPROOF FIX: Use raw SQL query to completely bypass GORM relationship preloading and mapping bugs
+	// BULLETPROOF FIX: Overhauled query using standard GORM .Find() to avoid SQLite sorting and ORDER BY bugs
 	var meta database.TmdbMetadata
-	err := database.DB.Raw("SELECT * FROM tmdb_metadata WHERE imdb_id = ? OR tmdb_id = ? LIMIT 1", baseID, baseID).Scan(&meta).Error
-	if err != nil || meta.TmdbID == "" {
+	var metas []database.TmdbMetadata
+	err := database.DB.Where("imdb_id = ? OR tmdb_id = ?", baseID, baseID).Limit(1).Find(&metas).Error
+	if err != nil || len(metas) == 0 {
 		// If metadata lookup fails, check if the query requested unlinked/pending ThreadHash streams
-		var t database.Thread
-		errThread := database.DB.Where("thread_hash = ?", baseID).First(&t).Error
-		if errThread == nil {
+		var threads []database.Thread
+		errThread := database.DB.Where("thread_hash = ?", baseID).Limit(1).Find(&threads).Error
+		if errThread == nil && len(threads) > 0 {
+			t := threads[0]
 			// This is an unlinked thread. Return direct P2P fallback streams only (No RD mapping)
 			streamList := make([]StremioStreamDetail, 0)
 			seenP2P := make(map[string]bool)
@@ -692,6 +698,7 @@ func streamHandler(c *gin.Context) {
 		c.JSON(http.StatusOK, StremioStreamResponse{Streams: []StremioStreamDetail{}})
 		return
 	}
+	meta = metas[0]
 
 	// Self-healing Fallback: Fetch threads directly to bypass any GORM Preload mapping issues
 	if len(meta.Threads) == 0 {
@@ -794,9 +801,11 @@ func streamHandler(c *gin.Context) {
 		if p.IsEnabled() {
 			// ---- Attempt instant playback for already-downloaded torrents ----
 			var debridTorrent database.DebridTorrent
-			errDebrid := database.DB.Where("infohash = ? AND status = ?", s.Infohash, "downloaded").First(&debridTorrent).Error
+			var debridTorrents []database.DebridTorrent
+			errDebrid := database.DB.Where("infohash = ? AND status = ?", s.Infohash, "downloaded").Limit(1).Find(&debridTorrents).Error
 
-			if errDebrid == nil && len(debridTorrent.Files) > 0 && len(debridTorrent.Links) > 0 {
+			if errDebrid == nil && len(debridTorrents) > 0 && len(debridTorrents[0].Files) > 0 && len(debridTorrents[0].Links) > 0 {
+				debridTorrent = debridTorrents[0]
 				fileToStream, linkIndex := pickBestDebridFile(debridTorrent.Files, debridTorrent.Links, mediaType, season, episode)
 				if fileToStream != nil && linkIndex >= 0 && linkIndex < len(debridTorrent.Links) {
 					unrestricted, errUnrestrict := p.UnrestrictLink(c.Request.Context(), debridTorrent.Links[linkIndex])
@@ -1020,11 +1029,13 @@ func rdAddHandler(c *gin.Context) {
 
 	// Resolve the original magnet from cache to submit to debrid
 	var cache database.MagnetCache
-	err := database.DB.Where("infohash = ?", infohash).First(&cache).Error
-	if err != nil {
+	var caches []database.MagnetCache
+	err := database.DB.Where("infohash = ?", infohash).Limit(1).Find(&caches).Error
+	if err != nil || len(caches) == 0 {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Magnet not found in local cache"})
 		return
 	}
+	cache = caches[0]
 
 	cfg := config.Load()
 	p := debrid.GetProvider(cfg)
@@ -1037,8 +1048,10 @@ func rdAddHandler(c *gin.Context) {
 
 	// Check if already completely downloaded and saved locally in DebridTorrent table
 	var torrentRecord database.DebridTorrent
-	errRecord := database.DB.Where("infohash = ?", infohash).First(&torrentRecord).Error
-	if errRecord == nil && torrentRecord.Status == "downloaded" {
+	var torrentRecords []database.DebridTorrent
+	errRecord := database.DB.Where("infohash = ?", infohash).Limit(1).Find(&torrentRecords).Error
+	if errRecord == nil && len(torrentRecords) > 0 && torrentRecords[0].Status == "downloaded" {
+		torrentRecord = torrentRecords[0]
 		// Update LastChecked timestamp to indicate active access hit (extending cache TTL)
 		database.DB.Model(&torrentRecord).Update("last_checked", time.Now())
 
