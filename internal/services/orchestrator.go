@@ -1,5 +1,5 @@
-// Version: 1.0.1
-// Change log: Integrated a NULL-safe existence check for series and season pack streams to prevent duplicate rows in SQLite's unique constraint implementation.
+// Version: 1.0.2
+// Change log: Hoisted strings.ToLower(thread.Type) out of the hot magnet loop to completely eliminate repeated heap string allocations per processed torrent stream.
 
 package orchestrator
 
@@ -237,6 +237,10 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 			return errThr
 		}
 
+		// Cache hot properties outside loop to avoid redundant heap string copies on every magnet
+		isSeries := strings.ToLower(thread.Type) == "series"
+		nowTime := time.Now()
+
 		// Extract, construct, and upsert each magnet URI into a stream mapping
 		for _, magnet := range thread.MagnetURIs {
 			parsedMagnet := parser.ParseMagnet(magnet, thread.Type)
@@ -265,7 +269,7 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 				Language: parsedMagnet.Language,
 			}
 
-			if strings.ToLower(thread.Type) == "series" {
+			if isSeries {
 				// Parse structural season and episode parameters
 				seasonVal := parsedMagnet.Season
 				if seasonVal == 0 {
@@ -313,7 +317,7 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 				// Key already exists, perform an explicit in-place update
 				stream.ID = existingStream.ID
 				stream.CreatedAt = existingStream.CreatedAt
-				stream.UpdatedAt = time.Now()
+				stream.UpdatedAt = nowTime
 				_ = tx.Save(&stream)
 			} else {
 				// Completely unique key, insert record cleanly
