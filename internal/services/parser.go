@@ -1,5 +1,5 @@
-// Version: 1.0.7
-// Change log: Cleaned map duplicates in parserJunkWords to resolve compiler key-collision errors.
+// Version: 1.0.8
+// Change log: Removed parserIsNumber to prevent critical parse failures on numeric titles, and added truncateSeriesJunk to strip trailing season selectors from search queries.
 
 package parser
 
@@ -110,6 +110,13 @@ var seasonFolderRegex = regexp.MustCompile(`(?i)\b(?:s|season|series)\s*0*(\d+)\
 var rePrefixRegex = regexp.MustCompile(`(?i)^www\.[a-z0-9-]+\.[a-z]{2,4}\s*-\s*`)
 var infohashRegex = regexp.MustCompile(`(?i)btih:([a-f0-9]{40})`)
 
+// Patterns that identify the boundary of series/episode identifiers to truncate trailing metadata noise
+var truncationRegexes = []*regexp.Regexp{
+	regexp.MustCompile(`(?i)\b(?:s|season|series)[\s\-_]*\d+.*`),
+	regexp.MustCompile(`(?i)\b(?:e|ep|episode)[\s\-_]*[\(\[]?\s*\d+.*`),
+	regexp.MustCompile(`(?i)\b(?:complete|season\s*pack|full\s*season|all\s*episodes)\b.*`),
+}
+
 // parserJunkWords defines common torrent-specific words and tags to aggressively strip from display titles.
 var parserJunkWords = map[string]bool{
 	// Qualities/Resolutions
@@ -147,19 +154,6 @@ var parserStopWords = map[string]bool{
 	"of": true, "in": true, "on": true, "at": true, "to": true,
 	"for": true, "with": true, "by": true, "from": true, "aka": true,
 	"la": true, "le": true, "les": true, "el": true, "un": true, "une": true,
-}
-
-// parserIsNumber checks if a string is composed entirely of digits.
-func parserIsNumber(s string) bool {
-	if s == "" {
-		return false
-	}
-	for i := 0; i < len(s); i++ {
-		if s[i] < '0' || s[i] > '9' {
-			return false
-		}
-	}
-	return true
 }
 
 func normalizeEpisodePatterns(s string) string {
@@ -264,13 +258,22 @@ func parseEpisodeRange(s string) (int, int, bool) {
 	return 0, 0, false
 }
 
+// truncateSeriesJunk trims season, episode, and complete-pack selectors and everything after them from search titles.
+func truncateSeriesJunk(s string) string {
+	for _, re := range truncationRegexes {
+		if loc := re.FindStringIndex(s); loc != nil {
+			s = s[:loc[0]]
+		}
+	}
+	return strings.Trim(s, " .-_[]()/\\")
+}
+
 // filterTorrentNoise aggressively cleans a title string by removing common torrent junk words and patterns.
 func filterTorrentNoise(title string) string {
 	// First, ensure consistent spacing and convert to lowercase for uniform processing
 	title = collapseSpaces(strings.ToLower(title))
 	
 	// Remove common file size indicators (e.g., 2.6gb, 1.4gb, 6gb) using regex
-	// Replaced with a single space to prevent words from merging (e.g., "title26gb" -> "title")
 	title = regexp.MustCompile(`\b\d+(\.\d+)?[gmk]b\b`).ReplaceAllString(title, " ")
 
 	// Split into words based on spaces
@@ -278,12 +281,9 @@ func filterTorrentNoise(title string) string {
 	filteredWords := make([]string, 0, len(words))
 
 	for _, w := range words {
-		// Skip if it's a known junk word, stop word, or a simple number
-		if parserJunkWords[w] || parserStopWords[w] || parserIsNumber(w) {
-			continue
-		}
-		// Additional filter for single-character or single-digit noise that might not be in maps
-		if len(w) == 1 && (w[0] >= 'a' && w[0] <= 'z' || w[0] >= '0' && w[0] <= '9') {
+		// Skip if it's a known junk word or stop word. 
+		// Critical Fix: Removed parserIsNumber and single-character constraints to preserve numeric/short titles (e.g. "45", "180", "12B")
+		if parserJunkWords[w] || parserStopWords[w] {
 			continue
 		}
 		
@@ -297,10 +297,13 @@ func filterTorrentNoise(title string) string {
 func RobustParseInfo(title string, fallbackSeason int) *ParseResult {
 	clean := SanitizeName(title)
 
-	info := rtp.ParseSeriesTitle(clean)
+	// Pre-clean season/episode truncation junk from the search target before analysis
+	searchTitle := truncateSeriesJunk(clean)
+
+	info := rtp.ParseSeriesTitle(searchTitle)
 	
 	res := &ParseResult{
-		Title:    clean,
+		Title:    searchTitle,
 		Season:   fallbackSeason,
 		Episode:  0,
 		Language: "en",
@@ -330,7 +333,7 @@ func RobustParseInfo(title string, fallbackSeason int) *ParseResult {
 			res.EpisodeEnd = info.EpisodeNumbers[len(info.EpisodeNumbers)-1]
 		}
 	} else {
-		movie := rtp.ParseMovieTitle(clean)
+		movie := rtp.ParseMovieTitle(searchTitle)
 		if movie != nil {
 			lang := "en"
 			if len(movie.Languages) > 0 {
@@ -344,7 +347,7 @@ func RobustParseInfo(title string, fallbackSeason int) *ParseResult {
 				Language: lang,
 				Quality:  getQuality(movie.Quality.Quality.Resolution),
 			}
-			// Apply aggressive cleaning for movie titles too
+			// Apply aggressive cleaning for movie titles
 			res.Title = filterTorrentNoise(res.Title)
 			return res
 		}
