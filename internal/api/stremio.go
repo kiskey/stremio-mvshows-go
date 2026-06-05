@@ -1,5 +1,5 @@
-// Version: 1.0.6
-// Change log: Added net/url import and URL QueryUnescape to decode percent-encoded colons (%3A) safely. Replaced .Preload("Threads") with manual self-healing fallbacks to prevent GORM silent relation errors.
+// Version: 1.0.7
+// Change log: Implemented bulletproof Raw SQL queries in streamHandler and metaHandler to completely bypass GORM model relationship/collation bugs. Added robust trim and sanitation guardrails.
 
 package api
 
@@ -451,16 +451,19 @@ func metaHandler(c *gin.Context) {
 		id = decoded
 	}
 
+	// Trim trailing extensions and whitespaces to prevent SQL mismatch
+	id = strings.TrimSpace(strings.TrimSuffix(id, ".json"))
+
 	cleanID := id
 	if idx := strings.Index(id, ":pending:"); idx != -1 {
 		cleanID = id[idx+len(":pending:"):]
 	}
 
-	// 1. First attempt to lookup as standard linked metadata by IMDb ID (tt...)
-	// REMOVED .Preload("Threads") to prevent GORM's relationship-loading errors from failing the query.
+	// 1. Standard linked metadata lookup by IMDb ID (tt...)
+	// BULLETPROOF FIX: Use raw SQL query to completely bypass GORM relationship preloading and mapping bugs
 	var meta database.TmdbMetadata
-	err := database.DB.Where("imdb_id = ? OR tmdb_id = ?", cleanID, cleanID).First(&meta).Error
-	if err == nil {
+	err := database.DB.Raw("SELECT * FROM tmdb_metadata WHERE imdb_id = ? OR tmdb_id = ? LIMIT 1", cleanID, cleanID).Scan(&meta).Error
+	if err == nil && meta.TmdbID != "" {
 		// Self-healing Fallback: Fetch threads directly to bypass any GORM Preload mapping issues
 		if len(meta.Threads) == 0 {
 			var fetchedThreads []database.Thread
@@ -613,6 +616,9 @@ func streamHandler(c *gin.Context) {
 		id = decoded
 	}
 
+	// Trim trailing extensions and whitespaces to prevent SQL mismatch
+	id = strings.TrimSpace(strings.TrimSuffix(id, ".json"))
+
 	// Strip pending prefix robustly if looking up unlinked thread streams
 	cleanID := id
 	if idx := strings.Index(id, ":pending:"); idx != -1 {
@@ -645,9 +651,10 @@ func streamHandler(c *gin.Context) {
 		baseID = cleanID
 	}
 
+	// BULLETPROOF FIX: Use raw SQL query to completely bypass GORM relationship preloading and mapping bugs
 	var meta database.TmdbMetadata
-	err := database.DB.Where("imdb_id = ? OR tmdb_id = ?", baseID, baseID).First(&meta).Error
-	if err != nil {
+	err := database.DB.Raw("SELECT * FROM tmdb_metadata WHERE imdb_id = ? OR tmdb_id = ? LIMIT 1", baseID, baseID).Scan(&meta).Error
+	if err != nil || meta.TmdbID == "" {
 		// If metadata lookup fails, check if the query requested unlinked/pending ThreadHash streams
 		var t database.Thread
 		errThread := database.DB.Where("thread_hash = ?", baseID).First(&t).Error
