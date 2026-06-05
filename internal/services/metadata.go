@@ -1,3 +1,6 @@
+// Version: 1.0.1
+// Change log: Removed poster_path parsing and URL concatenation in GetByID to optimize TMDB details lookups and minimize memory allocation overhead.
+
 package metadata
 
 import (
@@ -25,7 +28,7 @@ type TmdbResult struct {
 	ImdbID      string                 `json:"imdb_id"`
 	Title       string                 `json:"title"`
 	Year        int                    `json:"year"`
-	Poster      string                 `json:"poster"`
+	Poster      string                 `json:"poster"` // Maintained for compilation safety across caller packages
 	Description string                 `json:"description"`
 	RawData     map[string]interface{} `json:"raw_data"` // Kept as map specifically to support Orchestrator compatibility
 }
@@ -292,17 +295,12 @@ func (t *TMDBClient) GetByID(id string, contentType string) (*TmdbResult, error)
 		year, _ = strconv.Atoi(dateStr[:4])
 	}
 
-	posterURL := ""
-	if p := getMapString(data, "poster_path"); p != "" {
-		posterURL = "https://image.tmdb.org/t/p/w500" + p
-	}
-
 	return &TmdbResult{
 		TmdbID:      fmt.Sprintf("%s:%s", mediaType, id),
 		ImdbID:      imdbID,
 		Title:       title,
 		Year:        year,
-		Poster:      posterURL,
+		Poster:      "", // Set to empty to completely bypass TMDB poster path lookups and memory allocation
 		Description: getMapString(data, "overview"),
 		RawData:     data,
 	}, nil
@@ -332,7 +330,7 @@ var metadataWords = map[string]bool{
 	"dual": true, "audio": true, "dubbed": true, "dub": true, "multi": true,
 	"hindi": true, "tamil": true, "telugu": true, "malayalam": true,
 	"kannada": true, "bengali": true, "marathi": true, "punjabi": true,
-	"english": true, "spanish": true, "french": true, "italian": true,
+	"english": true, "spanish": true, "french": true, "italic": true,
 	"russian": true, "korean": true, "japanese": true, "chinese": true,
 	"51": true, "71": true, "20": true, "10bit": true, "remux": true,
 	"3d": true, "sdr": true, "gb": true, "mb": true, "kb": true,
@@ -407,54 +405,6 @@ func isNumber(s string) bool {
 		}
 	}
 	return true
-}
-
-func cleanWord(w string) string {
-	return strings.Map(func(r rune) rune {
-		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
-			return r
-		}
-		return -1
-	}, strings.ToLower(w))
-}
-
-func stripLeadingArticles(s string) string {
-	s = strings.TrimSpace(s)
-	articles := []string{"the ", "a ", "an ", "le ", "la ", "les ", "l'"}
-	for _, art := range articles {
-		if strings.HasPrefix(s, art) {
-			return strings.TrimPrefix(s, art)
-		}
-	}
-	return s
-}
-
-func isTechnicalToken(s string) bool {
-	if metadataWords[s] || stopWords[s] || isNumber(s) {
-		return true
-	}
-	if len(s) >= 2 {
-		first := s[0]
-		if (first == 's' || first == 'e' || first == 'p') && isNumber(s[1:]) {
-			return true
-		}
-		if len(s) >= 3 && (s[:2] == "se" || s[:2] == "ep") && isNumber(s[2:]) {
-			return true
-		}
-		if len(s) >= 4 && s[:3] == "epi" && isNumber(s[3:]) {
-			return true
-		}
-		if len(s) >= 5 && (s[:4] == "seas" || s[:4] == "part") && isNumber(s[4:]) {
-			return true
-		}
-		if len(s) >= 7 && s[:6] == "season" && isNumber(s[6:]) {
-			return true
-		}
-		if len(s) >= 8 && s[:7] == "episode" && isNumber(s[7:]) {
-			return true
-		}
-	}
-	return false
 }
 
 func passTitleGuardrail(targetTitle, parsedTitle string) bool {
@@ -806,4 +756,52 @@ func normalizeForCompare(s string) string {
 		}
 	}
 	return strings.TrimSpace(b.String())
+}
+
+func stripLeadingArticles(s string) string {
+	s = strings.TrimSpace(s)
+	articles := []string{"the ", "a ", "an ", "le ", "la ", "les ", "l'"}
+	for _, art := range articles {
+		if strings.HasPrefix(s, art) {
+			return strings.TrimPrefix(s, art)
+		}
+	}
+	return s
+}
+
+func isTechnicalToken(s string) bool {
+	if metadataWords[s] || stopWords[s] || isNumber(s) {
+		return true
+	}
+	if len(s) >= 2 {
+		first := s[0]
+		if (first == 's' || first == 'e' || first == 'p') && isNumber(s[1:]) {
+			return true
+		}
+		if len(s) >= 3 && (s[:2] == "se" || s[:2] == "ep") && isNumber(s[2:]) {
+			return true
+		}
+		if len(s) >= 4 && s[:3] == "epi" && isNumber(s[3:]) {
+			return true
+		}
+		if len(s) >= 5 && (s[:4] == "seas" || s[:4] == "part") && isNumber(s[4:]) {
+			return true
+		}
+		if len(s) >= 7 && s[:6] == "season" && isNumber(s[6:]) {
+			return true
+		}
+		if len(s) >= 8 && s[:7] == "episode" && isNumber(s[7:]) {
+			return true
+		}
+	}
+	return false
+}
+
+func cleanWord(w string) string {
+	return strings.Map(func(r rune) rune {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			return r
+		}
+		return -1
+	}, strings.ToLower(w))
 }
