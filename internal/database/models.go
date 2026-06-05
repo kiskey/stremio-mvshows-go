@@ -60,98 +60,98 @@ func (j JSONFileList) Value() (driver.Value, error) {
 	return string(bytes), err
 }
 
-// ── Database GORM Models ──
+// ── Database GORM Models with Explicit Column Binding ──
 
 type Thread struct {
-	ID                uint            `gorm:"primaryKey;autoIncrement" json:"id"`
-	ThreadHash        string          `gorm:"uniqueIndex;not null" json:"thread_hash"`
-	RawTitle          string          `gorm:"not null" json:"raw_title"`
-	CleanTitle        string          `gorm:"index" json:"clean_title"`
-	Year              *int            `gorm:"index" json:"year"`
-	TmdbID            *string         `gorm:"type:text;index" json:"tmdb_id"`
-	Status            string          `gorm:"not null;default:'linked';index" json:"status"`
-	Type              string          `gorm:"not null;default:'series';index" json:"type"`
-	PostedAt          *time.Time      `gorm:"index" json:"posted_at"`
-	Catalog           string          `gorm:"index" json:"catalog"`
-	MagnetURIs        JSONStringArray `gorm:"type:text" json:"magnet_uris"`
-	CustomPoster      *string         `json:"custom_poster"`
-	CustomDescription *string         `gorm:"type:text" json:"custom_description"`
-	LastSeen          time.Time       `gorm:"autoUpdateTime;index" json:"last_seen"`
-	CreatedAt         time.Time       `json:"created_at"`
-	UpdatedAt         time.Time       `json:"updated_at"`
+	ID                uint            `gorm:"column:id;primaryKey;autoIncrement" json:"id"`
+	ThreadHash        string          `gorm:"column:thread_hash;uniqueIndex;not null" json:"thread_hash"`
+	RawTitle          string          `gorm:"column:raw_title;not null" json:"raw_title"`
+	CleanTitle        string          `gorm:"column:clean_title;index" json:"clean_title"`
+	Year              *int            `gorm:"column:year;index" json:"year"`
+	TmdbID            *string         `gorm:"column:tmdb_id;type:text;index" json:"tmdb_id"`
+	Status            string          `gorm:"column:status;not null;default:'linked';index" json:"status"`
+	Type              string          `gorm:"column:type;not null;default:'series';index" json:"type"`
+	PostedAt          *time.Time      `gorm:"column:posted_at;index" json:"posted_at"`
+	Catalog           string          `gorm:"column:catalog;index" json:"catalog"`
+	MagnetURIs        JSONStringArray `gorm:"column:magnet_uris;type:text" json:"magnet_uris"`
+	CustomPoster      *string         `gorm:"column:custom_poster" json:"custom_poster"`
+	CustomDescription *string         `gorm:"column:custom_description;type:text" json:"custom_description"`
+	LastSeen          time.Time       `gorm:"column:last_seen;autoUpdateTime;index" json:"last_seen"`
+	CreatedAt         time.Time       `gorm:"column:created_at" json:"created_at"`
+	UpdatedAt         time.Time       `gorm:"column:updated_at" json:"updated_at"`
 	TmdbMetadata      *TmdbMetadata   `gorm:"foreignKey:TmdbID" json:"tmdb_metadata,omitempty"`
 }
 
 func (Thread) TableName() string { return "threads" }
 
 type TmdbMetadata struct {
-	TmdbID    string    `gorm:"primaryKey;type:text" json:"tmdb_id"`
-	ImdbID    *string   `gorm:"uniqueIndex" json:"imdb_id"` // Changed to pointer (*string) to allow safe database NULL inserts instead of conflicting ""
-	Year      *int      `gorm:"index" json:"year"`
-	Data      string    `gorm:"type:text;not null" json:"data"` // Full JSON metadata payload
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	TmdbID    string    `gorm:"column:tmdb_id;primaryKey;type:text" json:"tmdb_id"`
+	ImdbID    *string   `gorm:"column:imdb_id;uniqueIndex" json:"imdb_id"` // Allows NULL inserts without unique constraint conflicts
+	Year      *int      `gorm:"column:year;index" json:"year"`
+	Data      string    `gorm:"column:data;type:text;not null" json:"data"` // Full JSON metadata payload
+	CreatedAt time.Time `gorm:"column:created_at" json:"created_at"`
+	UpdatedAt time.Time `gorm:"column:updated_at" json:"updated_at"`
 	Threads   []Thread  `gorm:"foreignKey:TmdbID" json:"threads,omitempty"`
 }
 
 func (TmdbMetadata) TableName() string { return "tmdb_metadata" }
 
 type Stream struct {
-	ID         uint   `gorm:"primaryKey;autoIncrement" json:"id"`
-	TmdbID     string `gorm:"type:text;uniqueIndex:idx_stream_unique;index;not null" json:"tmdb_id"`
-	Season     *int   `gorm:"uniqueIndex:idx_stream_unique;index" json:"season"`
-	Episode    *int   `gorm:"uniqueIndex:idx_stream_unique;index" json:"episode"`
-	EpisodeEnd *int   `json:"episode_end"`
-	Infohash   string `gorm:"uniqueIndex:idx_stream_unique;not null" json:"infohash"` // Removed global duplicate uniqueIndex to allow index-range and pack variations
-	Quality    string `gorm:"index" json:"quality"`
-	Language   string `json:"language"`
-	CreatedAt  time.Time `json:"created_at"`
-	UpdatedAt  time.Time `json:"updated_at"`
+	ID         uint      `gorm:"column:id;primaryKey;autoIncrement" json:"id"`
+	TmdbID     string    `gorm:"column:tmdb_id;type:text;uniqueIndex:idx_stream_unique;index;not null" json:"tmdb_id"`
+	Season     *int      `gorm:"column:season;uniqueIndex:idx_stream_unique;index" json:"season"`
+	Episode    *int      `gorm:"column:episode;uniqueIndex:idx_stream_unique;index" json:"episode"`
+	EpisodeEnd *int      `gorm:"column:episode_end" json:"episode_end"`
+	Infohash   string    `gorm:"column:infohash;uniqueIndex:idx_stream_unique;not null" json:"infohash"`
+	Quality    string    `gorm:"column:quality;index" json:"quality"`
+	Language   string    `gorm:"column:language" json:"language"`
+	CreatedAt  time.Time `gorm:"column:created_at" json:"created_at"`
+	UpdatedAt  time.Time `gorm:"column:updated_at" json:"updated_at"`
 }
 
 func (Stream) TableName() string { return "streams" }
 
 type FailedThread struct {
-	ThreadHash  string    `gorm:"primaryKey" json:"thread_hash"`
-	RawTitle    string    `gorm:"type:text" json:"raw_title"`
-	Reason      string    `gorm:"type:text" json:"reason"`
-	LastAttempt time.Time `gorm:"default:CURRENT_TIMESTAMP;index" json:"last_attempt"`
+	ThreadHash  string    `gorm:"column:thread_hash;primaryKey" json:"thread_hash"`
+	RawTitle    string    `gorm:"column:raw_title;type:text" json:"raw_title"`
+	Reason      string    `gorm:"column:reason;type:text" json:"reason"`
+	LastAttempt time.Time `gorm:"column:last_attempt;default:CURRENT_TIMESTAMP;index" json:"last_attempt"`
 }
 
 func (FailedThread) TableName() string { return "failed_threads" }
 
 type DebridTorrent struct {
-	Infohash    string          `gorm:"primaryKey" json:"infohash"`
-	TorrentID   string          `gorm:"uniqueIndex;not null" json:"torrent_id"`
-	Provider    string          `gorm:"not null;default:'realdebrid';index" json:"provider"`
-	Status      string          `gorm:"not null" json:"status"`
-	Files       JSONFileList    `gorm:"type:text" json:"files"`
-	Links       JSONStringArray `gorm:"type:text" json:"links"`
-	LastChecked time.Time       `gorm:"default:CURRENT_TIMESTAMP" json:"last_checked"`
-	CreatedAt   time.Time       `json:"created_at"`
-	UpdatedAt   time.Time       `json:"updated_at"`
+	Infohash    string          `gorm:"column:infohash;primaryKey" json:"infohash"`
+	TorrentID   string          `gorm:"column:torrent_id;uniqueIndex;not null" json:"torrent_id"`
+	Provider    string          `gorm:"column:provider;not null;default:'realdebrid';index" json:"provider"`
+	Status      string          `gorm:"column:status;not null" json:"status"`
+	Files       JSONFileList    `gorm:"column:files;type:text" json:"files"`
+	Links       JSONStringArray `gorm:"column:links;type:text" json:"links"`
+	LastChecked time.Time       `gorm:"column:last_checked;default:CURRENT_TIMESTAMP" json:"last_checked"`
+	CreatedAt   time.Time       `gorm:"column:created_at" json:"created_at"`
+	UpdatedAt   time.Time       `gorm:"column:updated_at" json:"updated_at"`
 }
 
 func (DebridTorrent) TableName() string { return "debrid_torrents" }
 
 type DebridCacheLock struct {
-	Infohash  string    `gorm:"primaryKey" json:"infohash"`
-	CreatedAt time.Time `gorm:"default:CURRENT_TIMESTAMP" json:"created_at"`
+	Infohash  string    `gorm:"column:infohash;primaryKey" json:"infohash"`
+	CreatedAt time.Time `gorm:"column:created_at;default:CURRENT_TIMESTAMP" json:"created_at"`
 }
 
 func (DebridCacheLock) TableName() string { return "debrid_cache_locks" }
 
 type MagnetCache struct {
-	Infohash  string    `gorm:"primaryKey" json:"infohash"`
-	Magnet    string    `gorm:"type:text;not null" json:"magnet"`
-	CreatedAt time.Time `gorm:"default:CURRENT_TIMESTAMP" json:"created_at"`
+	Infohash  string    `gorm:"column:infohash;primaryKey" json:"infohash"`
+	Magnet    string    `gorm:"column:magnet;type:text;not null" json:"magnet"`
+	CreatedAt time.Time `gorm:"column:created_at;default:CURRENT_TIMESTAMP" json:"created_at"`
 }
 
 func (MagnetCache) TableName() string { return "magnet_cache" }
 
 type TorboxIdMap struct {
-	TorrentID int    `gorm:"primaryKey" json:"torrent_id"`
-	Hash      string `gorm:"uniqueIndex;not null" json:"hash"`
+	TorrentID int    `gorm:"column:torrent_id;primaryKey" json:"torrent_id"`
+	Hash      string `gorm:"column:hash;uniqueIndex;not null" json:"hash"`
 }
 
 func (TorboxIdMap) TableName() string { return "torbox_id_map" }
