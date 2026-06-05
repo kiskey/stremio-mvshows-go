@@ -1,5 +1,5 @@
-// Version: 1.0.8
-// Change log: Overhauled GORM query engine by replacing all .First() calls with .Limit(1).Find() to prevent SQLite primary-key sorting and ordering bugs.
+// Version: 1.0.9
+// Change log: Overhauled route mappings to standard clean wildcards to bypass Gin's suffix-matching limitation, and implemented manual .json suffix stripping inside handlers.
 
 package api
 
@@ -222,8 +222,8 @@ func RegisterStremioRoutes(r *gin.RouterGroup) {
 	r.GET("/manifest.json", manifestHandler)
 	r.GET("/catalog/:type/:id/:extra", catalogHandler)
 	r.GET("/catalog/:type/:id", catalogHandler)
-	r.GET("/meta/:type/:id.json", metaHandler)
-	r.GET("/stream/:type/:id.json", streamHandler)
+	r.GET("/meta/:type/:id", metaHandler)   // Bypasses Gin suffix wildcard match limitation
+	r.GET("/stream/:type/:id", streamHandler) // Bypasses Gin suffix wildcard match limitation
 	r.GET("/rd-add/:infohash/:episode", rdAddHandler)
 }
 
@@ -443,7 +443,7 @@ func catalogHandler(c *gin.Context) {
 // ── Meta ──
 
 func metaHandler(c *gin.Context) {
-	id := strings.TrimSuffix(c.Param("id"), ".json")
+	id := c.Param("id")
 	cfg := config.Load()
 
 	// URL-decode the ID parameter to handle percent-encoded colons (%3A) safely
@@ -612,7 +612,7 @@ func metaHandler(c *gin.Context) {
 // ── Stream ──
 
 func streamHandler(c *gin.Context) {
-	id := strings.TrimSuffix(c.Param("id"), ".json")
+	id := c.Param("id")
 	cfg := config.Load()
 
 	// URL-decode the ID parameter to handle percent-encoded colons (%3A) safely
