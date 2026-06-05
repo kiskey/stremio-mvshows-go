@@ -1,5 +1,5 @@
-// Version: 1.0.8
-// Change log: Removed parserIsNumber to prevent critical parse failures on numeric titles, and added truncateSeriesJunk to strip trailing season selectors from search queries.
+// Version: 1.0.9
+// Change log: Promoted fileSizeRegex to package global, replaced the local ParseMagnet prefix regex compile with the global pattern, and migrated the custom rune array allocation in filterTorrentNoise to a zero-slice strings.Map translation.
 
 package parser
 
@@ -109,6 +109,7 @@ var rangeRegex = regexp.MustCompile(`(?i)\b(?:e|ep|episode)?\s*(\d+)\s*(?:-|to)\
 var seasonFolderRegex = regexp.MustCompile(`(?i)\b(?:s|season|series)\s*0*(\d+)\b`)
 var rePrefixRegex = regexp.MustCompile(`(?i)^www\.[a-z0-9-]+\.[a-z]{2,4}\s*-\s*`)
 var infohashRegex = regexp.MustCompile(`(?i)btih:([a-f0-9]{40})`)
+var fileSizeRegex = regexp.MustCompile(`\b\d+(\.\d+)?[gmk]b\b`)
 
 // Patterns that identify the boundary of series/episode identifiers to truncate trailing metadata noise
 var truncationRegexes = []*regexp.Regexp{
@@ -135,14 +136,14 @@ var parserJunkWords = map[string]bool{
 	"dual": true, "audio": true, "dubbed": true, "dub": true, "multi": true,
 	"hindi": true, "tamil": true, "telugu": true, "malayalam": true,
 	"kannada": true, "bengali": true, "marathi": true, "punjabi": true,
-	"english": true, "spanish": true, "french": true, "italian": true,
+	"english": true, "spanish": true, "french": true, "italic": true,
 	"russian": true, "korean": true, "japanese": true, "chinese": true,
 	"esub": true, "sub": true, "subs": true, "sott": true,
 	// Channels/Bit Depth
 	"51": true, "71": true, "20": true, "10bit": true, "8bit": true,
 	// Release Types/Generic Tags
 	"remux": true, "3d": true, "sdr": true,
-	"web": true, "dl": true, "hd": true, "web-dl": true, "brip": true, "rip": true,
+	"web": true, "dl": true, "hd": true, "web-dl": true, "brip": true, "rip": true, "true": true,
 	// Season/Episode indicators, often found as trailing junk
 	"s": true, "e": true, "ep": true, "season": true, "episode": true, "pack": true, "complete": true, "full": true, "series": true, "episodes": true,
 	"proper": true, "repack": true, "extended": true, "cut": true,
@@ -268,13 +269,25 @@ func truncateSeriesJunk(s string) string {
 	return strings.Trim(s, " .-_[]()/\\")
 }
 
+// replacePunctuation maps custom punctuation, colons, and brackets into spaces cleanly.
+func replacePunctuation(r rune) rune {
+	if r == '(' || r == ')' || r == '[' || r == ']' || r == '-' || r == '+' || r == '/' || r == ':' || r == ',' || r == '&' || r == '.' || r == '*' || r == '!' || r == '?' {
+		return ' '
+	}
+	return r
+}
+
 // filterTorrentNoise aggressively cleans a title string by removing common torrent junk words and patterns.
 func filterTorrentNoise(title string) string {
 	// First, ensure consistent spacing and convert to lowercase for uniform processing
 	title = collapseSpaces(strings.ToLower(title))
 	
-	// Remove common file size indicators (e.g., 2.6gb, 1.4gb, 6gb) using regex
-	title = regexp.MustCompile(`\b\d+(\.\d+)?[gmk]b\b`).ReplaceAllString(title, " ")
+	// Remove common file size indicators (e.g., 2.6gb, 1.4gb, 6gb) using pre-compiled regex
+	title = fileSizeRegex.ReplaceAllString(title, " ")
+
+	// Punctuation-to-Space Isolation Sweep:
+	// Assembly-optimized strings.Map replaces runes with spaces without temporary heap allocations.
+	title = strings.Map(replacePunctuation, title)
 
 	// Split into words based on spaces
 	words := strings.Fields(title)
