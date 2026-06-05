@@ -1,5 +1,5 @@
-# Version: 1.0.3
-# Change log: Expanded the release step condition to allow manual UI triggers (workflow_dispatch) to force-publish releases alongside standard tag triggers.
+# Version: 1.0.4
+# Change log: Added a dynamic ternary-style tag_name fallback to "latest" to allow manual and branch-push events to compile and publish releases cleanly without "requires a tag" errors.
 
 name: Build & Release Static Binaries
 
@@ -84,13 +84,16 @@ jobs:
 
       - name: Create Release and Upload Assets
         uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch' # ◄ UPDATED: Allows manual execution to force-publish releases!
+        if: startsWith(github.ref, 'refs/tags/v') || github.event_name == 'workflow_dispatch'
         with:
+          tag_name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || 'latest' }} # ◄ Resolves to "latest" on manual/commit runs, avoiding tag requirements errors
+          name: ${{ startsWith(github.ref, 'refs/tags/v') && github.ref_name || 'Latest Continuous Build' }}
           files: |
             stremio-mvshows-linux-amd64
             stremio-mvshows-linux-arm64
             checksums.txt
           draft: false
           prerelease: false
+          generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
