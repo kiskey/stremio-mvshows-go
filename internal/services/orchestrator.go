@@ -1,5 +1,5 @@
-// Version: 1.0.2
-// Change log: Hoisted strings.ToLower(thread.Type) out of the hot magnet loop to completely eliminate repeated heap string allocations per processed torrent stream.
+// Version: 1.0.3
+// Change log: Integrated database thread-count evaluation and force-override configs to automatically switch between Full and Incremental crawling modes on workflow triggers.
 
 package orchestrator
 
@@ -100,7 +100,31 @@ func RunFullWorkflow(cfg *config.Config) {
 
 	utils.Logger.Info().Msg("Starting full crawling and processing workflow...")
 
-	scraped, err := crawler.RunCrawler(cfg)
+	// Option 1 & Option 3: Check database-seeding state to determine the dynamic crawling mode
+	incremental := false
+	if database.DB != nil {
+		var count int64
+		_ = database.DB.Model(&database.Thread{}).Where("status = ?", "linked").Count(&count)
+		
+		// If database already contains more than 50 seeded records, safely transition to fast incremental sync
+		if count > 50 && !cfg.ForceFullScrape {
+			incremental = true
+		}
+	}
+
+	if incremental {
+		utils.Logger.Info().
+			Int("scrape_incremental_pages", cfg.IncrementalEndPage).
+			Str("incremental_sort_order", cfg.IncrementalSortQuery).
+			Msg("Database is already seeded. Running in Incremental Mode (quick scan of recent posts).")
+	} else {
+		utils.Logger.Info().
+			Int("scrape_full_pages", cfg.ScrapeEndPage).
+			Str("full_sort_order", cfg.ForumSortQuery).
+			Msg("Database is empty or force-override is active. Running in Full Sync Mode.")
+	}
+
+	scraped, err := crawler.RunCrawler(cfg, incremental)
 	if err != nil {
 		utils.Logger.Error().Err(err).Msg("Crawler execution failed catastrophically.")
 		return
