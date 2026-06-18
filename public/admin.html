@@ -1,6 +1,3 @@
-<!-- Version: 1.1.1 -->
-<!-- Change log: Added null-safe (d.matchedTitles || []) array fallbacks on both focused and bulk auto-matching handlers to prevent UI TypeError crashes on 0-success runs. -->
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -141,20 +138,30 @@
         .glow-amber { color: #ff9900; text-shadow: 0 0 4px rgba(255, 153, 0, 0.3); }
         .glow-red { color: #ff2a5f; text-shadow: 0 0 4px rgba(255, 42, 95, 0.3); }
 
-        .rescue-flex {
-            display: flex;
-            gap: 25px;
-            flex-wrap: wrap;
+        /* Enhanced Metadata Rescue Grid Layout */
+        .rescue-grid {
+            display: grid;
+            grid-template-columns: repeat(12, 1fr);
+            gap: 20px;
         }
-
-        .rescue-col {
-            flex: 1;
-            min-width: 280px;
+        .rescue-manager {
+            grid-column: span 7;
+        }
+        .rescue-actions {
+            grid-column: span 5;
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+        }
+        @media (max-width: 1100px) {
+            .rescue-manager, .rescue-actions {
+                grid-column: span 12;
+            }
         }
     </style>
 </head>
 <body>
-    <h1>► MVSHOWS ADMIN TERMINAL v1.1.2 ◄</h1>
+    <h1>► MVSHOWS ADMIN TERMINAL v1.1.3 ◄</h1>
 
     <div class="dashboard-grid">
         
@@ -193,72 +200,124 @@
             </div>
         </div>
 
-        <!-- EDIT AND RESCUE MODULE -->
+        <!-- METADATA RESCUE BAY MODULE -->
         <div class="section span-12">
             <div class="terminal-header">
                 <span>► METADATA_RESCUE_BAY</span>
                 <span>ACTIVE_OVERRIDE</span>
             </div>
             
-            <div class="rescue-flex">
-                <!-- PICK LISTS -->
-                <div class="rescue-col">
-                    <h3 class="glow-cyan">01. Pick Pending Items</h3>
-                    <div style="display:flex; gap:10px; align-items: stretch;">
+            <!-- Contextual Flow Instructions -->
+            <div style="background: #0d0d11; border: 1px dashed #00e5ff; padding: 12px; font-size: 1.15rem; margin-bottom: 20px; line-height: 1.4;">
+                <span class="glow-cyan" style="font-size: 1.3rem; font-weight: bold; text-transform: uppercase;">Workflow Directions:</span><br>
+                • <span class="glow-green">Single Tuning</span>: Click any item in the <span class="glow-cyan">Pending Pool</span> to focus on it. You can instantly inspect streams below, override poster/plot descriptions, or link it manually.<br>
+                • <span class="glow-amber">Group Batching</span>: Select multiple items, move them to the <span class="glow-cyan">Bulk actions Batch</span> using transfer buttons, and link all of them to a single TMDB/IMDb ID or auto-match them together using the action panels on the right.
+            </div>
+
+            <div class="rescue-grid">
+                <!-- Left Column: Queue Manager -->
+                <div class="rescue-manager">
+                    <div style="display: flex; gap: 15px; align-items: stretch;">
                         <div style="flex: 1;">
-                            <div style="font-size: 1.1rem; margin-bottom: 4px; text-transform: uppercase; color: #888;">Available Queue</div>
-                            <select id="availableList" size="10" style="width:100%; min-height:220px;"></select>
+                            <div style="font-size: 1.2rem; margin-bottom: 4px; text-transform: uppercase; color: #00e5ff; font-weight: bold;">[01] Pending Pool</div>
+                            <select id="availableList" size="12" style="width:100%; min-height:280px;"></select>
                         </div>
-                        <div style="display: flex; flex-direction: column; justify-content: center; gap: 6px;">
-                            <button id="moveBtn">→</button>
-                            <button id="removeBtn">←</button>
-                            <button id="moveAllBtn">→→</button>
-                            <button id="clearAllBtn">←←</button>
+                        
+                        <div style="display: flex; flex-direction: column; justify-content: center; gap: 8px; width: 60px; min-width: 60px; align-items: center;">
+                            <button id="moveBtn" title="Move selected to batch" style="width: 45px;">→</button>
+                            <button id="removeBtn" title="Remove selected from batch" style="width: 45px;">←</button>
+                            <button id="moveAllBtn" title="Move all to batch" style="width: 45px;">→→</button>
+                            <button id="clearAllBtn" title="Clear batch queue" style="width: 45px;">←←</button>
                         </div>
+                        
                         <div style="flex: 1;">
-                            <div style="font-size: 1.1rem; margin-bottom: 4px; text-transform: uppercase; color: #888;">Selected Queue</div>
-                            <select id="selectedList" size="10" style="width:100%; min-height:220px;"></select>
+                            <div style="font-size: 1.2rem; margin-bottom: 4px; text-transform: uppercase; color: #ff9900; font-weight: bold;">[02] Bulk Actions Batch</div>
+                            <select id="selectedList" size="12" style="width:100%; min-height:280px;"></select>
                         </div>
                     </div>
-                    <div style="margin-top: 10px; text-align: right;">
-                        <button id="setFocusBtn" style="border-color: #00e5ff; color: #00e5ff; box-shadow: 2px 2px 0 #005577;">🎯 Set Focus On Selected</button>
+                    <div style="margin-top: 10px; display: flex; justify-content: space-between; align-items: center;">
+                        <button id="setFocusBtn" style="border-color: #00e5ff; color: #00e5ff; box-shadow: 2px 2px 0 #005577;">🎯 Focus Highlighted Item</button>
+                        <span style="font-size: 1.1rem; color: #666;">Double-click or click any item to auto-focus!</span>
                     </div>
                 </div>
 
-                <!-- ACTIONS BAY -->
-                <div class="rescue-col">
-                    <h3 class="glow-amber">02. Meta Actions (Focused)</h3>
-                    <p style="margin: 5px 0 15px 0;">Focused Title: <span id="focusedTitle" class="glow-green" style="font-size: 1.4rem; font-weight: bold;">None</span></p>
-                    
-                    <div style="display: flex; flex-direction: column; gap: 8px;">
-                        <div>
-                            <label style="display:inline-block; width:150px; color:#888;">Custom Poster:</label>
-                            <input type="text" id="customPoster" placeholder="https://image-url..." style="width: 250px;">
+                <!-- Right Column: Action Consoles -->
+                <div class="rescue-actions">
+                    <!-- Panel A: Single Item Tuner -->
+                    <div style="border: 1px solid #00e5ff; padding: 12px; background: #08080c;">
+                        <div style="font-weight: bold; color: #00e5ff; border-bottom: 1px dashed #00e5ff; padding-bottom: 4px; margin-bottom: 10px; text-transform: uppercase;">
+                            ► Panel A: Single Item Tuner
                         </div>
-                        <div>
-                            <label style="display:inline-block; width:150px; color:#888;">Custom Plot:</label>
-                            <input type="text" id="customDescription" placeholder="Description overrides..." style="width: 250px;">
-                        </div>
-                        <div style="margin-top: 10px;">
-                            <button id="saveFocused">💾 Save Custom Meta</button>
-                        </div>
+                        <p style="margin: 5px 0 10px 0; font-size: 1.2rem;">Focused: <span id="focusedTitle" class="glow-green" style="font-weight: bold;">None</span></p>
                         
-                        <div style="border-top: 1px dashed #333; padding-top: 12px;">
-                            <label style="display:inline-block; width:150px; color:#888;">Official ID:</label>
-                            <input type="text" id="officialId" placeholder="tt12345 or movie:123" style="width: 250px;">
-                        </div>
-                        <div>
-                            <button id="linkFocused" style="border-color: #ff2a5f; color: #ff2a5f; box-shadow: 2px 2px 0 #550011;">🔗 Link Focused ID</button>
-                            <button id="autoMatchFocused" style="border-color: #2a69ac; color: #2a69ac; box-shadow: 2px 2px 0 #112b4b;">🤖 Auto-Match Focused</button>
+                        <div style="display: flex; flex-direction: column; gap: 6px; font-size: 1.1rem;">
+                            <div style="display: flex; align-items: center; justify-content: space-between;">
+                                <span style="color:#888;">Custom Poster:</span>
+                                <input type="text" id="customPoster" placeholder="https://image-url..." style="width: 200px;">
+                            </div>
+                            <div style="display: flex; align-items: center; justify-content: space-between;">
+                                <span style="color:#888;">Custom Plot:</span>
+                                <input type="text" id="customDescription" placeholder="Plot overrides..." style="width: 200px;">
+                            </div>
+                            <div style="text-align: right; margin-bottom: 6px;">
+                                <button id="saveFocused" style="font-size: 1.1rem; padding: 2px 10px;">💾 Save Custom Meta</button>
+                            </div>
+                            
+                            <div style="border-top: 1px dotted #333; padding-top: 8px; display: flex; align-items: center; justify-content: space-between;">
+                                <span style="color:#ff2a5f;">Official ID:</span>
+                                <input type="text" id="officialId" placeholder="tt12345 or movie:123" style="width: 200px;">
+                            </div>
+                            <div style="display: flex; justify-content: flex-end; gap: 5px;">
+                                <button id="autoMatchFocused" style="font-size: 1.1rem; border-color: #2a69ac; color: #2a69ac; box-shadow: 2px 2px 0 #112b4b; padding: 2px 10px;">🤖 Auto-Match</button>
+                                <button id="linkFocused" style="font-size: 1.1rem; border-color: #ff2a5f; color: #ff2a5f; box-shadow: 2px 2px 0 #550011; padding: 2px 10px;">🔗 Link ID</button>
+                            </div>
                         </div>
                     </div>
 
-                    <div style="border-top: 1px dashed #333; margin-top: 15px; padding-top: 12px;">
-                        <span class="glow-cyan" style="font-size: 1.15rem; text-transform: uppercase;">Bulk operations (Selected Queue)</span>
-                        <div style="margin-top: 5px;">
-                            <button id="bulkLink">Bulk Link IDs</button>
-                            <button id="bulkUpdateMeta">Bulk Update Meta</button>
-                            <button id="bulkAutoMatch" style="border-color: #2a69ac; color: #2a69ac; box-shadow: 2px 2px 0 #112b4b;">🤖 Bulk Auto-Match</button>
+                    <!-- Panel B: Group Batch Processor -->
+                    <div style="border: 1px solid #ff9900; padding: 12px; background: #08080c;">
+                        <div style="font-weight: bold; color: #ff9900; border-bottom: 1px dashed #ff9900; padding-bottom: 4px; margin-bottom: 10px; text-transform: uppercase;">
+                            ► Panel B: Group Batch Processor
+                        </div>
+                        
+                        <div style="display: flex; flex-direction: column; gap: 8px; font-size: 1.1rem;">
+                            <!-- Action 1: Bulk Auto Match -->
+                            <div style="display: flex; align-items: center; justify-content: space-between;">
+                                <span style="color:#aaa;">Auto-Match Batch:</span>
+                                <button id="bulkAutoMatch" style="border-color: #2a69ac; color: #2a69ac; box-shadow: 2px 2px 0 #112b4b; padding: 2px 10px; font-size: 1.1rem;">🤖 Run Bulk Auto-Match</button>
+                            </div>
+
+                            <!-- Action 2: Bulk Link to One ID -->
+                            <div style="border-top: 1px dotted #333; padding-top: 8px;">
+                                <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px;">
+                                    <span class="glow-amber">Link Batch to ONE ID:</span>
+                                    <input type="text" id="bulkOfficialId" placeholder="tt12345 or movie:123" style="width: 180px; border-color: #ff9900; color: #ff9900;">
+                                </div>
+                                <div style="text-align: right;">
+                                    <button id="bulkLink" style="border-color: #ff9900; color: #ff9900; box-shadow: 2px 2px 0 #553300; padding: 2px 12px; font-size: 1.1rem;">🔗 Link Batch to single ID</button>
+                                </div>
+                            </div>
+
+                            <!-- Action 3: Bulk Meta Override -->
+                            <div style="border-top: 1px dotted #333; padding-top: 8px; display: flex; flex-direction: column; gap: 4px;">
+                                <div style="display: flex; align-items: center; justify-content: space-between;">
+                                    <span style="color:#aaa;">Batch Poster:</span>
+                                    <input type="text" id="bulkCustomPoster" placeholder="https://image-url..." style="width: 180px; border-color: #ff9900; color: #ff9900;">
+                                </div>
+                                <div style="display: flex; align-items: center; justify-content: space-between;">
+                                    <span style="color:#aaa;">Batch Plot:</span>
+                                    <input type="text" id="bulkCustomDescription" placeholder="Plot overrides..." style="width: 180px; border-color: #ff9900; color: #ff9900;">
+                                </div>
+                                <div style="text-align: right;">
+                                    <button id="bulkUpdateMeta" style="border-color: #ff9900; color: #ff9900; box-shadow: 2px 2px 0 #553300; padding: 2px 12px; font-size: 1.1rem;">💾 Save Batch Meta</button>
+                                </div>
+                            </div>
+
+                            <!-- Status Terminal Monitor -->
+                            <div style="font-size: 1.05rem; text-transform: uppercase; color: #888; margin-top: 5px; margin-bottom: -4px;">► Batch Output Monitor</div>
+                            <div id="bulkStatus" class="glow-amber" style="border: 1px dashed #333; padding: 6px; height: 75px; overflow-y: auto; font-size: 1.05rem; background: #000; font-family: monospace; line-height: 1.2;">
+                                Idle... Ready for batch queue tasks.
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -397,8 +456,27 @@
                 });
             }
 
-            el('setFocusBtn').addEventListener('click', async () => {
+            // Auto-Focus handlers when selecting an option in either list
+            el('availableList').addEventListener('change', () => {
+                const sel = el('availableList');
+                if (sel.selectedOptions.length > 0) {
+                    focusedThreadId = sel.selectedOptions[0].value;
+                    el('focusedTitle').textContent = sel.selectedOptions[0].textContent;
+                    loadStreams(focusedThreadId);
+                }
+            });
+
+            el('selectedList').addEventListener('change', () => {
                 const sel = el('selectedList');
+                if (sel.selectedOptions.length > 0) {
+                    focusedThreadId = sel.selectedOptions[0].value;
+                    el('focusedTitle').textContent = sel.selectedOptions[0].textContent;
+                    loadStreams(focusedThreadId);
+                }
+            });
+
+            el('setFocusBtn').addEventListener('click', async () => {
+                const sel = el('selectedList').selectedOptions.length > 0 ? el('selectedList') : el('availableList');
                 if (sel.selectedOptions.length > 0) {
                     focusedThreadId = sel.selectedOptions[0].value;
                     el('focusedTitle').textContent = sel.selectedOptions[0].textContent;
@@ -471,7 +549,7 @@
                     });
                     const d = await r.json();
                     if (d.successCount > 0) {
-                        alert(`Successfully auto-matched: "${(d.matchedTitles || []).join(', ')}"!`); // ◄ Secure fallback applied
+                        alert(`Successfully auto-matched: "${(d.matchedTitles || []).join(', ')}"!`);
                         focusedThreadId = null;
                         el('focusedTitle').textContent = 'None';
                         el('streamsBody').innerHTML = '<tr><td colspan="3" style="color: #666; text-align: center;">Set a focused item above to query available streams.</td></tr>';
@@ -487,11 +565,19 @@
                 }
             });
 
-            el('bulkAutoMatch').addEventListener('click', async () => {
+            // ── Panel B: Orchestrated Batch Actions ───────────
+
+            async function runBulkAutoMatch() {
                 const sel = el('selectedList');
                 const ids = [...sel.options].map(opt => parseInt(opt.value));
-                if (ids.length === 0) return alert('Select and move items to the "Selected" column first.');
-                el('bulkAutoMatch').disabled = true;
+                if (ids.length === 0) return alert('Select and move items to the Bulk Actions Batch first.');
+                
+                const btn = el('bulkAutoMatch');
+                btn.disabled = true;
+                const statusDiv = el('bulkStatus');
+                statusDiv.innerHTML = `Starting parallel Auto-Match on backend for ${ids.length} items...<br>`;
+                statusDiv.scrollTop = statusDiv.scrollHeight;
+                
                 try {
                     const r = await fetch('/admin/api/auto-match', {
                         method: 'POST',
@@ -499,16 +585,130 @@
                         body: JSON.stringify({ threadIds: ids })
                     });
                     const d = await r.json();
-                    alert(`Bulk Auto-Match complete!\nMatched: ${d.successCount}\nFailed: ${d.failCount}\nMatched Titles: ${(d.matchedTitles || []).join(', ')}`); // ◄ Secure fallback applied
-                    sel.innerHTML = '';
-                    loadPending();
-                    fetchHealth();
-                } catch (err) {
-                    alert('Error executing bulk auto-match: ' + err.message);
-                } finally {
-                    el('bulkAutoMatch').disabled = false;
+                    if (r.ok) {
+                        statusDiv.innerHTML += `Auto-Match completed successfully!<br>`;
+                        statusDiv.innerHTML += `<span class="glow-green">Successfully Matched: ${d.successCount}</span><br>`;
+                        statusDiv.innerHTML += `<span class="glow-red">Failed Matches: ${d.failCount}</span><br>`;
+                        if (d.matchedTitles && d.matchedTitles.length > 0) {
+                            statusDiv.innerHTML += `Matched Titles:<br> - ${(d.matchedTitles || []).join('<br> - ')}<br>`;
+                        }
+                    } else {
+                        statusDiv.innerHTML += `<span class="glow-red">Group Auto-Match Failed: ${d.error || 'Unknown'}</span><br>`;
+                    }
+                } catch (e) {
+                    statusDiv.innerHTML += `<span class="glow-red">Network Error: ${e.message}</span><br>`;
                 }
-            });
+                statusDiv.scrollTop = statusDiv.scrollHeight;
+                btn.disabled = false;
+                
+                sel.innerHTML = '';
+                loadPending();
+                fetchHealth();
+            }
+
+            async function runBulkLinkToOneID() {
+                const sel = el('selectedList');
+                const ids = [...sel.options].map(opt => parseInt(opt.value));
+                const officialId = el('bulkOfficialId').value.trim();
+                if (ids.length === 0) return alert('Select and move items to the Bulk Actions Batch first.');
+                if (!officialId) return alert('Enter an IMDb or TMDB ID to link the group to.');
+                
+                const btn = el('bulkLink');
+                btn.disabled = true;
+                const statusDiv = el('bulkStatus');
+                statusDiv.innerHTML = `Starting sequential group link to ID: ${officialId}...<br>`;
+                
+                let success = 0;
+                let fail = 0;
+                
+                for (let i = 0; i < ids.length; i++) {
+                    const id = ids[i];
+                    const optText = [...sel.options][i].textContent;
+                    statusDiv.innerHTML += `[${i+1}/${ids.length}] Linking "${optText}"... `;
+                    statusDiv.scrollTop = statusDiv.scrollHeight;
+                    try {
+                        const r = await fetch('/admin/api/link-official', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ threadId: id, officialId })
+                        });
+                        const d = await r.json();
+                        if (r.ok) {
+                            success++;
+                            statusDiv.innerHTML += `<span class="glow-green">SUCCESS</span><br>`;
+                        } else {
+                            fail++;
+                            statusDiv.innerHTML += `<span class="glow-red">FAIL: ${d.error || 'Unknown'}</span><br>`;
+                        }
+                    } catch (e) {
+                        fail++;
+                        statusDiv.innerHTML += `<span class="glow-red">ERROR: ${e.message}</span><br>`;
+                    }
+                    statusDiv.scrollTop = statusDiv.scrollHeight;
+                    // Minor delay to prevent GORM/SQLite lock contentions
+                    await new Promise(r => setTimeout(r, 200));
+                }
+                statusDiv.innerHTML += `<b>FINISHED: ${success} success, ${fail} failed.</b><br>`;
+                statusDiv.scrollTop = statusDiv.scrollHeight;
+                btn.disabled = false;
+                
+                sel.innerHTML = '';
+                loadPending();
+                fetchHealth();
+            }
+
+            async function runBulkUpdateMeta() {
+                const sel = el('selectedList');
+                const ids = [...sel.options].map(opt => parseInt(opt.value));
+                const poster = el('bulkCustomPoster').value.trim();
+                const description = el('bulkCustomDescription').value.trim();
+                if (ids.length === 0) return alert('Select and move items to the Bulk Actions Batch first.');
+                if (!poster && !description) return alert('Provide at least a Custom Poster or a Custom Plot to apply.');
+                
+                const btn = el('bulkUpdateMeta');
+                btn.disabled = true;
+                const statusDiv = el('bulkStatus');
+                statusDiv.innerHTML = `Starting group custom metadata update...<br>`;
+                
+                let success = 0;
+                let fail = 0;
+                
+                for (let i = 0; i < ids.length; i++) {
+                    const id = ids[i];
+                    const optText = [...sel.options][i].textContent;
+                    statusDiv.innerHTML += `[${i+1}/${ids.length}] Updating "${optText}"... `;
+                    statusDiv.scrollTop = statusDiv.scrollHeight;
+                    try {
+                        const r = await fetch('/admin/api/custom-meta', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                threadId: id,
+                                poster: poster || undefined,
+                                description: description || undefined
+                            })
+                        });
+                        const d = await r.json();
+                        if (r.ok) {
+                            success++;
+                            statusDiv.innerHTML += `<span class="glow-green">SUCCESS</span><br>`;
+                        } else {
+                            fail++;
+                            statusDiv.innerHTML += `<span class="glow-red">FAIL: ${d.error || 'Unknown'}</span><br>`;
+                        }
+                    } catch (e) {
+                        fail++;
+                        statusDiv.innerHTML += `<span class="glow-red">ERROR: ${e.message}</span><br>`;
+                    }
+                    statusDiv.scrollTop = statusDiv.scrollHeight;
+                    await new Promise(r => setTimeout(r, 100));
+                }
+                statusDiv.innerHTML += `<b>FINISHED: ${success} success, ${fail} failed.</b><br>`;
+                statusDiv.scrollTop = statusDiv.scrollHeight;
+                btn.disabled = false;
+                
+                loadPending();
+            }
 
             el('saveFocused').addEventListener('click', async () => {
                 if (!focusedThreadId) return alert('Set a focused item first.');
@@ -541,6 +741,11 @@
                 const to = el(toId);
                 [...from.options].forEach(opt => to.appendChild(opt));
             }
+
+            // Bind batch console action listeners
+            el('bulkAutoMatch').addEventListener('click', runBulkAutoMatch);
+            el('bulkLink').addEventListener('click', runBulkLinkToOneID);
+            el('bulkUpdateMeta').addEventListener('click', runBulkUpdateMeta);
 
             // ── Failures ─────────────────────────────────────────
             async function loadFailures() {
