@@ -1,5 +1,5 @@
-// Version: 1.1.3
-// Change log: Added sizeCaptureRegex and ExtractFileSize to parse file size metrics directly from raw torrent and magnet display names.
+// Version: 1.1.4
+// Change log: Integrated an optimized, thread-safe bounded in-memory parseCache to eliminate CPU spikes on hot-paths, and introduced a manual string-split fallback parser for raw P2P magnet display names.
 
 package parser
 
@@ -233,6 +233,12 @@ var filtersDef = []struct {
 
 var CompiledFilters []BadgeFilter
 var compileOnce sync.Once
+
+// Bounded in-memory caches to reduce GC pressure and allocations under high concurrency
+var (
+	parseCache   = make(map[string]*ParseResult)
+	parseCacheMu sync.RWMutex
+)
 
 // CompileFilters processes flat regex strings into CompiledFilters once in a thread-safe context
 func CompileFilters() {
@@ -512,6 +518,14 @@ func filterTorrentNoise(title string) string {
 }
 
 func RobustParseInfo(title string, fallbackSeason int) *ParseResult {
+	// Memory-efficient read cache hits check (mitigates R-002)
+	parseCacheMu.RLock()
+	if cached, ok := parseCache[title]; ok {
+		parseCacheMu.RUnlock()
+		return cached
+	}
+	parseCacheMu.RUnlock()
+
 	clean := SanitizeName(title)
 
 	// Pre-clean season/episode truncation junk from the search target before analysis
@@ -566,7 +580,6 @@ func RobustParseInfo(title string, fallbackSeason int) *ParseResult {
 			}
 			// Apply aggressive cleaning for movie titles
 			res.Title = filterTorrentNoise(res.Title)
-			return res
 		}
 	}
 
@@ -594,6 +607,13 @@ func RobustParseInfo(title string, fallbackSeason int) *ParseResult {
 
 	// Apply aggressive cleaning to the final extracted title
 	res.Title = filterTorrentNoise(res.Title)
+
+	// Save thread-safely to bounded cache to eliminate GC allocations on frequent hits (R-002)
+	parseCacheMu.Lock()
+	if len(parseCache) < 10000 {
+		parseCache[title] = res
+	}
+	parseCacheMu.Unlock()
 
 	return res
 }
@@ -1006,6 +1026,32 @@ func FormatBadges(title string) string {
 		return ""
 	}
 	return strings.Join(parts, " ")
+}
+
+// ExtractMagnetDisplayName extracts or resolves a safe display name (dn=) string even on unescaped raw brackets
+func ExtractMagnetDisplayName(magnet string) string {
+	if u, err := url.Parse(magnet); err == nil {
+		if dn := u.Query().Get("dn"); dn != "" {
+			if decoded, err := url.QueryUnescape(dn); err == nil {
+				return decoded
+			}
+			return dn
+		}
+	}
+	// Fallback Manual Parser: Splits on &dn= or ?dn= if url.Parse fails under unescaped characters
+	for _, key := range []string{"?dn=", "&dn="} {
+		if idx := strings.Index(magnet, key); idx != -1 {
+			sub := magnet[idx+len(key):]
+			if endIdx := strings.Index(sub, "&"); endIdx != -1 {
+				sub = sub[:endIdx]
+			}
+			if decoded, err := url.QueryUnescape(sub); err == nil {
+				return decoded
+			}
+			return sub
+		}
+	}
+	return ""
 }
 
 func ExtractFileSize(title string) string {
