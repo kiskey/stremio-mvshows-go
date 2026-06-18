@@ -1,5 +1,5 @@
-// Version: 1.1.7
-// Change log: Enhanced stream link formatting with comprehensive file sizes, dynamically-compiled high-priority tag badges, and custom multiline details formatting to maximize Stremio client compatibility.
+// Version: 1.1.8
+// Change log: Enhanced stream formatting by querying extracted file sizes on uncached links, short-circuiting on zero stream hashes to reduce SQLite I/O, and robustly parsing fallback P2P display names.
 
 package api
 
@@ -749,6 +749,13 @@ func streamHandler(c *gin.Context) {
 	for _, s := range streams {
 		allHashes = append(allHashes, s.Infohash)
 	}
+
+	// Short-circuit instantly if 0 target streams are resolved (mitigates R-003)
+	if len(allHashes) == 0 {
+		c.JSON(http.StatusOK, StremioStreamResponse{Streams: []StremioStreamDetail{}})
+		return
+	}
+
 	cacheMap := debrid.CheckCached(allHashes, database.DB)
 
 	// BULK PRE-FETCH: Load all magnet display names from magnet_cache table
@@ -756,14 +763,9 @@ func streamHandler(c *gin.Context) {
 	_ = database.DB.Where("infohash IN ?", allHashes).Find(&magnetCaches)
 	magnetMap := make(map[string]string)
 	for _, mc := range magnetCaches {
-		if u, err := url.Parse(mc.Magnet); err == nil {
-			if dn := u.Query().Get("dn"); dn != "" {
-				if decoded, err := url.QueryUnescape(dn); err == nil {
-					magnetMap[mc.Infohash] = decoded
-				} else {
-					magnetMap[mc.Infohash] = dn
-				}
-			}
+		// Safe fallback parser robustly resolves raw display names on unescaped symbols (R-004)
+		if dn := parser.ExtractMagnetDisplayName(mc.Magnet); dn != "" {
+			magnetMap[mc.Infohash] = dn
 		}
 	}
 
