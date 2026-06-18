@@ -1,5 +1,5 @@
-// Version: 1.1.2
-// Change log: Integrated standard low-allocation RE2 filter definitions and thread-safe badging logic to dynamically format stream metadata for Stremio cards.
+// Version: 1.1.3
+// Change log: Added sizeCaptureRegex and ExtractFileSize to parse file size metrics directly from raw torrent and magnet display names.
 
 package parser
 
@@ -120,6 +120,7 @@ var rePrefixRegex = regexp.MustCompile(`(?i)^www\.[a-z0-9-]+\.[a-z]{2,4}\s*-\s*`
 var infohashRegex = regexp.MustCompile(`(?i)btih:([a-f0-9]{40})`)
 var fileSizeRegex = regexp.MustCompile(`\b\d+(\.\d+)?[gmk]b\b`)
 var channelRegex = regexp.MustCompile(`\b(?:ddp)?\d\.\d(?:\.\d)?\b`)
+var sizeCaptureRegex = regexp.MustCompile(`(?i)\b\d+(?:\.\d+)?\s*(?:GB|MB|KB)\b`)
 
 // Patterns that identify the boundary of series/episode identifiers to truncate trailing metadata noise
 var truncationRegexes = []*regexp.Regexp{
@@ -148,7 +149,7 @@ var parserJunkWords = map[string]bool{
 	"hindi": true, "tamil": true, "telugu": true, "malayalam": true,
 	"kannada": true, "bengali": true, "marathi": true, "punjabi": true,
 	"english": true, "spanish": true, "french": true, "italic": true,
-	"russian": true, "korean": true, "japanese": true, "chinese": true,
+	"regular": true, "korean": true, "japanese": true, "chinese": true,
 	"esub": true, "sub": true, "subs": true, "sott": true,
 	// Channels/Bit Depth
 	"51": true, "71": true, "20": true, "10bit": true, "8bit": true,
@@ -1005,4 +1006,12 @@ func FormatBadges(title string) string {
 		return ""
 	}
 	return strings.Join(parts, " ")
+}
+
+func ExtractFileSize(title string) string {
+	match := sizeCaptureRegex.FindString(title)
+	if match != "" {
+		return strings.ToUpper(strings.ReplaceAll(match, " ", ""))
+	}
+	return ""
 }
