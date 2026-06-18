@@ -668,12 +668,40 @@ func streamHandler(c *gin.Context) {
 				}
 				seenP2P[parsedMagnet.Infohash] = true
 
+				var p2pBadgeLine string
+				var p2pResTag string
+				if u, err := url.Parse(magnet); err == nil {
+					if dnQuery := u.Query().Get("dn"); dnQuery != "" {
+						if decoded, err := url.QueryUnescape(dnQuery); err == nil {
+							p2pBadgeLine = parser.FormatBadges(decoded)
+							if p2pSize := parser.ExtractFileSize(decoded); p2pSize != "" {
+								p2pBadgeLine += "  |  💾 " + p2pSize
+							}
+
+							parser.CompileFilters()
+							for _, f := range parser.CompiledFilters {
+								if f.GroupID == "gr" && f.Positive.MatchString(decoded) {
+									p2pResTag = " [" + f.Name + "]"
+									break
+								}
+							}
+						}
+					}
+				}
+
+				if p2pBadgeLine == "" {
+					p2pBadgeLine = formatQualityBadge(parsedMagnet.Quality)
+				}
+				if p2pResTag == "" && parsedMagnet.Quality != "" && strings.ToLower(parsedMagnet.Quality) != "sd" {
+					p2pResTag = " [" + strings.ToUpper(parsedMagnet.Quality) + "]"
+				}
+
 				trackerSources := buildTrackerSources()
 				sources := withDhtSource(trackerSources, parsedMagnet.Infohash)
 
 				streamList = append(streamList, StremioStreamDetail{
-					Name:     "🔌 P2P",
-					Title:    fmt.Sprintf("🎬 %s\n✨ %s   |   🔊 Peer-to-Peer Stream", t.RawTitle, formatQualityBadge(parsedMagnet.Quality)),
+					Name:     "🔌 P2P" + p2pResTag,
+					Title:    fmt.Sprintf("🎬 %s\n✨ %s   |   🔊 Peer-to-Peer Stream", t.RawTitle, p2pBadgeLine),
 					InfoHash: parsedMagnet.Infohash,
 					Sources:  sources,
 				})
@@ -805,7 +833,7 @@ func streamHandler(c *gin.Context) {
 			badgeLine = "[" + strings.ToUpper(s.Quality) + "]"
 		}
 
-		// Append overall file size to the badges line if known
+		// Append overall file size to the badges line if known, falling back on direct regex name parsing if uncached
 		var totalSize int64 = 0
 		if dt, ok := debridTorrentMap[s.Infohash]; ok {
 			for _, f := range dt.Files {
@@ -814,6 +842,10 @@ func streamHandler(c *gin.Context) {
 		}
 		if totalSize > 0 {
 			badgeLine += "  |  💾 " + utils.FormatSize(totalSize)
+		} else if dn != "" {
+			if parsedSize := parser.ExtractFileSize(dn); parsedSize != "" {
+				badgeLine += "  |  💾 " + parsedSize
+			}
 		}
 
 		// Series/Movie main identity header
