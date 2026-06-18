@@ -1,5 +1,5 @@
-// Version: 1.1.8
-// Change log: Enhanced stream formatting by querying extracted file sizes on uncached links, short-circuiting on zero stream hashes to reduce SQLite I/O, and robustly parsing fallback P2P display names.
+// Version: 1.1.9
+// Change log: Enhanced catalogHandler with robust query-string and path-suffix skip parsing, and calibrated default catalog limits to 40 items to reduce preloading database overhead and network pressure.
 
 package api
 
@@ -283,16 +283,28 @@ func catalogHandler(c *gin.Context) {
 	extra = strings.TrimSuffix(extra, ".json")
 
 	skip := 0
-	// Parse skip parameter from query or path suffix
+	// Upgraded, robust query and path skip parameter parsing (handles queries and inline splits cleanly)
 	if qSkip := c.Query("skip"); qSkip != "" {
 		if val, err := strconv.Atoi(qSkip); err == nil {
 			skip = val
 		}
-	} else if strings.Contains(extra, "skip=") {
-		parts := strings.Split(extra, "skip=")
-		if len(parts) > 1 {
-			if val, err := strconv.Atoi(parts[1]); err == nil {
-				skip = val
+	} else if extra != "" {
+		if vals, err := url.ParseQuery(extra); err == nil {
+			if parsedSkip := vals.Get("skip"); parsedSkip != "" {
+				if val, err := strconv.Atoi(parsedSkip); err == nil {
+					skip = val
+				}
+			}
+		} else if strings.Contains(extra, "skip=") {
+			parts := strings.Split(extra, "skip=")
+			if len(parts) > 1 {
+				numStr := parts[1]
+				if idx := strings.IndexAny(numStr, "&?"); idx != -1 {
+					numStr = numStr[:idx]
+				}
+				if val, err := strconv.Atoi(numStr); err == nil {
+					skip = val
+				}
 			}
 		}
 	}
@@ -313,10 +325,11 @@ func catalogHandler(c *gin.Context) {
 		query = query.Where("catalog = ?", "top-series-from-forum")
 	}
 
+	// Architectural Limit Calibration: reduced from 100 to 40 to halve query time and DB preload latency
 	err := query.
 		Order("CASE status WHEN 'linked' THEN 0 ELSE 1 END ASC, posted_at DESC").
 		Offset(skip).
-		Limit(100).
+		Limit(40).
 		Preload("TmdbMetadata").
 		Find(&threads).Error
 
@@ -749,14 +762,13 @@ func streamHandler(c *gin.Context) {
 	for _, s := range streams {
 		allHashes = append(allHashes, s.Infohash)
 	}
+	cacheMap := debrid.CheckCached(allHashes, database.DB)
 
 	// Short-circuit instantly if 0 target streams are resolved (mitigates R-003)
 	if len(allHashes) == 0 {
 		c.JSON(http.StatusOK, StremioStreamResponse{Streams: []StremioStreamDetail{}})
 		return
 	}
-
-	cacheMap := debrid.CheckCached(allHashes, database.DB)
 
 	// BULK PRE-FETCH: Load all magnet display names from magnet_cache table
 	var magnetCaches []database.MagnetCache
