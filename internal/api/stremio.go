@@ -1,5 +1,5 @@
-// Version: 1.1.6
-// Change log: Secured rdAddHandler by storing info.ID in a persistent string variable to prevent nil-pointer dereference panics during transient network polling errors.
+// Version: 1.1.7
+// Change log: Enhanced stream link formatting with comprehensive file sizes, dynamically-compiled high-priority tag badges, and custom multiline details formatting to maximize Stremio client compatibility.
 
 package api
 
@@ -723,6 +723,30 @@ func streamHandler(c *gin.Context) {
 	}
 	cacheMap := debrid.CheckCached(allHashes, database.DB)
 
+	// BULK PRE-FETCH: Load all magnet display names from magnet_cache table
+	var magnetCaches []database.MagnetCache
+	_ = database.DB.Where("infohash IN ?", allHashes).Find(&magnetCaches)
+	magnetMap := make(map[string]string)
+	for _, mc := range magnetCaches {
+		if u, err := url.Parse(mc.Magnet); err == nil {
+			if dn := u.Query().Get("dn"); dn != "" {
+				if decoded, err := url.QueryUnescape(dn); err == nil {
+					magnetMap[mc.Infohash] = decoded
+				} else {
+					magnetMap[mc.Infohash] = dn
+				}
+			}
+		}
+	}
+
+	// BULK PRE-FETCH: Load all debrid torrent records to fetch active downloaded file structures/sizes
+	var debridTorrents []database.DebridTorrent
+	_ = database.DB.Where("infohash IN ?", allHashes).Find(&debridTorrents)
+	debridTorrentMap := make(map[string]database.DebridTorrent)
+	for _, dt := range debridTorrents {
+		debridTorrentMap[dt.Infohash] = dt
+	}
+
 	var cachedStreams []StremioStreamDetail   // Instant ⚡ streams
 	var uncachedStreams []StremioStreamDetail // Downloading ⏳ streams
 
@@ -747,30 +771,82 @@ func streamHandler(c *gin.Context) {
 	for _, s := range streams {
 		isCached := cacheMap[s.Infohash]
 
-		// ---- Build title detail based on content type ----
-		var titleDetail string
+		// Resolve high-priority resolution tag dynamically for Stream Card Name display
+		var resTag string
+		var dn string
+		if val, ok := magnetMap[s.Infohash]; ok {
+			dn = val
+		}
+
+		if dn != "" {
+			parser.CompileFilters()
+			for _, f := range parser.CompiledFilters {
+				if f.GroupID == "gr" && f.Positive.MatchString(dn) {
+					resTag = " [" + f.Name + "]"
+					break
+				}
+			}
+		}
+		if resTag == "" && s.Quality != "" && strings.ToLower(s.Quality) != "sd" {
+			resTag = " [" + strings.ToUpper(s.Quality) + "]"
+		}
+
+		// Generate clean dynamic badges from dn
+		var parsedBadges string
+		if dn != "" {
+			parsedBadges = parser.FormatBadges(dn)
+		}
+
+		// Format final badges string
+		badgeLine := ""
+		if parsedBadges != "" {
+			badgeLine = parsedBadges
+		} else if s.Quality != "" {
+			badgeLine = "[" + strings.ToUpper(s.Quality) + "]"
+		}
+
+		// Append overall file size to the badges line if known
+		var totalSize int64 = 0
+		if dt, ok := debridTorrentMap[s.Infohash]; ok {
+			for _, f := range dt.Files {
+				totalSize += f.Bytes
+			}
+		}
+		if totalSize > 0 {
+			badgeLine += "  |  💾 " + utils.FormatSize(totalSize)
+		}
+
+		// Series/Movie main identity header
+		var detailsHeader string
 		if mediaType == "series" {
-			ep := 0
-			if s.Episode != nil {
-				ep = *s.Episode
-			}
-			epEnd := ep
-			if s.EpisodeEnd != nil {
-				epEnd = *s.EpisodeEnd
-			}
-			// Season pack: both episode fields are nil
-			if s.Episode == nil && s.EpisodeEnd == nil {
-				ep = 1
-				epEnd = 999
-			}
 			seasonVal := 0
 			if s.Season != nil {
 				seasonVal = *s.Season
 			}
-			titleDetail = buildSeriesTitle(tmdbTitle, seasonVal, ep, epEnd, s.Quality, s.Language)
+			epVal := 0
+			if s.Episode != nil {
+				epVal = *s.Episode
+			}
+			epEndVal := epVal
+			if s.EpisodeEnd != nil {
+				epEndVal = *s.EpisodeEnd
+			}
+
+			seasonStr := fmt.Sprintf("S%02d", seasonVal)
+			var epPart string
+			if epEndVal == 0 || epEndVal == epVal {
+				epPart = fmt.Sprintf("Episode %02d", epVal)
+			} else if epVal == 1 && epEndVal == 999 {
+				epPart = "Season Pack"
+			} else {
+				epPart = fmt.Sprintf("Episodes %02d-%02d", epVal, epEndVal)
+			}
+			detailsHeader = fmt.Sprintf("🎬 %s (%s | %s)", tmdbTitle, seasonStr, epPart)
 		} else {
-			titleDetail = buildMovieTitle(tmdbTitle, s.Quality, s.Language)
+			detailsHeader = fmt.Sprintf("🎬 %s", tmdbTitle)
 		}
+
+		langBadge := formatLanguage(s.Language)
 
 		// ---- Deduplication check ----
 		dupKey := streamDupKey{
@@ -787,23 +863,28 @@ func streamHandler(c *gin.Context) {
 		if p.IsEnabled() {
 			// ---- Attempt instant playback for already-downloaded torrents ----
 			var debridTorrent database.DebridTorrent
-			var debridTorrents []database.DebridTorrent
-			errDebrid := database.DB.Where("infohash = ? AND status = ?", s.Infohash, "downloaded").Limit(1).Find(&debridTorrents).Error
-
-			if errDebrid == nil && len(debridTorrents) > 0 && len(debridTorrents[0].Files) > 0 && len(debridTorrents[0].Links) > 0 {
-				debridTorrent = debridTorrents[0]
+			if dt, ok := debridTorrentMap[s.Infohash]; ok && dt.Status == "downloaded" && len(dt.Files) > 0 && len(dt.Links) > 0 {
+				debridTorrent = dt
 				fileToStream, linkIndex := pickBestDebridFile(debridTorrent.Files, debridTorrent.Links, mediaType, season, episode)
 				if fileToStream != nil && linkIndex >= 0 && linkIndex < len(debridTorrent.Links) {
 					unrestricted, errUnrestrict := p.UnrestrictLink(c.Request.Context(), debridTorrent.Links[linkIndex])
 					if errUnrestrict == nil && unrestricted != nil && unrestricted.Download != "" {
-						badgeName := "⚡ RD+"
+						badgeName := "⚡ RD+" + resTag
 						if cfg.DebridService == "torbox" {
-							badgeName = "⚡ TB+"
+							badgeName = "⚡ TB+" + resTag
 						}
+
+						formattedTitle := fmt.Sprintf("%s\n✨ %s\n🔊 %s\n📦 File: %s (%s)", 
+							detailsHeader, 
+							badgeLine, 
+							langBadge, 
+							fileToStream.Path, 
+							utils.FormatSize(fileToStream.Bytes),
+						)
 
 						item := StremioStreamDetail{
 							Name:     badgeName,
-							Title:    fmt.Sprintf("%s\n📦 File: %s", titleDetail, fileToStream.Path),
+							Title:    formattedTitle,
 							URL:      unrestricted.Download,
 							Quality:  s.Quality,
 							Language: s.Language,
@@ -821,20 +902,26 @@ func streamHandler(c *gin.Context) {
 			}
 			rdUrl := fmt.Sprintf("%s/rd-add/%s/%s", cfg.AppHost, s.Infohash, targetEpStr)
 
-			badgeName := "⏳ RD"
+			badgeName := "⏳ RD" + resTag
 			if isCached {
-				badgeName = "⚡ RD+"
+				badgeName = "⚡ RD+" + resTag
 			}
 			if cfg.DebridService == "torbox" {
-				badgeName = "⏳ TB"
+				badgeName = "⏳ TB" + resTag
 				if isCached {
-					badgeName = "⚡ TB+"
+					badgeName = "⚡ TB+" + resTag
 				}
 			}
 
+			formattedTitle := fmt.Sprintf("%s\n✨ %s\n🔊 %s\n📥 Click to Stream", 
+				detailsHeader, 
+				badgeLine, 
+				langBadge,
+			)
+
 			item := StremioStreamDetail{
 				Name:     badgeName,
-				Title:    fmt.Sprintf("%s\n📥 Click to Stream", titleDetail),
+				Title:    formattedTitle,
 				URL:      rdUrl,
 				Quality:  s.Quality,
 				Language: s.Language,
@@ -848,9 +935,17 @@ func streamHandler(c *gin.Context) {
 			// ---- Direct P2P Streams ----
 			trackerSources := buildTrackerSources()
 			sources := withDhtSource(trackerSources, s.Infohash)
+			badgeName := "🔌 P2P" + resTag
+
+			formattedTitle := fmt.Sprintf("%s\n✨ %s\n🔊 %s\n🔗 Peer-to-Peer Stream", 
+				detailsHeader, 
+				badgeLine, 
+				langBadge,
+			)
+
 			item := StremioStreamDetail{
-				Name:     "🔌 P2P",
-				Title:    fmt.Sprintf("%s\n🔗 Peer-to-Peer Stream", titleDetail),
+				Name:     badgeName,
+				Title:    formattedTitle,
 				InfoHash: s.Infohash,
 				Sources:  sources,
 				Quality:  s.Quality,
