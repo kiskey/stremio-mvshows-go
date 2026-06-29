@@ -1,3 +1,6 @@
+// Version: 1.2.1
+// Change log: Enforced forced tcp4 (IPv4) connection routing inside createOptimizedTMDBHTTPClient to completely bypass Alpine unprivileged LXC parallel DNS / AAAA IPv6 hangs.
+
 package metadata
 
 import (
@@ -79,10 +82,13 @@ type TMDBClient struct {
 
 func createOptimizedTMDBHTTPClient(timeout time.Duration) *http.Client {
 	transport := &http.Transport{
-		DialContext: (&net.Dialer{
-			Timeout:   5 * time.Second,  // Faster connect timeout
-			KeepAlive: 30 * time.Second, // Consistent keep-alive
-		}).DialContext,
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			// FORCE tcp4: Prevents the classic unprivileged Proxmox Alpine LXC parallel DNS / AAAA hang
+			return (&net.Dialer{
+				Timeout:   5 * time.Second,  // Faster connect timeout
+				KeepAlive: 30 * time.Second, // Consistent keep-alive
+			}).DialContext(ctx, "tcp4", addr)
+		},
 		MaxIdleConns:          100,
 		MaxIdleConnsPerHost:   100,             // Avoid connection starvation under concurrency
 		IdleConnTimeout:       90 * time.Second,
@@ -523,13 +529,16 @@ var metadataWords = map[string]bool{
 	"hindi": true, "tamil": true, "telugu": true, "malayalam": true,
 	"kannada": true, "bengali": true, "marathi": true, "punjabi": true,
 	"english": true, "spanish": true, "french": true, "italic": true,
-	"russian": true, "korean": true, "japanese": true, "chinese": true,
-	"51": true, "71": true, "20": true, "10bit": true, "remux": true,
-	"3d": true, "sdr": true, "gb": true, "mb": true, "kb": true,
-	"web": true, "dl": true, "hd": true,
-	"complete": true, "repack": true, "proper": true, "vostfr": true,
-	"subs": true, "sub": true, "esub": true, "vof": true, "vff": true,
-	"vf": true, "season": true, "series": true, "episode": true, "pack": true,
+	"regular": true, "korean": true, "japanese": true, "chinese": true,
+	"esub": true, "sub": true, "subs": true, "sott": true,
+	// Channels/Bit Depth
+	"51": true, "71": true, "20": true, "10bit": true, "8bit": true,
+	// Release Types/Generic Tags
+	"remux": true, "3d": true, "sdr": true,
+	"web": true, "dl": true, "hd": true, "web-dl": true, "brip": true, "rip": true, "true": true,
+	// Season/Episode indicators, often found as trailing junk
+	"s": true, "e": true, "ep": true, "season": true, "episode": true, "pack": true, "complete": true, "full": true, "series": true, "episodes": true,
+	"proper": true, "repack": true, "extended": true, "cut": true,
 }
 
 var sequelIndicators = map[string]bool{
