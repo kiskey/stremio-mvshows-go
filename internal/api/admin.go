@@ -1,5 +1,5 @@
-// Version: 1.1.0
-// Change log: Enhanced admin handlers with custom-meta bindings, alternative direct Cinemeta routing fallback, and integrated a parallel cinemeta-search endpoint.
+// Version: 1.1.1
+// Change log: Integrated a write-time failsafe in linkOfficialHandler and autoMatchHandler to sanitize empty API-returned titles via the local parser.ParseTitle before database commit.
 
 package api
 
@@ -253,7 +253,19 @@ func linkOfficialHandler(c *gin.Context) {
 		}
 
 		t.TmdbID = &tmdbResult.TmdbID
-		t.CleanTitle = tmdbResult.Title // Overwrite old dirty crawled title with the clean Cinemeta standard
+		
+		// Write-Time Sanitation Failsafe:
+		// If Cinemeta details API returned an empty title (skeleton card), sanitize RawTitle on-the-fly.
+		cleanTitle := tmdbResult.Title
+		if cleanTitle == "" {
+			parsed := parser.ParseTitle(t.RawTitle)
+			if parsed != nil && parsed.Title != "" {
+				cleanTitle = parsed.Title
+			} else {
+				cleanTitle = t.RawTitle
+			}
+		}
+		t.CleanTitle = cleanTitle
 		t.Status = "linked"
 		t.Type = mediaType
 		if tmdbResult.Year > 0 {
@@ -452,7 +464,18 @@ func autoMatchHandler(c *gin.Context) {
 			}
 
 			res.Thread.TmdbID = &res.Result.TmdbID
-			res.Thread.CleanTitle = res.Result.Title // Overwrite old dirty crawled title with the clean Cinemeta standard
+			
+			// Write-Time Sanitation Failsafe:
+			cleanTitle := res.Result.Title
+			if cleanTitle == "" {
+				parsed := parser.ParseTitle(res.Thread.RawTitle)
+				if parsed != nil && parsed.Title != "" {
+					cleanTitle = parsed.Title
+				} else {
+					cleanTitle = res.Thread.RawTitle
+				}
+			}
+			res.Thread.CleanTitle = cleanTitle
 			res.Thread.Status = "linked"
 			if res.Result.Year > 0 {
 				res.Thread.Year = &res.Result.Year
