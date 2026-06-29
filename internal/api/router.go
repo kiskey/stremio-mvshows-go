@@ -1,5 +1,5 @@
-// Version: 1.1.3
-// Change log: Configured gzipMiddleware to completely bypass compression on "/admin/api/" routes, resolving OpenResty/Nginx pre-gzip browser socket-read hangs.
+// Version: 1.1.4
+// Change log: Added an explicit gWriter.Flush() immediately after gz.Close() inside gzipMiddleware to resolve the 4KB buffer-alignment truncation bug on pre-compressed payloads.
 
 package api
 
@@ -98,8 +98,12 @@ func gzipMiddleware() gin.HandlerFunc {
 
 		c.Next()
 
-		// Explicitly flush and close the Gzip writer to write the trailing CRC32 checksum footer before returning
+		// Explicitly close the Gzip writer to write the trailing CRC32 checksum footer
 		_ = gz.Close()
+
+		// CRITICAL FIX: Explicitly flush the newly closed gzip footer out of Go's HTTP write buffer.
+		// This prevents the 4KB buffer alignment truncation bug on pre-compressed payloads.
+		gWriter.Flush()
 	}
 }
 
