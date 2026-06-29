@@ -1,5 +1,5 @@
-// Version: 1.1.0
-// Change log: Integrated a zero-dependency, highly optimized native gzipMiddleware to prevent JSON truncation on reverse-proxies (Nginx/Cloudflare) and minimize bandwidth footprints.
+// Version: 1.1.1
+// Change log: Upgraded gzipWriter to implement http.Flusher and restructured the gzip.Writer lifecycle to prevent chunk buffering hangs on reverse proxies like OpenResty.
 
 package api
 
@@ -28,7 +28,7 @@ func SetupRouter() *gin.Engine {
 	r.Use(customRecovery())
 	r.Use(corsMiddleware())
 	r.Use(requestLogger())
-	r.Use(gzipMiddleware()) // Native high-performance Gzip payload compression
+	r.Use(gzipMiddleware()) // Native high-performance Gzip payload compression with Flusher support
 
 	// Serve the admin panel static page at root and explicitly at /admin
 	r.StaticFile("/", "./public/admin.html")
@@ -48,7 +48,7 @@ func SetupRouter() *gin.Engine {
 // gzipWriter wraps Gin's ResponseWriter, routing writes directly to the Gzip compressor.
 type gzipWriter struct {
 	gin.ResponseWriter
-	writer io.Writer
+	writer *gzip.Writer
 }
 
 func (g *gzipWriter) Write(data []byte) (int, error) {
@@ -57,6 +57,14 @@ func (g *gzipWriter) Write(data []byte) (int, error) {
 
 func (g *gzipWriter) WriteString(s string) (int, error) {
 	return g.writer.Write([]byte(s))
+}
+
+// Flush implements http.Flusher to prevent chunk buffering hangs on reverse proxies like OpenResty/NPM.
+func (g *gzipWriter) Flush() {
+	_ = g.writer.Flush()
+	if flusher, ok := g.ResponseWriter.(http.Flusher); ok {
+		flusher.Flush()
+	}
 }
 
 // gzipMiddleware compresses HTTP payloads using the standard library compressor with optimal CPU speed.
@@ -74,13 +82,18 @@ func gzipMiddleware() gin.HandlerFunc {
 			c.Next()
 			return
 		}
-		defer gz.Close()
 
 		c.Header("Content-Encoding", "gzip")
 		c.Header("Vary", "Accept-Encoding")
 
-		c.Writer = &gzipWriter{ResponseWriter: c.Writer, writer: gz}
+		// Wrap and assign our upgraded Gzip Flusher writer
+		gWriter := &gzipWriter{ResponseWriter: c.Writer, writer: gz}
+		c.Writer = gWriter
+
 		c.Next()
+
+		// Explicitly flush and close the Gzip writer to write the trailing CRC32 checksum footer before returning
+		_ = gz.Close()
 	}
 }
 
