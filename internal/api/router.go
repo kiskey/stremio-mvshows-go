@@ -1,11 +1,10 @@
-// Version: 1.1.1
-// Change log: Upgraded gzipWriter to implement http.Flusher and restructured the gzip.Writer lifecycle to prevent chunk buffering hangs on reverse proxies like OpenResty.
+// Version: 1.1.2
+// Change log: Removed unused "io" import to resolve CGO-disabled cross-compilation build blocker.
 
 package api
 
 import (
 	"compress/gzip"
-	"io"
 	"net/http"
 	"strings"
 	"time"
