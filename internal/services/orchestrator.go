@@ -1,5 +1,5 @@
-// Version: 1.0.6
-// Change log: Integrated write-time failsafe inside processThread to automatically sanitize RawTitle via parser.ParseTitle when TMDBResult returned title is empty.
+// Version: 1.0.7
+// Change log: Appended `.Error` accessor to GORM's Create call on MagnetCache to resolve compilation error.
 
 package orchestrator
 
@@ -296,7 +296,7 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 			errCache := tx.Clauses(clause.OnConflict{
 				Columns:   []clause.Column{{Name: "infohash"}},
 				UpdateAll: true,
-			}).Create(&cacheRecord)
+			}).Create(&cacheRecord).Error // EXPLICIT FIX: Appended .Error here to extract the actual Go error from GORM DB pointer
 			if errCache != nil {
 				return errCache
 			}
