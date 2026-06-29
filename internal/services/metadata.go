@@ -1,5 +1,5 @@
-// Version: 1.2.1
-// Change log: Enforced forced tcp4 (IPv4) connection routing inside createOptimizedTMDBHTTPClient to completely bypass Alpine unprivileged LXC parallel DNS / AAAA IPv6 hangs.
+// Version: 1.2.2
+// Change log: Updated SearchCinemeta to use url.PathEscape instead of QueryEscape, ensuring spaces are encoded as %20 instead of + to prevent Cinemeta catalog 404/504 hangs.
 
 package metadata
 
@@ -199,7 +199,9 @@ func (t *TMDBClient) GetByImdbIDFromCinemeta(imdbID string, contentType string) 
 
 // SearchCinemeta executes parallel Movie and Series catalog searches to return visually inspectable dashboard candidates
 func (t *TMDBClient) SearchCinemeta(query string) ([]CinemetaSearchItem, error) {
-	escapedQuery := url.QueryEscape(query)
+	// EXPLICIT FIX: Use PathEscape instead of QueryEscape to translate spaces into %20 instead of +
+	// This ensures that the Stremio Cinemeta catalog API does not fail with path mismatches.
+	escapedQuery := url.PathEscape(query)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
