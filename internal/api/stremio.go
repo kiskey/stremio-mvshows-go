@@ -1,5 +1,5 @@
-// Version: 1.2.2
-// Change log: Fixed a Go compilation typo at the end of streamHandler by changing the assignment operator to := for streamList.
+// Version: 1.2.3
+// Change log: Implemented "Fix Part A" of the llm_fix.md guide by routing all Stremio protocol JSON responses through a pre-marshalled writeJSON helper to force solid Content-Length headers and permanently eliminate chunked-encoding stalls.
 
 package api
 
@@ -31,6 +31,18 @@ var backgroundPollSemaphore = make(chan struct{}, 3)
 
 // Hot Path regex pre-compiled to prevent CPU and heap allocations during file selections
 var epRegex = regexp.MustCompile(`[Ss]\d{1,2}\s*[Ee]\s*(\d{1,3})`)
+
+// writeJSON pre-marshals objects to []byte to guarantee Content-Length is always known before writing.
+// This eliminates the non-deterministic fallback to Transfer-Encoding: chunked on payloads >= 4 KB.
+func writeJSON(c *gin.Context, code int, obj interface{}) {
+	data, err := json.Marshal(obj)
+	if err != nil {
+		utils.Logger.Error().Err(err).Msg("Failed to pre-marshal Stremio JSON payload")
+		c.AbortWithStatus(http.StatusInternalServerError)
+		return
+	}
+	c.Data(code, "application/json; charset=utf-8", data)
+}
 
 // ── Stremio Protocol Statically-Typed Struct Responses ──
 
@@ -230,7 +242,7 @@ func RegisterStremioRoutes(r *gin.RouterGroup) {
 
 func manifestHandler(c *gin.Context) {
 	cfg := config.Load()
-	c.JSON(http.StatusOK, gin.H{
+	writeJSON(c, http.StatusOK, gin.H{
 		"id":          cfg.AddonID,
 		"version":     cfg.AddonVersion,
 		"name":        cfg.AddonName,
@@ -335,7 +347,7 @@ func catalogHandler(c *gin.Context) {
 		Find(&threads).Error
 
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database lookup failed"})
+		writeJSON(c, http.StatusInternalServerError, gin.H{"error": "Database lookup failed"})
 		return
 	}
 
@@ -451,7 +463,7 @@ func catalogHandler(c *gin.Context) {
 		metas = append(metas, metaEntry)
 	}
 
-	c.JSON(http.StatusOK, StremioCatalogResponse{Metas: metas})
+	writeJSON(c, http.StatusOK, StremioCatalogResponse{Metas: metas})
 }
 
 // ── Meta ──
@@ -592,7 +604,7 @@ func metaHandler(c *gin.Context) {
 				metaObj.Videos = videos
 			}
 
-			c.JSON(http.StatusOK, StremioMetaResponse{Meta: metaObj})
+			writeJSON(c, http.StatusOK, StremioMetaResponse{Meta: metaObj})
 			return
 		}
 	}
@@ -611,11 +623,11 @@ func metaHandler(c *gin.Context) {
 		if t.Year != nil {
 			metaObj.ReleaseInfo = strconv.Itoa(*t.Year)
 		}
-		c.JSON(http.StatusOK, StremioMetaResponse{Meta: metaObj})
+		writeJSON(c, http.StatusOK, StremioMetaResponse{Meta: metaObj})
 		return
 	}
 
-	c.JSON(http.StatusNotFound, gin.H{"error": "Metadata not found"})
+	writeJSON(c, http.StatusNotFound, gin.H{"error": "Metadata not found"})
 }
 
 // ── Stream ──
@@ -727,12 +739,12 @@ func streamHandler(c *gin.Context) {
 					Sources:  sources,
 				})
 			}
-			c.JSON(http.StatusOK, StremioStreamResponse{Streams: streamList})
+			writeJSON(c, http.StatusOK, StremioStreamResponse{Streams: streamList})
 			return
 		}
 
 		// STREMIO PROTOCOL FIX: Never return 404 on the stream endpoint! 
-		c.JSON(http.StatusOK, StremioStreamResponse{Streams: []StremioStreamDetail{}})
+		writeJSON(c, http.StatusOK, StremioStreamResponse{Streams: []StremioStreamDetail{}})
 		return
 	}
 	meta = metas[0]
@@ -759,7 +771,7 @@ func streamHandler(c *gin.Context) {
 	}
 
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Streams lookup failed"})
+		writeJSON(c, http.StatusInternalServerError, gin.H{"error": "Streams lookup failed"})
 		return
 	}
 
@@ -774,7 +786,7 @@ func streamHandler(c *gin.Context) {
 
 	// Short-circuit instantly if 0 target streams are resolved (mitigates R-003)
 	if len(allHashes) == 0 {
-		c.JSON(http.StatusOK, StremioStreamResponse{Streams: []StremioStreamDetail{}})
+		writeJSON(c, http.StatusOK, StremioStreamResponse{Streams: []StremioStreamDetail{}})
 		return
 	}
 
@@ -1014,7 +1026,7 @@ func streamHandler(c *gin.Context) {
 	streamList = dedupeStreams(streamList)
 	sortStreams(streamList)
 
-	c.JSON(http.StatusOK, StremioStreamResponse{Streams: streamList})
+	writeJSON(c, http.StatusOK, StremioStreamResponse{Streams: streamList})
 }
 
 // ── Stream Title Builders ──
