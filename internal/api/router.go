@@ -1,5 +1,5 @@
-// Version: 1.1.5
-// Change log: Explicitly deleted "Content-Length" header from pre-compressed responses in gzipMiddleware to prevent reverse-proxy transfer encoding truncation and timeouts.
+// Version: 1.1.6
+// Change log: Upgraded gzipWriter to intercept WriteHeader and Write calls to guarantee the deletion of "Content-Length" before headers are flushed, resolving browser-specific catalog truncation.
 
 package api
 
@@ -50,11 +50,21 @@ type gzipWriter struct {
 	writer *gzip.Writer
 }
 
+// WriteHeader intercepts the header flush and deletes Content-Length to force chunked encoding.
+func (g *gzipWriter) WriteHeader(code int) {
+	g.Header().Del("Content-Length")
+	g.ResponseWriter.WriteHeader(code)
+}
+
+// Write intercepts the body writes and deletes Content-Length if WriteHeader was bypassed.
 func (g *gzipWriter) Write(data []byte) (int, error) {
+	g.Header().Del("Content-Length")
 	return g.writer.Write(data)
 }
 
+// WriteString intercepts the body writes and deletes Content-Length if WriteHeader was bypassed.
 func (g *gzipWriter) WriteString(s string) (int, error) {
+	g.Header().Del("Content-Length")
 	return g.writer.Write([]byte(s))
 }
 
@@ -92,12 +102,7 @@ func gzipMiddleware() gin.HandlerFunc {
 		c.Header("Content-Encoding", "gzip")
 		c.Header("Vary", "Accept-Encoding")
 
-		// CRITICAL ARCHITECTURAL FIX:
-		// Delete any pre-calculated "Content-Length" headers to prevent Nginx/OpenResty
-		// from truncating or hanging on pre-compressed chunked streams.
-		c.Writer.Header().Del("Content-Length")
-
-		// Wrap and assign our upgraded Gzip Flusher writer
+		// Wrap and assign our upgraded Gzip Flusher and Header-Interceptor writer
 		gWriter := &gzipWriter{ResponseWriter: c.Writer, writer: gz}
 		c.Writer = gWriter
 
