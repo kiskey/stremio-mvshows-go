@@ -1,5 +1,5 @@
-// Version: 1.0.1
-// Change log: Removed poster_path parsing and URL concatenation in GetByID to optimize TMDB details lookups and minimize memory allocation overhead.
+// Version: 1.1.0
+// Change log: Integrated a Cinemeta-First lookup flow with a TMDB search fallback, enabling native Stremio-aligned metadata cards and seamless resolution of obscure regional content.
 
 package metadata
 
@@ -44,6 +44,19 @@ type tmdbSearchResult struct {
 	Name         string  `json:"name"`
 	ReleaseDate  string  `json:"release_date"`
 	FirstAirDate string  `json:"first_air_date"`
+}
+
+type CinemetaResponse struct {
+	Meta struct {
+		ID          string   `json:"id"`
+		Type        string   `json:"type"`
+		Name        string   `json:"name"`
+		Poster      string   `json:"poster"`
+		Description string   `json:"description"`
+		ReleaseInfo string   `json:"releaseInfo"`
+		ImdbRating  string   `json:"imdbRating"`
+		Genres      []string `json:"genres"`
+	} `json:"meta"`
 }
 
 type TMDBClient struct {
@@ -105,6 +118,64 @@ func (t *TMDBClient) doRequestWithRetry(req *http.Request, dest interface{}) err
 		return err
 	}
 	return fmt.Errorf("status code %d", resp.StatusCode)
+}
+
+// GetByImdbIDFromCinemeta fetches metadata cards directly from Stremio's native Cinemeta stack
+func (t *TMDBClient) GetByImdbIDFromCinemeta(imdbID string, contentType string) (*TmdbResult, error) {
+	mediaType := "movie"
+	if strings.ToLower(contentType) == "series" {
+		mediaType = "series"
+	}
+
+	urlStr := fmt.Sprintf("https://v3-cinemeta.strem.io/meta/%s/%s.json", mediaType, imdbID)
+	req, err := http.NewRequestWithContext(context.Background(), "GET", urlStr, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	var res CinemetaResponse
+	if err := t.doRequestWithRetry(req, &res); err != nil {
+		return nil, err
+	}
+
+	if res.Meta.ID == "" {
+		return nil, fmt.Errorf("cinemeta metadata not found for ID: %s", imdbID)
+	}
+
+	// Safely parse year from Cinemeta's releaseInfo/year representation
+	year := 0
+	if len(res.Meta.ReleaseInfo) >= 4 {
+		if yVal, err := strconv.Atoi(res.Meta.ReleaseInfo[:4]); err == nil {
+			year = yVal
+		}
+	}
+
+	rating, _ := strconv.ParseFloat(res.Meta.ImdbRating, 64)
+	genresList := make([]map[string]interface{}, len(res.Meta.Genres))
+	for i, gName := range res.Meta.Genres {
+		genresList[i] = map[string]interface{}{"name": gName}
+	}
+
+	// Synthesize a TMDB-compatible raw data structure so GORM decoding logic is preserved
+	rawData := map[string]interface{}{
+		"title":          res.Meta.Name,
+		"name":           res.Meta.Name,
+		"overview":       res.Meta.Description,
+		"release_date":   res.Meta.ReleaseInfo,
+		"first_air_date": res.Meta.ReleaseInfo,
+		"vote_average":   rating,
+		"genres":         genresList,
+	}
+
+	return &TmdbResult{
+		TmdbID:      res.Meta.ID, // Map directly to IMDb ID to fulfill the Cinemeta-Centric design
+		ImdbID:      res.Meta.ID,
+		Title:       res.Meta.Name,
+		Year:        year,
+		Poster:      res.Meta.Poster,
+		Description: res.Meta.Description,
+		RawData:     rawData,
+	}, nil
 }
 
 // stripYearArtifact strips trailing (YYYY) from names using zero-allocation byte indexing instead of Regexp
@@ -180,7 +251,21 @@ func (t *TMDBClient) Search(title string, year int, contentType string) (*TmdbRe
 	}
 
 	candID := fmt.Sprintf("%.0f", bestCand.ID)
-	return t.GetByID(candID, bestType)
+
+	// Fetch TMDB Raw data first to obtain the associated external IMDb ID (matchmaking phase)
+	tmdbRaw, errTmdb := t.GetByID(candID, bestType)
+	if errTmdb == nil && tmdbRaw.ImdbID != "" {
+		// Immediately attempt Cinemeta enrichment for native Stremio compatibility
+		cinemetaResult, errCinemeta := t.GetByImdbIDFromCinemeta(tmdbRaw.ImdbID, bestType)
+		if errCinemeta == nil {
+			return cinemetaResult, nil
+		}
+	}
+
+	if errTmdb != nil {
+		return nil, errTmdb
+	}
+	return tmdbRaw, nil
 }
 
 func (t *TMDBClient) executeSearch(ctx context.Context, title string, year int, contentType string) (*tmdbSearchResult, float64, error) {
@@ -263,6 +348,32 @@ func (t *TMDBClient) GetByID(id string, contentType string) (*TmdbResult, error)
 	}
 
 	ctx := context.Background()
+
+	// Direct IMDb ID lookup handling: Try Cinemeta directly first, fall back to TMDB Find API
+	if strings.HasPrefix(id, "tt") {
+		cinemetaResult, errCinemeta := t.GetByImdbIDFromCinemeta(id, contentType)
+		if errCinemeta == nil {
+			return cinemetaResult, nil
+		}
+
+		// Fallback: Resolve numeric TMDB ID via TMDB Find API
+		findURL := fmt.Sprintf("https://api.themoviedb.org/3/find/%s?api_key=%s&external_source=imdb_id", id, t.apiKey)
+		reqFind, _ := http.NewRequestWithContext(ctx, "GET", findURL, nil)
+		var findData map[string]interface{}
+		if errFind := t.doRequestWithRetry(reqFind, &findData); errFind == nil {
+			resultsKey := "movie_results"
+			if mediaType == "tv" {
+				resultsKey = "tv_results"
+			}
+			if results, ok := findData[resultsKey].([]interface{}); ok && len(results) > 0 {
+				if first, ok := results[0].(map[string]interface{}); ok {
+					if numericID, ok := first["id"].(float64); ok {
+						id = fmt.Sprintf("%.0f", numericID)
+					}
+				}
+			}
+		}
+	}
 
 	// 1. Fetch main metadata
 	urlStr := fmt.Sprintf("https://api.themoviedb.org/3/%s/%s?api_key=%s", mediaType, id, t.apiKey)
