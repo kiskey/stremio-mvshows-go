@@ -1,5 +1,5 @@
-// Version: 1.1.4
-// Change log: Added an explicit gWriter.Flush() immediately after gz.Close() inside gzipMiddleware to resolve the 4KB buffer-alignment truncation bug on pre-compressed payloads.
+// Version: 1.1.5
+// Change log: Explicitly deleted "Content-Length" header from pre-compressed responses in gzipMiddleware to prevent reverse-proxy transfer encoding truncation and timeouts.
 
 package api
 
@@ -92,6 +92,11 @@ func gzipMiddleware() gin.HandlerFunc {
 		c.Header("Content-Encoding", "gzip")
 		c.Header("Vary", "Accept-Encoding")
 
+		// CRITICAL ARCHITECTURAL FIX:
+		// Delete any pre-calculated "Content-Length" headers to prevent Nginx/OpenResty
+		// from truncating or hanging on pre-compressed chunked streams.
+		c.Writer.Header().Del("Content-Length")
+
 		// Wrap and assign our upgraded Gzip Flusher writer
 		gWriter := &gzipWriter{ResponseWriter: c.Writer, writer: gz}
 		c.Writer = gWriter
@@ -101,8 +106,7 @@ func gzipMiddleware() gin.HandlerFunc {
 		// Explicitly close the Gzip writer to write the trailing CRC32 checksum footer
 		_ = gz.Close()
 
-		// CRITICAL FIX: Explicitly flush the newly closed gzip footer out of Go's HTTP write buffer.
-		// This prevents the 4KB buffer alignment truncation bug on pre-compressed payloads.
+		// Explicitly flush the newly closed gzip footer out of Go's HTTP write buffer.
 		gWriter.Flush()
 	}
 }
