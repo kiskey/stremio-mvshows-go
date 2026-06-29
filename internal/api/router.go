@@ -1,5 +1,5 @@
-// Version: 1.2.0
-// Change log: Completely removed application-layer Gzip compression to match professional Stremio addon architectures, delegating compression to Nginx and resolving browser-specific payload truncation permanently.
+// Version: 1.3.0
+// Change log: Completely removed Go-side Gzip compression to match professional Stremio addon standards, delegating compression entirely to Nginx Proxy Manager to resolve 3.7KB browser truncation and hangs permanently.
 
 package api
 
