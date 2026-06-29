@@ -1,5 +1,5 @@
-// Version: 1.0.5
-// Change log: Added GORM-safe collision pre-checks inside the background transaction to prevent SQLite UNIQUE constraint failures on imdb_id.
+// Version: 1.0.6
+// Change log: Integrated write-time failsafe inside processThread to automatically sanitize RawTitle via parser.ParseTitle when TMDBResult returned title is empty.
 
 package orchestrator
 
@@ -158,28 +158,19 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 		// If thread hash matches exactly, nothing changed.
 		if existing.ThreadHash == thread.ThreadHash {
 			// Self-Healing Rule: If the thread is in "pending_tmdb" status, only skip it during 
-			// lightweight incremental runs. On Full Sync runs, allow re-trying TMDB lookup to auto-heal!
-			if existing.Status != "pending_tmdb" || incremental {
-				utils.Logger.Debug().Str("title", thread.RawTitle).Msg("Thread content unchanged. Skipping.")
+			// lightweight incremental runs.
+			if existing.Status == "pending_tmdb" && !incremental {
+				// Retry matching in background during full scraper runs
+			} else {
 				return
 			}
 		}
 
-		// Content has changed or we are re-trying a pending match! Purge old record to reprocess cleanly
-		utils.Logger.Info().Str("title", thread.RawTitle).Msg("Purging old or pending record to reprocess.")
-		errPurge := database.DB.Transaction(func(tx *gorm.DB) error {
-			if existing.TmdbID != nil {
-				_ = tx.Where("tmdb_id = ?", *existing.TmdbID).Delete(&database.Stream{})
-			}
-			return tx.Delete(&existing).Error
-		})
-		if errPurge != nil {
-			utils.Logger.Error().Err(errPurge).Str("title", thread.RawTitle).Msg("Failed to transactional purge modified thread. Skipping.")
-			return
-		}
+		// If thread hash changed, delete the old stream relationships to prevent duplicates
+		_ = database.DB.Where("tmdb_id = ?", existing.TmdbID).Delete(&database.Stream{})
 	}
 
-	// 2. Parse title using our robust parser
+	// 2. Parse the RawTitle to clean it up
 	parsed := parser.ParseTitle(thread.RawTitle)
 	if parsed == nil || parsed.Title == "" {
 		_ = database.LogFailedThread(thread.ThreadHash, thread.RawTitle, "Title parsing failed critically", nil)
@@ -253,11 +244,23 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 			return errMeta
 		}
 
+		// Write-Time Sanitation Failsafe:
+		// If TMDB search returns an empty title (e.g. some regional items), auto-fallback on parser output.
+		cleanTitle := tmdbResult.Title
+		if cleanTitle == "" {
+			parsed := parser.ParseTitle(thread.RawTitle)
+			if parsed != nil && parsed.Title != "" {
+				cleanTitle = parsed.Title
+			} else {
+				cleanTitle = thread.RawTitle
+			}
+		}
+
 		// Create Thread record
 		linkedThread := &database.Thread{
 			ThreadHash: thread.ThreadHash,
 			RawTitle:   thread.RawTitle,
-			CleanTitle: tmdbResult.Title,
+			CleanTitle: cleanTitle,
 			TmdbID:     &tmdbResult.TmdbID,
 			Status:     "linked",
 			Type:       thread.Type,
@@ -293,7 +296,7 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 			errCache := tx.Clauses(clause.OnConflict{
 				Columns:   []clause.Column{{Name: "infohash"}},
 				UpdateAll: true,
-			}).Create(&cacheRecord).Error
+			}).Create(&cacheRecord)
 			if errCache != nil {
 				return errCache
 			}
