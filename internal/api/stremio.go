@@ -1,5 +1,5 @@
-// Version: 1.2.0
-// Change log: Removed redundant CASE statement inside the catalog query's ORDER BY clause to enable fast, index-scan database queries, dropping catalog load times from seconds to milliseconds.
+// Version: 1.2.1
+// Change log: Enhanced catalogHandler with on-the-fly raw title sanitization to prevent uncleaned forum strings from leaking into the Stremio UI when Cinemeta details return empty.
 
 package api
 
@@ -367,7 +367,14 @@ func catalogHandler(c *gin.Context) {
 
 		title := t.CleanTitle
 		if title == "" {
-			title = t.RawTitle
+			// Read-Time Sanitization Failsafe:
+			// If CleanTitle is empty, parse and clean the RawTitle on-the-fly to prevent raw torrent tag leaks.
+			parsed := parser.ParseTitle(t.RawTitle)
+			if parsed != nil && parsed.Title != "" {
+				title = parsed.Title
+			} else {
+				title = t.RawTitle
+			}
 		}
 
 		var tmdbData tmdbLightData
@@ -409,7 +416,7 @@ func catalogHandler(c *gin.Context) {
 		}
 
 		// HIGH-FIDELITY RESOLUTION: Dynamically generate official, CORS-whitelisted, Stremio-native Metahub poster CDN URLs
-		// This bypasses raw TMDB image paths entirely, resolving hotlink protections and rendering crisp artwork on all platforms (including Android TV & Web).
+		// This bypasses raw TMDB image paths entirely, resolving hotlink protections and rendering artwork cleanly.
 		poster := "https://images.metahub.space/poster/medium/" + metaID + "/img"
 
 		if t.CustomPoster != nil && *t.CustomPoster != "" {
@@ -1003,7 +1010,7 @@ func streamHandler(c *gin.Context) {
 	}
 
 	// Combine, deduplicate, sort, and strip internal keys
-	streamList := append(cachedStreams, uncachedStreams...)
+	streamList = append(cachedStreams, uncachedStreams...)
 	streamList = dedupeStreams(streamList)
 	sortStreams(streamList)
 
