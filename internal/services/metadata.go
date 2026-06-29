@@ -1,6 +1,3 @@
-// Version: 1.1.0
-// Change log: Integrated a Cinemeta-First lookup flow with a TMDB search fallback, enabling native Stremio-aligned metadata cards and seamless resolution of obscure regional content.
-
 package metadata
 
 import (
@@ -11,6 +8,7 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -57,6 +55,21 @@ type CinemetaResponse struct {
 		ImdbRating  string   `json:"imdbRating"`
 		Genres      []string `json:"genres"`
 	} `json:"meta"`
+}
+
+type CinemetaSearchItem struct {
+	ID          string   `json:"id"`
+	Type        string   `json:"type"`
+	Name        string   `json:"name"`
+	Poster      string   `json:"poster,omitempty"`
+	ReleaseInfo string   `json:"releaseInfo,omitempty"`
+	ImdbRating  string   `json:"imdbRating,omitempty"`
+	Genres      []string `json:"genres,omitempty"`
+	Similarity  float64  `json:"similarity"` // Calculated by local scoring engine
+}
+
+type CinemetaCatalogResponse struct {
+	Metas []CinemetaSearchItem `json:"metas"`
 }
 
 type TMDBClient struct {
@@ -176,6 +189,74 @@ func (t *TMDBClient) GetByImdbIDFromCinemeta(imdbID string, contentType string) 
 		Description: res.Meta.Description,
 		RawData:     rawData,
 	}, nil
+}
+
+// SearchCinemeta executes parallel Movie and Series catalog searches to return visually inspectable dashboard candidates
+func (t *TMDBClient) SearchCinemeta(query string) ([]CinemetaSearchItem, error) {
+	escapedQuery := url.QueryEscape(query)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	type chanResult struct {
+		items []CinemetaSearchItem
+		err   error
+	}
+
+	ch := make(chan chanResult, 2)
+
+	fetchCatalog := func(mType string) {
+		urlStr := fmt.Sprintf("https://v3-cinemeta.strem.io/catalog/%s/top/search=%s.json", mType, escapedQuery)
+		req, err := http.NewRequestWithContext(ctx, "GET", urlStr, nil)
+		if err != nil {
+			ch <- chanResult{nil, err}
+			return
+		}
+
+		var res CinemetaCatalogResponse
+		if err := t.doRequestWithRetry(req, &res); err != nil {
+			// Soft fail: return empty slice so the other parallel goroutine can still display results
+			ch <- chanResult{[]CinemetaSearchItem{}, nil}
+			return
+		}
+		ch <- chanResult{res.Metas, nil}
+	}
+
+	go fetchCatalog("movie")
+	go fetchCatalog("series")
+
+	var allItems []CinemetaSearchItem
+	for i := 0; i < 2; i++ {
+		res := <-ch
+		if res.err == nil && len(res.items) > 0 {
+			allItems = append(allItems, res.items...)
+		}
+	}
+
+	// Score all items based on local title similarity matching (calculateScore)
+	cleanQuery := strings.ToLower(query)
+	for i := range allItems {
+		item := &allItems[i]
+		candYear := 0
+		if len(item.ReleaseInfo) >= 4 {
+			candYear, _ = strconv.Atoi(item.ReleaseInfo[:4])
+		}
+
+		// Calculate similarity score using our existing fuzzy routines
+		score := calculateScore(cleanQuery, 0, item.Name, candYear)
+		item.Similarity = score
+	}
+
+	// Sort candidates by similarity score in descending order
+	sort.Slice(allItems, func(i, j int) bool {
+		return allItems[i].Similarity > allItems[j].Similarity
+	})
+
+	// Bounded limit: return maximum top 10 items to prevent dashboard clutter
+	if len(allItems) > 10 {
+		allItems = allItems[:10]
+	}
+
+	return allItems, nil
 }
 
 // stripYearArtifact strips trailing (YYYY) from names using zero-allocation byte indexing instead of Regexp
