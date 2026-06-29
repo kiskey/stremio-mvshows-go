@@ -1,5 +1,5 @@
-// Version: 1.1.2
-// Change log: Removed unused "io" import to resolve CGO-disabled cross-compilation build blocker.
+// Version: 1.1.3
+// Change log: Configured gzipMiddleware to completely bypass compression on "/admin/api/" routes, resolving OpenResty/Nginx pre-gzip browser socket-read hangs.
 
 package api
 
@@ -27,7 +27,7 @@ func SetupRouter() *gin.Engine {
 	r.Use(customRecovery())
 	r.Use(corsMiddleware())
 	r.Use(requestLogger())
-	r.Use(gzipMiddleware()) // Native high-performance Gzip payload compression with Flusher support
+	r.Use(gzipMiddleware()) // Native high-performance Gzip payload compression with admin-bypass support
 
 	// Serve the admin panel static page at root and explicitly at /admin
 	r.StaticFile("/", "./public/admin.html")
@@ -69,6 +69,13 @@ func (g *gzipWriter) Flush() {
 // gzipMiddleware compresses HTTP payloads using the standard library compressor with optimal CPU speed.
 func gzipMiddleware() gin.HandlerFunc {
 	return func(c *gin.Context) {
+		// EXPLICIT BYPASS: Do not Gzip compress any admin panel API calls.
+		// These payloads are small (<5KB) and pre-compressing them causes OpenResty/NPM SSL socket-read hangs.
+		if strings.HasPrefix(c.Request.URL.Path, "/admin/api/") {
+			c.Next()
+			return
+		}
+
 		// Only compress if the client supports Gzip encoding
 		if !strings.Contains(c.GetHeader("Accept-Encoding"), "gzip") {
 			c.Next()
