@@ -1,5 +1,5 @@
-// Version: 1.2.1
-// Change log: Enhanced catalogHandler with on-the-fly raw title sanitization to prevent uncleaned forum strings from leaking into the Stremio UI when Cinemeta details return empty.
+// Version: 1.2.2
+// Change log: Fixed a Go compilation typo at the end of streamHandler by changing the assignment operator to := for streamList.
 
 package api
 
@@ -1010,7 +1010,7 @@ func streamHandler(c *gin.Context) {
 	}
 
 	// Combine, deduplicate, sort, and strip internal keys
-	streamList = append(cachedStreams, uncachedStreams...)
+	streamList := append(cachedStreams, uncachedStreams...)
 	streamList = dedupeStreams(streamList)
 	sortStreams(streamList)
 
