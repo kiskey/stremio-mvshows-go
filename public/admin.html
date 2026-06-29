@@ -161,7 +161,7 @@
     </style>
 </head>
 <body>
-    <h1>► MVSHOWS ADMIN TERMINAL v1.1.3 ◄</h1>
+    <h1>► MVSHOWS ADMIN TERMINAL v1.2.0 ◄</h1>
 
     <div class="dashboard-grid">
         
@@ -320,6 +320,24 @@
                             </div>
                         </div>
                     </div>
+
+                    <!-- Panel C: Cinemeta Visual Matcher -->
+                    <div style="border: 1px solid #00ff66; padding: 12px; background: #08080c;">
+                        <div style="font-weight: bold; color: #00ff66; border-bottom: 1px dashed #00ff66; padding-bottom: 4px; margin-bottom: 10px; text-transform: uppercase;">
+                            ► Panel C: Cinemeta Visual Matcher
+                        </div>
+                        <p style="margin: 5px 0 10px 0; font-size: 1.2rem;">Search targets: <span id="visualSearchTarget" class="glow-cyan" style="font-weight: bold;">None</span></p>
+                        
+                        <div style="display: flex; gap: 5px; margin-bottom: 10px;">
+                            <input type="text" id="visualSearchInput" placeholder="Search title manually..." style="flex: 1; border-color: #00ff66; color: #00ff66; background: #000;">
+                            <button id="visualSearchBtn" style="border-color: #00ff66; color: #00ff66; box-shadow: 2px 2px 0 #004411; font-size: 1.1rem; padding: 2px 10px; margin: 0;">🔍 Search</button>
+                        </div>
+
+                        <!-- Scrollable Visual Cards List -->
+                        <div id="visualCandidatesContainer" style="max-height: 260px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; border: 1px dashed #333; padding: 6px; background: #000;">
+                            <div style="color: #666; text-align: center; font-size: 1.1rem; padding: 20px 0;">Select a pending item above to search visual candidates.</div>
+                        </div>
+                    </div>
                 </div>
             </div>
 
@@ -456,31 +474,37 @@
                 });
             }
 
+            // Centralized helper to set focused item and search Cinemeta visually
+            async function selectFocusedItem(threadId, title) {
+                focusedThreadId = threadId;
+                el('focusedTitle').textContent = title;
+                el('visualSearchTarget').textContent = title;
+                el('visualSearchInput').value = title;
+                
+                // Fetch streams and visually match candidates
+                loadStreams(threadId);
+                triggerCinemetaSearch(title);
+            }
+
             // Auto-Focus handlers when selecting an option in either list
             el('availableList').addEventListener('change', () => {
                 const sel = el('availableList');
                 if (sel.selectedOptions.length > 0) {
-                    focusedThreadId = sel.selectedOptions[0].value;
-                    el('focusedTitle').textContent = sel.selectedOptions[0].textContent;
-                    loadStreams(focusedThreadId);
+                    selectFocusedItem(sel.selectedOptions[0].value, sel.selectedOptions[0].textContent);
                 }
             });
 
             el('selectedList').addEventListener('change', () => {
                 const sel = el('selectedList');
                 if (sel.selectedOptions.length > 0) {
-                    focusedThreadId = sel.selectedOptions[0].value;
-                    el('focusedTitle').textContent = sel.selectedOptions[0].textContent;
-                    loadStreams(focusedThreadId);
+                    selectFocusedItem(sel.selectedOptions[0].value, sel.selectedOptions[0].textContent);
                 }
             });
 
             el('setFocusBtn').addEventListener('click', async () => {
                 const sel = el('selectedList').selectedOptions.length > 0 ? el('selectedList') : el('availableList');
                 if (sel.selectedOptions.length > 0) {
-                    focusedThreadId = sel.selectedOptions[0].value;
-                    el('focusedTitle').textContent = sel.selectedOptions[0].textContent;
-                    await loadStreams(focusedThreadId);
+                    selectFocusedItem(sel.selectedOptions[0].value, sel.selectedOptions[0].textContent);
                 }
             });
 
@@ -508,6 +532,116 @@
                 });
             }
 
+            // ── Panel C: Visual Cinemeta Search Resolver ────────
+            async function triggerCinemetaSearch(query) {
+                const container = el('visualCandidatesContainer');
+                container.innerHTML = '<div style="color: #00ff66; text-align: center; padding: 25px 0;">🔍 Querying Cinemeta catalogs in parallel...</div>';
+
+                try {
+                    const r = await fetch(`/admin/api/cinemeta-search?query=${encodeURIComponent(query)}`);
+                    const candidates = await r.json();
+                    if (r.ok) {
+                        renderVisualCandidates(candidates);
+                    } else {
+                        container.innerHTML = `<div style="color:#ff2a5f; padding:15px; text-align:center;">Search failed: ${candidates.error || 'Unknown'}</div>`;
+                    }
+                } catch (err) {
+                    container.innerHTML = `<div style="color:#ff2a5f; padding:15px; text-align:center;">Network error: ${err.message}</div>`;
+                }
+            }
+
+            function renderVisualCandidates(candidates) {
+                const container = el('visualCandidatesContainer');
+                container.innerHTML = '';
+                if (!candidates || candidates.length === 0) {
+                    container.innerHTML = '<div style="color: #ff2a5f; text-align: center; padding: 20px 0;">No candidates found on Cinemeta.</div>';
+                    return;
+                }
+
+                candidates.forEach(c => {
+                    const scoreColor = c.similarity >= 70 ? '#00ff66' : (c.similarity >= 40 ? '#ff9900' : '#ff2a5f');
+                    const posterUrl = c.poster ? c.poster : 'https://images.metahub.space/poster/medium/' + c.id + '/img';
+
+                    const card = document.createElement('div');
+                    card.style.display = 'flex';
+                    card.style.gap = '10px';
+                    card.style.padding = '8px';
+                    card.style.border = '1px solid #222';
+                    card.style.background = '#0a0a0c';
+                    card.style.alignItems = 'center';
+
+                    card.innerHTML = `
+                        <img src="${posterUrl}" onerror="this.src='https://via.placeholder.com/60x90?text=No+Poster'" style="width: 50px; height: 75px; object-fit: cover; border: 1px solid #444;" />
+                        <div style="flex: 1; display: flex; flex-direction: column; gap: 4px; font-size: 1.15rem;">
+                            <div style="font-weight: bold; color: #fff; line-height: 1.2;">${c.name} (${c.releaseInfo || 'N/A'})</div>
+                            <div style="display: flex; gap: 10px; font-size: 1.05rem; color: #888;">
+                                <span>Type: <strong style="color: #00e5ff;">${c.type.toUpperCase()}</strong></span>
+                                <span>Rating: <strong style="color: #ff9900;">${c.imdbRating || 'N/A'}</strong></span>
+                            </div>
+                            <div style="font-size: 1.05rem;">
+                                Similarity: <strong style="color: ${scoreColor};">${Math.round(c.similarity)}%</strong>
+                            </div>
+                        </div>
+                        <button class="visualLinkBtn" data-id="${c.id}" data-type="${c.type}" style="border-color: #00ff66; color: #00ff66; font-size: 1.1rem; padding: 2px 8px; box-shadow: none; margin:0;">🔗 Link</button>
+                    `;
+                    container.appendChild(card);
+                });
+
+                container.querySelectorAll('.visualLinkBtn').forEach(btn => {
+                    btn.addEventListener('click', async () => {
+                        const imdbId = btn.getAttribute('data-id');
+                        const mediaType = btn.getAttribute('data-type');
+
+                        if (!focusedThreadId) {
+                            alert("Select a focused pending item first!");
+                            return;
+                        }
+
+                        btn.disabled = true;
+                        btn.innerText = 'Linking...';
+
+                        try {
+                            const response = await fetch('/admin/api/link-official', {
+                                method: 'POST',
+                                headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({
+                                    threadId: parseInt(focusedThreadId),
+                                    officialId: imdbId
+                                })
+                            });
+                            const d = await response.json();
+                            if (response.ok) {
+                                alert(`Successfully linked to ${imdbId}!`);
+                                focusedThreadId = null;
+                                el('focusedTitle').textContent = 'None';
+                                el('visualSearchTarget').textContent = 'None';
+                                el('visualSearchInput').value = '';
+                                container.innerHTML = '<div style="color: #666; text-align: center; font-size: 1.1rem; padding: 20px 0;">Select a pending item above to search visual candidates.</div>';
+                                el('streamsBody').innerHTML = '<tr><td colspan="3" style="color: #666; text-align: center;">Set a focused item above to query available streams.</td></tr>';
+                                loadPending();
+                                fetchHealth();
+                            } else {
+                                alert('Linking failed: ' + (d.error || 'Unknown error'));
+                                btn.disabled = false;
+                                btn.innerText = '🔗 Link';
+                            }
+                        } catch (err) {
+                            alert('Network error: ' + err.message);
+                            btn.disabled = false;
+                            btn.innerText = '🔗 Link';
+                        }
+                    });
+                });
+            }
+
+            el('visualSearchBtn').addEventListener('click', () => {
+                const val = el('visualSearchInput').value.trim();
+                if (val) {
+                    triggerCinemetaSearch(val);
+                }
+            });
+
+            // ── General Cache Caching ────────────────────────────
             el('cacheSelected').addEventListener('click', async () => {
                 if (!focusedThreadId) return alert('Set a focused item first.');
                 const radio = document.querySelector('input[name="streamSelect"]:checked');
@@ -552,6 +686,9 @@
                         alert(`Successfully auto-matched: "${(d.matchedTitles || []).join(', ')}"!`);
                         focusedThreadId = null;
                         el('focusedTitle').textContent = 'None';
+                        el('visualSearchTarget').textContent = 'None';
+                        el('visualSearchInput').value = '';
+                        el('visualCandidatesContainer').innerHTML = '<div style="color: #666; text-align: center; font-size: 1.1rem; padding: 20px 0;">Select a pending item above to search visual candidates.</div>';
                         el('streamsBody').innerHTML = '<tr><td colspan="3" style="color: #666; text-align: center;">Set a focused item above to query available streams.</td></tr>';
                         loadPending();
                         fetchHealth();
