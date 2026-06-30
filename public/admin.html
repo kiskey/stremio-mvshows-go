@@ -161,7 +161,7 @@
     </style>
 </head>
 <body>
-    <h1>► MVSHOWS ADMIN TERMINAL v1.2.0 ◄</h1>
+    <h1>► MVSHOWS ADMIN TERMINAL v1.2.1 ◄</h1>
 
     <div class="dashboard-grid">
         
@@ -320,26 +320,29 @@
                             </div>
                         </div>
                     </div>
+                </div> <!-- /rescue-actions -->
 
-                    <!-- Panel C: Cinemeta Visual Matcher -->
-                    <div style="border: 1px solid #00ff66; padding: 12px; background: #08080c;">
-                        <div style="font-weight: bold; color: #00ff66; border-bottom: 1px dashed #00ff66; padding-bottom: 4px; margin-bottom: 10px; text-transform: uppercase;">
-                            ► Panel C: Cinemeta Visual Matcher
-                        </div>
-                        <p style="margin: 5px 0 10px 0; font-size: 1.2rem;">Search targets: <span id="visualSearchTarget" class="glow-cyan" style="font-weight: bold;">None</span></p>
-                        
-                        <div style="display: flex; gap: 5px; margin-bottom: 10px;">
-                            <input type="text" id="visualSearchInput" placeholder="Search title manually..." style="flex: 1; border-color: #00ff66; color: #00ff66; background: #000;">
-                            <button id="visualSearchBtn" style="border-color: #00ff66; color: #00ff66; box-shadow: 2px 2px 0 #004411; font-size: 1.1rem; padding: 2px 10px; margin: 0;">🔍 Search</button>
-                        </div>
-
-                        <!-- Scrollable Visual Cards List -->
-                        <div id="visualCandidatesContainer" style="max-height: 260px; overflow-y: auto; display: flex; flex-direction: column; gap: 8px; border: 1px dashed #333; padding: 6px; background: #000;">
-                            <div style="color: #666; text-align: center; font-size: 1.1rem; padding: 20px 0;">Select a pending item above to search visual candidates.</div>
+                <!-- Panel C: Cinemeta Visual Matcher (Unified Full-Width Deck) -->
+                <div class="section span-12" style="border: 2px solid #00ff66; margin-top: 15px; box-shadow: 4px 4px 0 #004411;">
+                    <div class="terminal-header" style="background: #00ff66; color: #000;">
+                        <span>► Panel C: Cinemeta Visual Matcher (Unified Deck)</span>
+                        <span>ACTIVE_LOOKUP</span>
+                    </div>
+                    
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; gap: 15px; flex-wrap: wrap;">
+                        <div style="font-size: 1.35rem; color: #00ff66;">Search targets: <span id="visualSearchTarget" class="glow-cyan" style="font-weight: bold;">None</span></div>
+                        <div style="display: flex; gap: 10px; width: 50%; min-width: 300px;">
+                            <input type="text" id="visualSearchInput" placeholder="Search title manually..." style="flex: 1; border-color: #00ff66; color: #00ff66; background: #000; height: 38px;">
+                            <button id="visualSearchBtn" style="border-color: #00ff66; color: #00ff66; box-shadow: 2px 2px 0 #004411; font-size: 1.2rem; padding: 2px 15px; margin: 0; height: 42px;">🔍 Search</button>
                         </div>
                     </div>
+
+                    <!-- Scrollable Visual Cards Grid (Responsive Multi-Column Deck with Large Posters) -->
+                    <div id="visualCandidatesContainer" style="max-height: 480px; overflow-y: auto; display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 15px; border: 1px dashed #333; padding: 12px; background: #000;">
+                        <div style="grid-column: 1 / -1; color: #666; text-align: center; font-size: 1.3rem; padding: 40px 0;">Select a pending item above to search visual candidates.</div>
+                    </div>
                 </div>
-            </div>
+            </div> <!-- /rescue-grid -->
 
             <!-- CHOOSE STREAM PANEL -->
             <div style="border-top: 2px solid #e0e0e0; margin-top: 25px; padding-top: 15px;">
@@ -535,7 +538,7 @@
             // ── Panel C: Visual Cinemeta Search Resolver ────────
             async function triggerCinemetaSearch(query) {
                 const container = el('visualCandidatesContainer');
-                container.innerHTML = '<div style="color: #00ff66; text-align: center; padding: 25px 0;">🔍 Querying Cinemeta catalogs in parallel...</div>';
+                container.innerHTML = '<div style="color: #00ff66; text-align: center; padding: 25px 0; grid-column: 1 / -1;">🔍 Querying Cinemeta catalogs in parallel...</div>';
 
                 try {
                     const r = await fetch(`/admin/api/cinemeta-search?query=${encodeURIComponent(query)}`);
@@ -543,10 +546,10 @@
                     if (r.ok) {
                         renderVisualCandidates(candidates);
                     } else {
-                        container.innerHTML = `<div style="color:#ff2a5f; padding:15px; text-align:center;">Search failed: ${candidates.error || 'Unknown'}</div>`;
+                        container.innerHTML = `<div style="color:#ff2a5f; padding:15px; text-align:center; grid-column: 1 / -1;">Search failed: ${candidates.error || 'Unknown'}</div>`;
                     }
                 } catch (err) {
-                    container.innerHTML = `<div style="color:#ff2a5f; padding:15px; text-align:center;">Network error: ${err.message}</div>`;
+                    container.innerHTML = `<div style="color:#ff2a5f; padding:15px; text-align:center; grid-column: 1 / -1;">Network error: ${err.message}</div>`;
                 }
             }
 
@@ -554,7 +557,7 @@
                 const container = el('visualCandidatesContainer');
                 container.innerHTML = '';
                 if (!candidates || candidates.length === 0) {
-                    container.innerHTML = '<div style="color: #ff2a5f; text-align: center; padding: 20px 0;">No candidates found on Cinemeta.</div>';
+                    container.innerHTML = '<div style="color: #ff2a5f; text-align: center; padding: 20px 0; grid-column: 1 / -1;">No candidates found on Cinemeta.</div>';
                     return;
                 }
 
@@ -564,25 +567,30 @@
 
                     const card = document.createElement('div');
                     card.style.display = 'flex';
-                    card.style.gap = '10px';
-                    card.style.padding = '8px';
-                    card.style.border = '1px solid #222';
+                    card.style.gap = '15px';
+                    card.style.padding = '12px';
+                    card.style.border = '2px solid #222';
                     card.style.background = '#0a0a0c';
-                    card.style.alignItems = 'center';
+                    card.style.alignItems = 'flex-start';
 
                     card.innerHTML = `
-                        <img src="${posterUrl}" onerror="this.src='https://via.placeholder.com/60x90?text=No+Poster'" style="width: 50px; height: 75px; object-fit: cover; border: 1px solid #444;" />
-                        <div style="flex: 1; display: flex; flex-direction: column; gap: 4px; font-size: 1.15rem;">
-                            <div style="font-weight: bold; color: #fff; line-height: 1.2;">${c.name} (${c.releaseInfo || 'N/A'})</div>
-                            <div style="display: flex; gap: 10px; font-size: 1.05rem; color: #888;">
-                                <span>Type: <strong style="color: #00e5ff;">${c.type.toUpperCase()}</strong></span>
-                                <span>Rating: <strong style="color: #ff9900;">${c.imdbRating || 'N/A'}</strong></span>
+                        <img src="${posterUrl}" onerror="this.src='https://via.placeholder.com/110x165?text=No+Poster'" style="width: 110px; height: 165px; object-fit: cover; border: 2px solid #444;" />
+                        <div style="flex: 1; display: flex; flex-direction: column; gap: 6px; font-size: 1.25rem; height: 100%; justify-content: space-between;">
+                            <div>
+                                <div style="font-weight: bold; color: #fff; line-height: 1.2; font-size: 1.35rem; margin-bottom: 4px;">${c.name}</div>
+                                <div style="font-size: 1.15rem; color: #aaa; margin-bottom: 6px;">Year: <strong style="color: #fff;">${c.releaseInfo || 'N/A'}</strong></div>
+                                <div style="display: flex; flex-direction: column; gap: 4px; font-size: 1.1rem; color: #888;">
+                                    <span>Type: <strong style="color: #00e5ff;">${c.type.toUpperCase()}</strong></span>
+                                    <span>Rating: <strong style="color: #ff9900;">${c.imdbRating || 'N/A'}</strong></span>
+                                </div>
                             </div>
-                            <div style="font-size: 1.05rem;">
-                                Similarity: <strong style="color: ${scoreColor};">${Math.round(c.similarity)}%</strong>
+                            <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 10px; border-top: 1px dotted #222; padding-top: 8px;">
+                                <div style="font-size: 1.1rem;">
+                                    Match: <strong style="color: ${scoreColor}; font-size: 1.25rem;">${Math.round(c.similarity)}%</strong>
+                                </div>
+                                <button class="visualLinkBtn" data-id="${c.id}" data-type="${c.type}" style="border-color: #00ff66; color: #00ff66; font-size: 1.15rem; padding: 2px 12px; box-shadow: 2px 2px 0 #004411; margin:0;">🔗 Link</button>
                             </div>
                         </div>
-                        <button class="visualLinkBtn" data-id="${c.id}" data-type="${c.type}" style="border-color: #00ff66; color: #00ff66; font-size: 1.1rem; padding: 2px 8px; box-shadow: none; margin:0;">🔗 Link</button>
                     `;
                     container.appendChild(card);
                 });
@@ -616,7 +624,7 @@
                                 el('focusedTitle').textContent = 'None';
                                 el('visualSearchTarget').textContent = 'None';
                                 el('visualSearchInput').value = '';
-                                container.innerHTML = '<div style="color: #666; text-align: center; font-size: 1.1rem; padding: 20px 0;">Select a pending item above to search visual candidates.</div>';
+                                container.innerHTML = '<div style="color: #666; text-align: center; font-size: 1.1rem; padding: 20px 0; grid-column: 1 / -1;">Select a pending item above to search visual candidates.</div>';
                                 el('streamsBody').innerHTML = '<tr><td colspan="3" style="color: #666; text-align: center;">Set a focused item above to query available streams.</td></tr>';
                                 loadPending();
                                 fetchHealth();
@@ -688,7 +696,7 @@
                         el('focusedTitle').textContent = 'None';
                         el('visualSearchTarget').textContent = 'None';
                         el('visualSearchInput').value = '';
-                        el('visualCandidatesContainer').innerHTML = '<div style="color: #666; text-align: center; font-size: 1.1rem; padding: 20px 0;">Select a pending item above to search visual candidates.</div>';
+                        el('visualCandidatesContainer').innerHTML = '<div style="color: #666; text-align: center; font-size: 1.1rem; padding: 20px 0; grid-column: 1 / -1;">Select a pending item above to search visual candidates.</div>';
                         el('streamsBody').innerHTML = '<tr><td colspan="3" style="color: #666; text-align: center;">Set a focused item above to query available streams.</td></tr>';
                         loadPending();
                         fetchHealth();
