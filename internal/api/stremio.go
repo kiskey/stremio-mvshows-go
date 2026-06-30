@@ -1,5 +1,5 @@
-// Version: 1.2.3
-// Change log: Implemented "Fix Part A" of the llm_fix.md guide by routing all Stremio protocol JSON responses through a pre-marshalled writeJSON helper to force solid Content-Length headers and permanently eliminate chunked-encoding stalls.
+// Version: 1.2.4
+// Change log: Upgraded writeJSON helper to explicitly set Content-Length before writing, and converted all remaining c.JSON calls in rdAddHandler to writeJSON to completely solve the 3.7KB chunked-encoding stall.
 
 package api
 
@@ -41,6 +41,12 @@ func writeJSON(c *gin.Context, code int, obj interface{}) {
 		c.AbortWithStatus(http.StatusInternalServerError)
 		return
 	}
+	// CRITICAL FIX: Set Content-Length explicitly BEFORE any write call.
+	// net/http's automatic Content-Length detection fails when
+	// headers + body together exceed the 4096-byte bufio.Writer buffer,
+	// causing Transfer-Encoding: chunked to be selected instead.
+	// Explicit pre-setting bypasses this threshold entirely.
+	c.Writer.Header().Set("Content-Length", strconv.Itoa(len(data)))
 	c.Data(code, "application/json; charset=utf-8", data)
 }
 
@@ -1208,7 +1214,7 @@ func rdAddHandler(c *gin.Context) {
 	var caches []database.MagnetCache
 	err := database.DB.Where("infohash = ?", infohash).Limit(1).Find(&caches).Error
 	if err != nil || len(caches) == 0 {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Magnet not found in local cache"})
+		writeJSON(c, http.StatusNotFound, gin.H{"error": "Magnet not found in local cache"})
 		return
 	}
 	cache = caches[0]
@@ -1216,7 +1222,7 @@ func rdAddHandler(c *gin.Context) {
 	cfg := config.Load()
 	p := debrid.GetProvider(cfg)
 	if !p.IsEnabled() {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "No active debrid service configured"})
+		writeJSON(c, http.StatusBadRequest, gin.H{"error": "No active debrid service configured"})
 		return
 	}
 
@@ -1242,7 +1248,7 @@ func rdAddHandler(c *gin.Context) {
 	info, errAdd := p.AddAndSelect(reqCtx, cache.Magnet)
 	if errAdd != nil {
 		utils.Logger.Error().Err(errAdd).Str("infohash", infohash).Msg("Debrid AddAndSelect failed.")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to add magnet to debrid provider: " + errAdd.Error()})
+		writeJSON(c, http.StatusInternalServerError, gin.H{"error": "Failed to add magnet to debrid provider: " + errAdd.Error()})
 		return
 	}
 
@@ -1328,7 +1334,7 @@ func rdAddHandler(c *gin.Context) {
 				}
 			}(torrentID, infohash)
 
-			c.JSON(499, gin.H{"error": "Request cancelled by client. Cache polling detached to background."})
+			writeJSON(c, 499, gin.H{"error": "Request cancelled by client. Cache polling detached to background."})
 			return
 		default:
 		}
@@ -1344,7 +1350,7 @@ func rdAddHandler(c *gin.Context) {
 	}
 
 	if !downloaded {
-		c.JSON(http.StatusRequestTimeout, gin.H{"error": "Debrid download timed out. Please try streaming this item again shortly."})
+		writeJSON(c, http.StatusRequestTimeout, gin.H{"error": "Debrid download timed out. Please try streaming this item again shortly."})
 		return
 	}
 
@@ -1412,7 +1418,7 @@ func rdAddHandler(c *gin.Context) {
 	}
 
 	if finalLink == "" {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Failed to locate target video file inside debrid payload."})
+		writeJSON(c, http.StatusNotFound, gin.H{"error": "Failed to locate target video file inside debrid payload."})
 		return
 	}
 
