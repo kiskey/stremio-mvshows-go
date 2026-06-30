@@ -1,5 +1,5 @@
-// Version: 1.0.1
-// Change log: Removed poster_path parsing and URL concatenation in GetByID to optimize TMDB details lookups and minimize memory allocation overhead.
+// Version: 1.2.2
+// Change log: Updated SearchCinemeta to use url.PathEscape instead of QueryEscape, ensuring spaces are encoded as %20 instead of + to prevent Cinemeta catalog 404/504 hangs.
 
 package metadata
 
@@ -11,6 +11,7 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -46,6 +47,34 @@ type tmdbSearchResult struct {
 	FirstAirDate string  `json:"first_air_date"`
 }
 
+type CinemetaResponse struct {
+	Meta struct {
+		ID          string   `json:"id"`
+		Type        string   `json:"type"`
+		Name        string   `json:"name"`
+		Poster      string   `json:"poster"`
+		Description string   `json:"description"`
+		ReleaseInfo string   `json:"releaseInfo"`
+		ImdbRating  string   `json:"imdbRating"`
+		Genres      []string `json:"genres"`
+	} `json:"meta"`
+}
+
+type CinemetaSearchItem struct {
+	ID          string   `json:"id"`
+	Type        string   `json:"type"`
+	Name        string   `json:"name"`
+	Poster      string   `json:"poster,omitempty"`
+	ReleaseInfo string   `json:"releaseInfo,omitempty"`
+	ImdbRating  string   `json:"imdbRating,omitempty"`
+	Genres      []string `json:"genres,omitempty"`
+	Similarity  float64  `json:"similarity"` // Calculated by local scoring engine
+}
+
+type CinemetaCatalogResponse struct {
+	Metas []CinemetaSearchItem `json:"metas"`
+}
+
 type TMDBClient struct {
 	client *http.Client
 	apiKey string
@@ -53,10 +82,13 @@ type TMDBClient struct {
 
 func createOptimizedTMDBHTTPClient(timeout time.Duration) *http.Client {
 	transport := &http.Transport{
-		DialContext: (&net.Dialer{
-			Timeout:   5 * time.Second,  // Faster connect timeout
-			KeepAlive: 30 * time.Second, // Consistent keep-alive
-		}).DialContext,
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			// FORCE tcp4: Prevents the classic unprivileged Proxmox Alpine LXC parallel DNS / AAAA hang
+			return (&net.Dialer{
+				Timeout:   5 * time.Second,  // Faster connect timeout
+				KeepAlive: 30 * time.Second, // Consistent keep-alive
+			}).DialContext(ctx, "tcp4", addr)
+		},
 		MaxIdleConns:          100,
 		MaxIdleConnsPerHost:   100,             // Avoid connection starvation under concurrency
 		IdleConnTimeout:       90 * time.Second,
@@ -105,6 +137,134 @@ func (t *TMDBClient) doRequestWithRetry(req *http.Request, dest interface{}) err
 		return err
 	}
 	return fmt.Errorf("status code %d", resp.StatusCode)
+}
+
+// GetByImdbIDFromCinemeta fetches metadata cards directly from Stremio's native Cinemeta stack
+func (t *TMDBClient) GetByImdbIDFromCinemeta(imdbID string, contentType string) (*TmdbResult, error) {
+	mediaType := "movie"
+	if strings.ToLower(contentType) == "series" {
+		mediaType = "series"
+	}
+
+	urlStr := fmt.Sprintf("https://v3-cinemeta.strem.io/meta/%s/%s.json", mediaType, imdbID)
+	req, err := http.NewRequestWithContext(context.Background(), "GET", urlStr, nil)
+	if err != nil {
+		return nil, err
+	}
+
+	var res CinemetaResponse
+	if err := t.doRequestWithRetry(req, &res); err != nil {
+		return nil, err
+	}
+
+	if res.Meta.ID == "" {
+		return nil, fmt.Errorf("cinemeta metadata not found for ID: %s", imdbID)
+	}
+
+	// Safely parse year from Cinemeta's releaseInfo/year representation
+	year := 0
+	if len(res.Meta.ReleaseInfo) >= 4 {
+		if yVal, err := strconv.Atoi(res.Meta.ReleaseInfo[:4]); err == nil {
+			year = yVal
+		}
+	}
+
+	rating, _ := strconv.ParseFloat(res.Meta.ImdbRating, 64)
+	genresList := make([]map[string]interface{}, len(res.Meta.Genres))
+	for i, gName := range res.Meta.Genres {
+		genresList[i] = map[string]interface{}{"name": gName}
+	}
+
+	// Synthesize a TMDB-compatible raw data structure so GORM decoding logic is preserved
+	rawData := map[string]interface{}{
+		"title":          res.Meta.Name,
+		"name":           res.Meta.Name,
+		"overview":       res.Meta.Description,
+		"release_date":   res.Meta.ReleaseInfo,
+		"first_air_date": res.Meta.ReleaseInfo,
+		"vote_average":   rating,
+		"genres":         genresList,
+	}
+
+	return &TmdbResult{
+		TmdbID:      res.Meta.ID, // Map directly to IMDb ID to fulfill the Cinemeta-Centric design
+		ImdbID:      res.Meta.ID,
+		Title:       res.Meta.Name,
+		Year:        year,
+		Poster:      res.Meta.Poster,
+		Description: res.Meta.Description,
+		RawData:     rawData,
+	}, nil
+}
+
+// SearchCinemeta executes parallel Movie and Series catalog searches to return visually inspectable dashboard candidates
+func (t *TMDBClient) SearchCinemeta(query string) ([]CinemetaSearchItem, error) {
+	// EXPLICIT FIX: Use PathEscape instead of QueryEscape to translate spaces into %20 instead of +
+	// This ensures that the Stremio Cinemeta catalog API does not fail with path mismatches.
+	escapedQuery := url.PathEscape(query)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	type chanResult struct {
+		items []CinemetaSearchItem
+		err   error
+	}
+
+	ch := make(chan chanResult, 2)
+
+	fetchCatalog := func(mType string) {
+		urlStr := fmt.Sprintf("https://v3-cinemeta.strem.io/catalog/%s/top/search=%s.json", mType, escapedQuery)
+		req, err := http.NewRequestWithContext(ctx, "GET", urlStr, nil)
+		if err != nil {
+			ch <- chanResult{nil, err}
+			return
+		}
+
+		var res CinemetaCatalogResponse
+		if err := t.doRequestWithRetry(req, &res); err != nil {
+			// Soft fail: return empty slice so the other parallel goroutine can still display results
+			ch <- chanResult{[]CinemetaSearchItem{}, nil}
+			return
+		}
+		ch <- chanResult{res.Metas, nil}
+	}
+
+	go fetchCatalog("movie")
+	go fetchCatalog("series")
+
+	var allItems []CinemetaSearchItem
+	for i := 0; i < 2; i++ {
+		res := <-ch
+		if res.err == nil && len(res.items) > 0 {
+			allItems = append(allItems, res.items...)
+		}
+	}
+
+	// Score all items based on local title similarity matching (calculateScore)
+	cleanQuery := strings.ToLower(query)
+	for i := range allItems {
+		item := &allItems[i]
+		candYear := 0
+		if len(item.ReleaseInfo) >= 4 {
+			candYear, _ = strconv.Atoi(item.ReleaseInfo[:4])
+		}
+
+		// Calculate similarity score using our existing fuzzy routines
+		score := calculateScore(cleanQuery, 0, item.Name, candYear)
+		item.Similarity = score
+	}
+
+	// Sort candidates by similarity score in descending order
+	sort.Slice(allItems, func(i, j int) bool {
+		return allItems[i].Similarity > allItems[j].Similarity
+	})
+
+	// Bounded limit: return maximum top 10 items to prevent dashboard clutter
+	if len(allItems) > 10 {
+		allItems = allItems[:10]
+	}
+
+	return allItems, nil
 }
 
 // stripYearArtifact strips trailing (YYYY) from names using zero-allocation byte indexing instead of Regexp
@@ -180,7 +340,21 @@ func (t *TMDBClient) Search(title string, year int, contentType string) (*TmdbRe
 	}
 
 	candID := fmt.Sprintf("%.0f", bestCand.ID)
-	return t.GetByID(candID, bestType)
+
+	// Fetch TMDB Raw data first to obtain the associated external IMDb ID (matchmaking phase)
+	tmdbRaw, errTmdb := t.GetByID(candID, bestType)
+	if errTmdb == nil && tmdbRaw.ImdbID != "" {
+		// Immediately attempt Cinemeta enrichment for native Stremio compatibility
+		cinemetaResult, errCinemeta := t.GetByImdbIDFromCinemeta(tmdbRaw.ImdbID, bestType)
+		if errCinemeta == nil {
+			return cinemetaResult, nil
+		}
+	}
+
+	if errTmdb != nil {
+		return nil, errTmdb
+	}
+	return tmdbRaw, nil
 }
 
 func (t *TMDBClient) executeSearch(ctx context.Context, title string, year int, contentType string) (*tmdbSearchResult, float64, error) {
@@ -264,6 +438,32 @@ func (t *TMDBClient) GetByID(id string, contentType string) (*TmdbResult, error)
 
 	ctx := context.Background()
 
+	// Direct IMDb ID lookup handling: Try Cinemeta directly first, fall back to TMDB Find API
+	if strings.HasPrefix(id, "tt") {
+		cinemetaResult, errCinemeta := t.GetByImdbIDFromCinemeta(id, contentType)
+		if errCinemeta == nil {
+			return cinemetaResult, nil
+		}
+
+		// Fallback: Resolve numeric TMDB ID via TMDB Find API
+		findURL := fmt.Sprintf("https://api.themoviedb.org/3/find/%s?api_key=%s&external_source=imdb_id", id, t.apiKey)
+		reqFind, _ := http.NewRequestWithContext(ctx, "GET", findURL, nil)
+		var findData map[string]interface{}
+		if errFind := t.doRequestWithRetry(reqFind, &findData); errFind == nil {
+			resultsKey := "movie_results"
+			if mediaType == "tv" {
+				resultsKey = "tv_results"
+			}
+			if results, ok := findData[resultsKey].([]interface{}); ok && len(results) > 0 {
+				if first, ok := results[0].(map[string]interface{}); ok {
+					if numericID, ok := first["id"].(float64); ok {
+						id = fmt.Sprintf("%.0f", numericID)
+					}
+				}
+			}
+		}
+	}
+
 	// 1. Fetch main metadata
 	urlStr := fmt.Sprintf("https://api.themoviedb.org/3/%s/%s?api_key=%s", mediaType, id, t.apiKey)
 	req, _ := http.NewRequestWithContext(ctx, "GET", urlStr, nil)
@@ -331,13 +531,16 @@ var metadataWords = map[string]bool{
 	"hindi": true, "tamil": true, "telugu": true, "malayalam": true,
 	"kannada": true, "bengali": true, "marathi": true, "punjabi": true,
 	"english": true, "spanish": true, "french": true, "italic": true,
-	"russian": true, "korean": true, "japanese": true, "chinese": true,
-	"51": true, "71": true, "20": true, "10bit": true, "remux": true,
-	"3d": true, "sdr": true, "gb": true, "mb": true, "kb": true,
-	"web": true, "dl": true, "hd": true,
-	"complete": true, "repack": true, "proper": true, "vostfr": true,
-	"subs": true, "sub": true, "esub": true, "vof": true, "vff": true,
-	"vf": true, "season": true, "series": true, "episode": true, "pack": true,
+	"regular": true, "korean": true, "japanese": true, "chinese": true,
+	"esub": true, "sub": true, "subs": true, "sott": true,
+	// Channels/Bit Depth
+	"51": true, "71": true, "20": true, "10bit": true, "8bit": true,
+	// Release Types/Generic Tags
+	"remux": true, "3d": true, "sdr": true,
+	"web": true, "dl": true, "hd": true, "web-dl": true, "brip": true, "rip": true, "true": true,
+	// Season/Episode indicators, often found as trailing junk
+	"s": true, "e": true, "ep": true, "season": true, "episode": true, "pack": true, "complete": true, "full": true, "series": true, "episodes": true,
+	"proper": true, "repack": true, "extended": true, "cut": true,
 }
 
 var sequelIndicators = map[string]bool{

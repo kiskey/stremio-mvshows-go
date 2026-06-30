@@ -1,5 +1,5 @@
-// Version: 1.1.9
-// Change log: Enhanced catalogHandler with robust query-string and path-suffix skip parsing, and calibrated default catalog limits to 40 items to reduce preloading database overhead and network pressure.
+// Version: 1.2.4
+// Change log: Upgraded writeJSON helper to explicitly set Content-Length before writing, and converted all remaining c.JSON calls in rdAddHandler to writeJSON to completely solve the 3.7KB chunked-encoding stall.
 
 package api
 
@@ -31,6 +31,24 @@ var backgroundPollSemaphore = make(chan struct{}, 3)
 
 // Hot Path regex pre-compiled to prevent CPU and heap allocations during file selections
 var epRegex = regexp.MustCompile(`[Ss]\d{1,2}\s*[Ee]\s*(\d{1,3})`)
+
+// writeJSON pre-marshals objects to []byte to guarantee Content-Length is always known before writing.
+// This eliminates the non-deterministic fallback to Transfer-Encoding: chunked on payloads >= 4 KB.
+func writeJSON(c *gin.Context, code int, obj interface{}) {
+	data, err := json.Marshal(obj)
+	if err != nil {
+		utils.Logger.Error().Err(err).Msg("Failed to pre-marshal Stremio JSON payload")
+		c.AbortWithStatus(http.StatusInternalServerError)
+		return
+	}
+	// CRITICAL FIX: Set Content-Length explicitly BEFORE any write call.
+	// net/http's automatic Content-Length detection fails when
+	// headers + body together exceed the 4096-byte bufio.Writer buffer,
+	// causing Transfer-Encoding: chunked to be selected instead.
+	// Explicit pre-setting bypasses this threshold entirely.
+	c.Writer.Header().Set("Content-Length", strconv.Itoa(len(data)))
+	c.Data(code, "application/json; charset=utf-8", data)
+}
 
 // ── Stremio Protocol Statically-Typed Struct Responses ──
 
@@ -230,7 +248,7 @@ func RegisterStremioRoutes(r *gin.RouterGroup) {
 
 func manifestHandler(c *gin.Context) {
 	cfg := config.Load()
-	c.JSON(http.StatusOK, gin.H{
+	writeJSON(c, http.StatusOK, gin.H{
 		"id":          cfg.AddonID,
 		"version":     cfg.AddonVersion,
 		"name":        cfg.AddonName,
@@ -325,16 +343,17 @@ func catalogHandler(c *gin.Context) {
 		query = query.Where("catalog = ?", "top-series-from-forum")
 	}
 
-	// Architectural Limit Calibration: reduced from 100 to 40 to halve query time and DB preload latency
+	// Architectural Limit Calibration: leverage index-scan by ordering strictly on indexed posted_at DESC.
+	// Removing the redundant CASE sorting allows SQLite to return catalog results instantly.
 	err := query.
-		Order("CASE status WHEN 'linked' THEN 0 ELSE 1 END ASC, posted_at DESC").
+		Order("posted_at DESC").
 		Offset(skip).
 		Limit(40).
 		Preload("TmdbMetadata").
 		Find(&threads).Error
 
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Database lookup failed"})
+		writeJSON(c, http.StatusInternalServerError, gin.H{"error": "Database lookup failed"})
 		return
 	}
 
@@ -366,7 +385,14 @@ func catalogHandler(c *gin.Context) {
 
 		title := t.CleanTitle
 		if title == "" {
-			title = t.RawTitle
+			// Read-Time Sanitization Failsafe:
+			// If CleanTitle is empty, parse and clean the RawTitle on-the-fly to prevent raw torrent tag leaks.
+			parsed := parser.ParseTitle(t.RawTitle)
+			if parsed != nil && parsed.Title != "" {
+				title = parsed.Title
+			} else {
+				title = t.RawTitle
+			}
 		}
 
 		var tmdbData tmdbLightData
@@ -408,7 +434,7 @@ func catalogHandler(c *gin.Context) {
 		}
 
 		// HIGH-FIDELITY RESOLUTION: Dynamically generate official, CORS-whitelisted, Stremio-native Metahub poster CDN URLs
-		// This bypasses raw TMDB image paths entirely, resolving hotlink protections and rendering crisp artwork on all platforms (including Android TV & Web).
+		// This bypasses raw TMDB image paths entirely, resolving hotlink protections and rendering artwork cleanly.
 		poster := "https://images.metahub.space/poster/medium/" + metaID + "/img"
 
 		if t.CustomPoster != nil && *t.CustomPoster != "" {
@@ -443,7 +469,7 @@ func catalogHandler(c *gin.Context) {
 		metas = append(metas, metaEntry)
 	}
 
-	c.JSON(http.StatusOK, StremioCatalogResponse{Metas: metas})
+	writeJSON(c, http.StatusOK, StremioCatalogResponse{Metas: metas})
 }
 
 // ── Meta ──
@@ -584,7 +610,7 @@ func metaHandler(c *gin.Context) {
 				metaObj.Videos = videos
 			}
 
-			c.JSON(http.StatusOK, StremioMetaResponse{Meta: metaObj})
+			writeJSON(c, http.StatusOK, StremioMetaResponse{Meta: metaObj})
 			return
 		}
 	}
@@ -603,11 +629,11 @@ func metaHandler(c *gin.Context) {
 		if t.Year != nil {
 			metaObj.ReleaseInfo = strconv.Itoa(*t.Year)
 		}
-		c.JSON(http.StatusOK, StremioMetaResponse{Meta: metaObj})
+		writeJSON(c, http.StatusOK, StremioMetaResponse{Meta: metaObj})
 		return
 	}
 
-	c.JSON(http.StatusNotFound, gin.H{"error": "Metadata not found"})
+	writeJSON(c, http.StatusNotFound, gin.H{"error": "Metadata not found"})
 }
 
 // ── Stream ──
@@ -719,12 +745,12 @@ func streamHandler(c *gin.Context) {
 					Sources:  sources,
 				})
 			}
-			c.JSON(http.StatusOK, StremioStreamResponse{Streams: streamList})
+			writeJSON(c, http.StatusOK, StremioStreamResponse{Streams: streamList})
 			return
 		}
 
 		// STREMIO PROTOCOL FIX: Never return 404 on the stream endpoint! 
-		c.JSON(http.StatusOK, StremioStreamResponse{Streams: []StremioStreamDetail{}})
+		writeJSON(c, http.StatusOK, StremioStreamResponse{Streams: []StremioStreamDetail{}})
 		return
 	}
 	meta = metas[0]
@@ -751,7 +777,7 @@ func streamHandler(c *gin.Context) {
 	}
 
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Streams lookup failed"})
+		writeJSON(c, http.StatusInternalServerError, gin.H{"error": "Streams lookup failed"})
 		return
 	}
 
@@ -766,7 +792,7 @@ func streamHandler(c *gin.Context) {
 
 	// Short-circuit instantly if 0 target streams are resolved (mitigates R-003)
 	if len(allHashes) == 0 {
-		c.JSON(http.StatusOK, StremioStreamResponse{Streams: []StremioStreamDetail{}})
+		writeJSON(c, http.StatusOK, StremioStreamResponse{Streams: []StremioStreamDetail{}})
 		return
 	}
 
@@ -1006,7 +1032,7 @@ func streamHandler(c *gin.Context) {
 	streamList = dedupeStreams(streamList)
 	sortStreams(streamList)
 
-	c.JSON(http.StatusOK, StremioStreamResponse{Streams: streamList})
+	writeJSON(c, http.StatusOK, StremioStreamResponse{Streams: streamList})
 }
 
 // ── Stream Title Builders ──
@@ -1188,7 +1214,7 @@ func rdAddHandler(c *gin.Context) {
 	var caches []database.MagnetCache
 	err := database.DB.Where("infohash = ?", infohash).Limit(1).Find(&caches).Error
 	if err != nil || len(caches) == 0 {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Magnet not found in local cache"})
+		writeJSON(c, http.StatusNotFound, gin.H{"error": "Magnet not found in local cache"})
 		return
 	}
 	cache = caches[0]
@@ -1196,7 +1222,7 @@ func rdAddHandler(c *gin.Context) {
 	cfg := config.Load()
 	p := debrid.GetProvider(cfg)
 	if !p.IsEnabled() {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "No active debrid service configured"})
+		writeJSON(c, http.StatusBadRequest, gin.H{"error": "No active debrid service configured"})
 		return
 	}
 
@@ -1222,7 +1248,7 @@ func rdAddHandler(c *gin.Context) {
 	info, errAdd := p.AddAndSelect(reqCtx, cache.Magnet)
 	if errAdd != nil {
 		utils.Logger.Error().Err(errAdd).Str("infohash", infohash).Msg("Debrid AddAndSelect failed.")
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to add magnet to debrid provider: " + errAdd.Error()})
+		writeJSON(c, http.StatusInternalServerError, gin.H{"error": "Failed to add magnet to debrid provider: " + errAdd.Error()})
 		return
 	}
 
@@ -1308,7 +1334,7 @@ func rdAddHandler(c *gin.Context) {
 				}
 			}(torrentID, infohash)
 
-			c.JSON(499, gin.H{"error": "Request cancelled by client. Cache polling detached to background."})
+			writeJSON(c, 499, gin.H{"error": "Request cancelled by client. Cache polling detached to background."})
 			return
 		default:
 		}
@@ -1324,7 +1350,7 @@ func rdAddHandler(c *gin.Context) {
 	}
 
 	if !downloaded {
-		c.JSON(http.StatusRequestTimeout, gin.H{"error": "Debrid download timed out. Please try streaming this item again shortly."})
+		writeJSON(c, http.StatusRequestTimeout, gin.H{"error": "Debrid download timed out. Please try streaming this item again shortly."})
 		return
 	}
 
@@ -1392,7 +1418,7 @@ func rdAddHandler(c *gin.Context) {
 	}
 
 	if finalLink == "" {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Failed to locate target video file inside debrid payload."})
+		writeJSON(c, http.StatusNotFound, gin.H{"error": "Failed to locate target video file inside debrid payload."})
 		return
 	}
 

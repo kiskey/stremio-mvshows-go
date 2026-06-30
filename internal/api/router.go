@@ -1,13 +1,10 @@
-// Version: 1.1.0
-// Change log: Integrated a zero-dependency, highly optimized native gzipMiddleware to prevent JSON truncation on reverse-proxies (Nginx/Cloudflare) and minimize bandwidth footprints.
+// Version: 1.3.0
+// Change log: Completely removed Go-side Gzip compression to match professional Stremio addon standards, delegating compression entirely to Nginx Proxy Manager to resolve 3.7KB browser truncation and hangs permanently.
 
 package api
 
 import (
-	"compress/gzip"
-	"io"
 	"net/http"
-	"strings"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -28,7 +25,6 @@ func SetupRouter() *gin.Engine {
 	r.Use(customRecovery())
 	r.Use(corsMiddleware())
 	r.Use(requestLogger())
-	r.Use(gzipMiddleware()) // Native high-performance Gzip payload compression
 
 	// Serve the admin panel static page at root and explicitly at /admin
 	r.StaticFile("/", "./public/admin.html")
@@ -43,45 +39,6 @@ func SetupRouter() *gin.Engine {
 	RegisterAdminRoutes(adminGroup)
 
 	return r
-}
-
-// gzipWriter wraps Gin's ResponseWriter, routing writes directly to the Gzip compressor.
-type gzipWriter struct {
-	gin.ResponseWriter
-	writer io.Writer
-}
-
-func (g *gzipWriter) Write(data []byte) (int, error) {
-	return g.writer.Write(data)
-}
-
-func (g *gzipWriter) WriteString(s string) (int, error) {
-	return g.writer.Write([]byte(s))
-}
-
-// gzipMiddleware compresses HTTP payloads using the standard library compressor with optimal CPU speed.
-func gzipMiddleware() gin.HandlerFunc {
-	return func(c *gin.Context) {
-		// Only compress if the client supports Gzip encoding
-		if !strings.Contains(c.GetHeader("Accept-Encoding"), "gzip") {
-			c.Next()
-			return
-		}
-
-		// Use BestSpeed (Level 1) to maximize throughput while minimizing CPU overhead
-		gz, err := gzip.NewWriterLevel(c.Writer, gzip.BestSpeed)
-		if err != nil {
-			c.Next()
-			return
-		}
-		defer gz.Close()
-
-		c.Header("Content-Encoding", "gzip")
-		c.Header("Vary", "Accept-Encoding")
-
-		c.Writer = &gzipWriter{ResponseWriter: c.Writer, writer: gz}
-		c.Next()
-	}
 }
 
 // corsMiddleware implements a lightweight, high-performance native CORS handler.

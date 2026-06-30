@@ -1,5 +1,5 @@
-// Version: 1.1.4
-// Change log: Integrated an optimized, thread-safe bounded in-memory parseCache to eliminate CPU spikes on hot-paths, and introduced a manual string-split fallback parser for raw P2P magnet display names.
+// Version: 1.1.5
+// Change log: Upgraded truncationRegexes with a Sonarr-grade unified pattern to cleanly match and strip unclosed, non-standard trailing episode tags like s01ep(01.
 
 package parser
 
@@ -124,6 +124,8 @@ var sizeCaptureRegex = regexp.MustCompile(`(?i)\b\d+(?:\.\d+)?\s*(?:GB|MB|KB)\b`
 
 // Patterns that identify the boundary of series/episode identifiers to truncate trailing metadata noise
 var truncationRegexes = []*regexp.Regexp{
+	// SONARR-GRADE UPGRADE: Multi-layered pattern capturing standard, unclosed, and non-standard trailing tags (e.g. s01ep(01 or s01e(01)
+	regexp.MustCompile(`(?i)\b(?:s|season|series)?[\s\-_]*\d+[\s\-_]*(?:e|ep|episode)?\s*[\(\[]?\s*\d+.*`),
 	regexp.MustCompile(`(?i)\b(?:s|season|series)[\s\-_]*\d+.*`),
 	regexp.MustCompile(`(?i)\b(?:e|ep|episode)[\s\-_]*[\(\[]?\s*\d+.*`),
 	regexp.MustCompile(`(?i)\b(?:complete|season\s*pack|full\s*season|all\s*episodes)\b.*`),
@@ -132,7 +134,6 @@ var truncationRegexes = []*regexp.Regexp{
 
 // parserJunkWords defines common torrent-specific words and tags to aggressively strip from display titles.
 var parserJunkWords = map[string]bool{
-	// Qualities/Resolutions
 	"1080p": true, "720p": true, "2160p": true, "480p": true, "360p": true,
 	"4k": true, "uhd": true, "bluray": true, "bdrip": true, "brrip": true,
 	"webdl": true, "webrip": true, "hdrip": true, "dvdrip": true, "pdtv": true,
@@ -144,24 +145,19 @@ var parserJunkWords = map[string]bool{
 	"truehd": true, "ac3": true, "mp3": true, "xvid": true, "divx": true,
 	"av1": true, "vp9": true, "hdr10": true, "hdr": true, "dv": true,
 	"dolby": true, "vision": true, "atmos": true, "dts-hd": true, "ma": true,
-	// Audio/Subtitle/Language
 	"dual": true, "audio": true, "dubbed": true, "dub": true, "multi": true,
 	"hindi": true, "tamil": true, "telugu": true, "malayalam": true,
 	"kannada": true, "bengali": true, "marathi": true, "punjabi": true,
 	"english": true, "spanish": true, "french": true, "italic": true,
 	"regular": true, "korean": true, "japanese": true, "chinese": true,
 	"esub": true, "sub": true, "subs": true, "sott": true,
-	// Channels/Bit Depth
 	"51": true, "71": true, "20": true, "10bit": true, "8bit": true,
-	// Release Types/Generic Tags
 	"remux": true, "3d": true, "sdr": true,
 	"web": true, "dl": true, "hd": true, "web-dl": true, "brip": true, "rip": true, "true": true,
-	// Season/Episode indicators, often found as trailing junk
 	"s": true, "e": true, "ep": true, "season": true, "episode": true, "pack": true, "complete": true, "full": true, "series": true, "episodes": true,
 	"proper": true, "repack": true, "extended": true, "cut": true,
 }
 
-// parserStopWords are common articles/prepositions to ignore for cleaning purposes.
 var parserStopWords = map[string]bool{
 	"the": true, "a": true, "an": true, "and": true, "or": true,
 	"of": true, "in": true, "on": true, "at": true, "to": true,
@@ -169,72 +165,9 @@ var parserStopWords = map[string]bool{
 	"la": true, "le": true, "les": true, "el": true, "un": true, "une": true,
 }
 
-// Low-Allocation pre-defined filters deconstructed from Perl badges.json to RE2 standard.
-var filtersDef = []struct {
-	ID        string
-	GroupID   string
-	Name      string
-	Positive  string
-	Negatives []string
-}{
-	// Quality
-	{"q-r", "gq", "Remux", `(?i)\bremux\b`, nil},
-	{"q-b", "gq", "BluRay", `(?i)\b(blu[-_. ]?ray|b[rd][-_. ]?rip)\b`, []string{`(?i)\bremux\b`}},
-	{"q-w", "gq", "WEB-DL", `(?i)\bweb[-_. ]?dl\b`, nil},
-	{"src-webrip", "gq", "WEBRip", `(?i)\bweb[-_. ]?rip\b`, nil},
-	{"src-hdtv", "gq", "HDTV", `(?i)\bhdtv\b`, nil},
-	{"src-hdrip", "gq", "HDRip", `(?i)\bhd[-_. ]?rip\b`, nil},
-	{"src-dvdrip", "gq", "DVDRip", `(?i)\bdvd[-_. ]?rip\b`, nil},
-
-	// Resolution
-	{"r-4k", "gr", "4K", `(?i)\b2160[pi]?\b|\b4k\b|\buhd\b`, []string{`(?i)\b1080[pi]?\b|\b720[pi]?\b`}},
-	{"r-1080", "gr", "1080p", `(?i)\b1080[pi]?\b`, nil},
-	{"r-720", "gr", "720p", `(?i)\b720[pi]?\b`, nil},
-
-	// Visual
-	{"v-seadex", "gv", "SeaDex", `(?i)\b(seadex|best[\s._-]?release|alt[\s._-]?release)\b|ᴀʟᴛ ʀᴇʟᴇᴀsᴇ|ʙᴇsᴛ ʀᴇʟᴇᴀsᴇ`, nil},
-	{"v-hdr10p", "gv", "HDR10+", `(?i)\bhdr[\s._-]?10[\s._-]?(?:\+|plus|p)(?:\b|[^a-z0-9]|$)\b`, []string{`(?i)\b(dv|dovi|dolby[\s._-]?vision)\b`}},
-	{"v-hdr10", "gv", "HDR10", `(?i)\bhdr[\s._-]?10\b`, []string{`(?i)\b(dv|dovi|dolby[\s._-]?vision)\b`, `(?i)\bhdr[\s._-]?10[\s._-]?(?:\+|plus|p)(?:\b|[^a-z0-9]|$)\b`}},
-	{"v-hdr", "gv", "HDR", `(?i)\bhdr\b`, []string{`(?i)\b(dv|dovi|dolby[\s._-]?vision)\b`, `(?i)\bhdr[\s._-]?10\b`}},
-	{"v-sdr", "gv", "SDR", `(?i)\bsdr\b`, []string{`(?i)\b(hdr|hdr10|hdr10\+|dv|dovi|dolby[\s._-]?vision)\b`}},
-	{"v-imax-e", "gv", "IMAX Enhanced", `(?i)\bimax[\s._-]?enhanced\b`, nil},
-	{"v-imax", "gv", "IMAX", `(?i)\bimax\b`, []string{`(?i)\benhanced\b`}},
-	{"a-dv", "gv", "DV", `(?i)\b(dv|dovi|dolby[\s._-]?vision)\b`, nil},
-
-	// Audio
-	{"a-dtsx", "ga", "DTS:X", `(?i)\bdts[-_.: ]?x\b`, nil},
-	{"a-dtsma", "ga", "DTS-HD MA", `(?i)\bdts[-_. ]?(hd[-_. ]?)?ma\b`, []string{`(?i)\bdts[-_.: ]?x\b`}},
-	{"a-dtshd", "ga", "DTS-HD", `(?i)\bdts[-_. ]?hd\b`, []string{`(?i)\bdts[-_. ]?(hd[-_. ]?)?ma\b`, `(?i)\bdts[-_.: ]?x\b`}},
-	{"a-dts", "ga", "DTS", `(?i)\bdts\b`, []string{`(?i)\bdts[-_. ]?(hd|ma|xll|x)\b`}},
-	{"a-at", "ga", "Atmos", `(?i)\batmos\b`, nil},
-	{"a-th", "ga", "TrueHD", `(?i)\btrue[\s._-]?hd\b`, nil},
-	{"a-dp", "ga", "DD+", `(?i)\b(ddp|dd\+|eac-?3|e-?ac-?3)\b`, []string{`(?i)\btrue[\s._-]?hd\b`}},
-	{"a-dd", "ga", "DD", `(?i)\b(dd[25][. ][01]|ac-?3)\b`, []string{`(?i)\b(ddp|dd\+|eac-?3|e-?ac-?3)\b`, `(?i)\batmos\b`, `(?i)\btrue[\s._-]?hd\b`}},
-
-	// Channels
-	{"ch-71", "gc", "7.1", `(?i)(?:^|[^0-9])[7-8][. ][01](?:[^0-9]|$)\b`, nil},
-	{"ch-51", "gc", "5.1", `(?i)(?:^|[^0-9])5[. ][01](?:[^0-9]|$)\b`, []string{`(?i)(?:^|[^0-9])[7-8][. ][01](?:[^0-9]|$)\b`}},
-
-	// Streaming
-	{"s-nflx", "gs", "NETFLIX", `(?i)\b(nflx|netflix|nf)\b`, nil},
-	{"s-amzn", "gs", "PRIME VIDEO", `(?i)\b(amzn|amazon|prime[\s._-]?video)\b`, nil},
-	{"s-atvp", "gs", "APPLE TV+", `(?i)\b(atvp|apple[\s._-]?tv\+?|appletv)\b`, nil},
-	{"s-dsnp", "gs", "DISNEY+", `(?i)\b(dsnp|dsny|disney\+?|disney[\s._-]?plus)\b`, nil},
-	{"s-hmax", "gs", "HBO MAX", `(?i)(\b(hmax|hbomax|hbo[\s._-]?max)\b|(?:^|[\s._-])max([\s._-]|$))`, nil},
-	{"s-hulu", "gs", "HULU", `(?i)\bhulu\b`, nil},
-	{"s-pcok", "gs", "PEACOCK", `(?i)\b(pcok|peacock)\b`, nil},
-	{"s-pamp", "gs", "PARAMOUNT+", `(?i)\b(pmtp|pamp|paramount\+?|paramount[\s._-]?plus)\b`, nil},
-	{"s-croll", "gs", "CRUNCHYROLL", `(?i)\b(crunchyroll|crunch)\b`, nil},
-
-	// Encoder
-	{"s-h265", "ge", "H265 HEVC", `(?i)\b(x265|h[._-]?265|hevc)\b`, nil},
-	{"s-h264", "ge", "H264 AVC", `(?i)\b(x264|h[._-]?264|avc)\b`, nil},
-}
-
 var CompiledFilters []BadgeFilter
 var compileOnce sync.Once
 
-// Bounded in-memory caches to reduce GC pressure and allocations under high concurrency
 var (
 	parseCache   = make(map[string]*ParseResult)
 	parseCacheMu sync.RWMutex
@@ -261,10 +194,8 @@ func CompileFilters() {
 	})
 }
 
-// foldRune translates accented/diacritic characters to their base ASCII equivalents to preserve romanized titles cleanly.
 func foldRune(r rune) rune {
 	switch r {
-	// Lowercase accents
 	case 'à', 'á', 'â', 'ã', 'ä', 'å', 'ā', 'ă', 'ą', 'ǎ', 'ǻ', 'α':
 		return 'a'
 	case 'æ':
@@ -303,8 +234,6 @@ func foldRune(r rune) rune {
 		return 'y'
 	case 'ź', 'ż', 'ž':
 		return 'z'
-
-	// Uppercase accents
 	case 'À', 'Á', 'Â', 'Ã', 'Ä', 'Å', 'Ā', 'Ă', 'Ą', 'Ǎ', '?', 'Α':
 		return 'A'
 	case 'Æ':
@@ -375,8 +304,6 @@ func getQuality(res int) string {
 	}
 }
 
-// collapseSpaces replaces multiple consecutive whitespace characters with a single space.
-// Bypasses Strings.Fields slices allocation.
 func collapseSpaces(s string) string {
 	var b strings.Builder
 	b.Grow(len(s))
@@ -398,14 +325,11 @@ func collapseSpaces(s string) string {
 func SanitizeName(name string) string {
 	s := name
 
-	// 1. Replace non-breaking spaces (\u00a0, \u200b) to standard spaces
 	s = strings.ReplaceAll(s, "\u00a0", " ")
 	s = strings.ReplaceAll(s, "\u200b", " ")
 
-	// 2. Normalize episode patterns (e.g. S02 EP(15) -> S02E15)
 	s = normalizeEpisodePatterns(s)
 
-	// 3. Translate accented/diacritic characters to their base ASCII equivalents (Unicode Folding)
 	var b strings.Builder
 	b.Grow(len(s))
 	for _, r := range s {
@@ -413,7 +337,6 @@ func SanitizeName(name string) string {
 	}
 	s = b.String()
 
-	// 4. Remove non-ASCII scripts (Chinese, Cyrillic, Japanese, etc.)
 	b.Reset()
 	b.Grow(len(s))
 	for _, r := range s {
@@ -425,22 +348,15 @@ func SanitizeName(name string) string {
 	}
 	s = b.String()
 
-	// 5. Remove residual URLs/domains (e.g. www.BTHDTV.com)
 	s = urlRegex.ReplaceAllString(s, " ")
-
-	// 6. Remove residual empty/garbage brackets
 	s = bracketRegex.ReplaceAllString(s, " ")
-
-	// 7. Collapse spaces cleanly using our zero-allocation single-pass helper
 	s = collapseSpaces(s)
 	
-	// 8. Trim leftover leading/trailing punctuation
 	s = strings.TrimLeft(s, " .-_[]()/\\")
 	s = strings.TrimRight(s, " .-_[]()/\\")
 	return s
 }
 
-// parseEpisodeRange extracts episode start/end indexes from strings like EP (01-08) or 01 to 07 safely.
 func parseEpisodeRange(s string) (int, int, bool) {
 	matches := rangeRegex.FindAllStringSubmatch(s, -1)
 	for _, match := range matches {
@@ -448,7 +364,6 @@ func parseEpisodeRange(s string) (int, int, bool) {
 			start, err1 := strconv.Atoi(match[1])
 			end, err2 := strconv.Atoi(match[2])
 			if err1 == nil && err2 == nil {
-				// Guardrail to exclude matching 4-digit release years (e.g. 2001-2008)
 				if start < 1000 && end < 1000 && start <= end {
 					return start, end, true
 				}
@@ -458,7 +373,6 @@ func parseEpisodeRange(s string) (int, int, bool) {
 	return 0, 0, false
 }
 
-// truncateSeriesJunk trims season, episode, and complete-pack selectors and everything after them from search titles.
 func truncateSeriesJunk(s string) string {
 	for _, re := range truncationRegexes {
 		if loc := re.FindStringIndex(s); loc != nil {
@@ -468,7 +382,6 @@ func truncateSeriesJunk(s string) string {
 	return strings.Trim(s, " .-_[]()/\\")
 }
 
-// replacePunctuation maps custom punctuation, colons, and brackets into spaces cleanly.
 func replacePunctuation(r rune) rune {
 	if r == '(' || r == ')' || r == '[' || r == ']' || r == '-' || r == '+' || r == '/' || r == ':' || r == ',' || r == '&' || r == '.' || r == '*' || r == '!' || r == '?' {
 		return ' '
@@ -476,49 +389,32 @@ func replacePunctuation(r rune) rune {
 	return r
 }
 
-// filterTorrentNoise aggressively cleans a title string by removing common torrent junk words and patterns.
 func filterTorrentNoise(title string) string {
-	// First, ensure consistent spacing and convert to lowercase for uniform processing
 	title = collapseSpaces(strings.ToLower(title))
-	
-	// Remove common file size indicators (e.g., 2.6gb, 1.4gb, 6gb) using pre-compiled regex
 	title = fileSizeRegex.ReplaceAllString(title, " ")
-
-	// Remove decimal audio channel signatures (e.g. 5.1, 7.1, 2.0, ddp5.1) using pre-compiled regex
 	title = channelRegex.ReplaceAllString(title, " ")
-
-	// Punctuation-to-Space Isolation Sweep:
-	// Assembly-optimized strings.Map replaces runes with spaces without temporary heap allocations.
 	title = strings.Map(replacePunctuation, title)
 
-	// Split into words based on spaces
 	words := strings.Fields(title)
 	filteredWords := make([]string, 0, len(words))
 
 	for _, w := range words {
-		// Skip if it's a known junk word or stop word. 
 		if parserJunkWords[w] || parserStopWords[w] {
 			continue
 		}
-
-		// Dynamic check: Skip bitrate words ending with "kbps"
 		if strings.HasSuffix(w, "kbps") {
 			continue
 		}
-		// Dynamic check: Skip audio format words containing "ddp", "aac", "dts", "dolby", "atmos"
 		if strings.Contains(w, "ddp") || strings.Contains(w, "aac") || strings.Contains(w, "dts") || strings.Contains(w, "dolby") || strings.Contains(w, "atmos") {
 			continue
 		}
-		
 		filteredWords = append(filteredWords, w)
 	}
 
-	// Rejoin the filtered words and collapse any new multiple spaces introduced by filtering
 	return collapseSpaces(strings.Join(filteredWords, " "))
 }
 
 func RobustParseInfo(title string, fallbackSeason int) *ParseResult {
-	// Memory-efficient read cache hits check (mitigates R-002)
 	parseCacheMu.RLock()
 	if cached, ok := parseCache[title]; ok {
 		parseCacheMu.RUnlock()
@@ -527,8 +423,6 @@ func RobustParseInfo(title string, fallbackSeason int) *ParseResult {
 	parseCacheMu.RUnlock()
 
 	clean := SanitizeName(title)
-
-	// Pre-clean season/episode truncation junk from the search target before analysis
 	searchTitle := truncateSeriesJunk(clean)
 
 	info := rtp.ParseSeriesTitle(searchTitle)
@@ -578,12 +472,10 @@ func RobustParseInfo(title string, fallbackSeason int) *ParseResult {
 				Language: lang,
 				Quality:  getQuality(movie.Quality.Quality.Resolution),
 			}
-			// Apply aggressive cleaning for movie titles
 			res.Title = filterTorrentNoise(res.Title)
 		}
 	}
 
-	// Try custom episode range extraction if EpisodeStart and EpisodeEnd are not yet set
 	if res.EpisodeStart == 0 && res.EpisodeEnd == 0 {
 		if start, end, found := parseEpisodeRange(clean); found {
 			res.EpisodeStart = start
@@ -593,7 +485,6 @@ func RobustParseInfo(title string, fallbackSeason int) *ParseResult {
 		}
 	}
 
-	// If the season is still 0, try to parse the season number from the clean title
 	if res.Season == 0 {
 		if sMatch := seasonFolderRegex.FindStringSubmatch(clean); len(sMatch) >= 2 {
 			if sVal, err := strconv.Atoi(sMatch[1]); err == nil {
@@ -602,13 +493,11 @@ func RobustParseInfo(title string, fallbackSeason int) *ParseResult {
 		}
 	}
 	if res.Season == 0 {
-		res.Season = 1 // default season fallback
+		res.Season = 1
 	}
 
-	// Apply aggressive cleaning to the final extracted title
 	res.Title = filterTorrentNoise(res.Title)
 
-	// Save thread-safely to bounded cache to eliminate GC allocations on frequent hits (R-002)
 	parseCacheMu.Lock()
 	if len(parseCache) < 10000 {
 		parseCache[title] = res
@@ -1060,4 +949,52 @@ func ExtractFileSize(title string) string {
 		return strings.ToUpper(strings.ReplaceAll(match, " ", ""))
 	}
 	return ""
+}
+
+var filtersDef = []struct {
+	ID        string
+	GroupID   string
+	Name      string
+	Positive  string
+	Negatives []string
+}{
+	{"q-r", "gq", "Remux", `(?i)\bremux\b`, nil},
+	{"q-b", "gq", "BluRay", `(?i)\b(blu[-_. ]?ray|b[rd][-_. ]?rip)\b`, []string{`(?i)\bremux\b`}},
+	{"q-w", "gq", "WEB-DL", `(?i)\bweb[-_. ]?dl\b`, nil},
+	{"src-webrip", "gq", "WEBRip", `(?i)\bweb[-_. ]?rip\b`, nil},
+	{"src-hdtv", "gq", "HDTV", `(?i)\bhdtv\b`, nil},
+	{"src-hdrip", "gq", "HDRip", `(?i)\bhd[-_. ]?rip\b`, nil},
+	{"src-dvdrip", "gq", "DVDRip", `(?i)\bdvd[-_. ]?rip\b`, nil},
+	{"r-4k", "gr", "4K", `(?i)\b2160[pi]?\b|\b4k\b|\buhd\b`, []string{`(?i)\b1080[pi]?\b|\b720[pi]?\b`}},
+	{"r-1080", "gr", "1080p", `(?i)\b1080[pi]?\b`, nil},
+	{"r-720", "gr", "720p", `(?i)\b720[pi]?\b`, nil},
+	{"v-seadex", "gv", "SeaDex", `(?i)\b(seadex|best[\s._-]?release|alt[\s._-]?release)\b|ᴀʟᴛ ʀᴇʟᴇᴀsᴇ|ʙᴇsᴛ ʀᴇʟᴇᴀsᴇ`, nil},
+	{"v-hdr10p", "gv", "HDR10+", `(?i)\bhdr[\s._-]?10[\s._-]?(?:\+|plus|p)(?:\b|[^a-z0-9]|$)\b`, []string{`(?i)\b(dv|dovi|dolby[\s._-]?vision)\b`}},
+	{"v-hdr10", "gv", "HDR10", `(?i)\bhdr[\s._-]?10\b`, []string{`(?i)\b(dv|dovi|dolby[\s._-]?vision)\b`, `(?i)\bhdr[\s._-]?10[\s._-]?(?:\+|plus|p)(?:\b|[^a-z0-9]|$)\b`}},
+	{"v-hdr", "gv", "HDR", `(?i)\bhdr\b`, []string{`(?i)\b(dv|dovi|dolby[\s._-]?vision)\b`, `(?i)\bhdr[\s._-]?10\b`}},
+	{"v-sdr", "gv", "SDR", `(?i)\bsdr\b`, []string{`(?i)\b(hdr|hdr10|hdr10\+|dv|dovi|dolby[\s._-]?vision)\b`}},
+	{"v-imax-e", "gv", "IMAX Enhanced", `(?i)\bimax[\s._-]?enhanced\b`, nil},
+	{"v-imax", "gv", "IMAX", `(?i)\bimax\b`, []string{`(?i)\benhanced\b`}},
+	{"a-dv", "gv", "DV", `(?i)\b(dv|dovi|dolby[\s._-]?vision)\b`, nil},
+	{"a-dtsx", "ga", "DTS:X", `(?i)\bdts[-_.: ]?x\b`, nil},
+	{"a-dtsma", "ga", "DTS-HD MA", `(?i)\bdts[-_. ]?(hd[-_. ]?)?ma\b`, []string{`(?i)\bdts[-_.: ]?x\b`}},
+	{"a-dtshd", "ga", "DTS-HD", `(?i)\bdts[-_. ]?hd\b`, []string{`(?i)\bdts[-_. ]?(hd[-_. ]?)?ma\b`, `(?i)\bdts[-_.: ]?x\b`}},
+	{"a-dts", "ga", "DTS", `(?i)\bdts\b`, []string{`(?i)\bdts[-_. ]?(hd|ma|xll|x)\b`}},
+	{"a-at", "ga", "Atmos", `(?i)\batmos\b`, nil},
+	{"a-th", "ga", "TrueHD", `(?i)\btrue[\s._-]?hd\b`, nil},
+	{"a-dp", "ga", "DD+", `(?i)\b(ddp|dd\+|eac-?3|e-?ac-?3)\b`, []string{`(?i)\btrue[\s._-]?hd\b`}},
+	{"a-dd", "ga", "DD", `(?i)\b(dd[25][. ][01]|ac-?3)\b`, []string{`(?i)\b(ddp|dd\+|eac-?3|e-?ac-?3)\b`, `(?i)\batmos\b`, `(?i)\btrue[\s._-]?hd\b`}},
+	{"ch-71", "gc", "7.1", `(?i)(?:^|[^0-9])[7-8][. ][01](?:[^0-9]|$)\b`, nil},
+	{"ch-51", "gc", "5.1", `(?i)(?:^|[^0-9])5[. ][01](?:[^0-9]|$)\b`, []string{`(?i)(?:^|[^0-9])[7-8][. ][01](?:[^0-9]|$)\b`}},
+	{"s-nflx", "gs", "NETFLIX", `(?i)\b(nflx|netflix|nf)\b`, nil},
+	{"s-amzn", "gs", "PRIME VIDEO", `(?i)\b(amzn|amazon|prime[\s._-]?video)\b`, nil},
+	{"s-atvp", "gs", "APPLE TV+", `(?i)\b(atvp|apple[\s._-]?tv\+?|appletv)\b`, nil},
+	{"s-dsnp", "gs", "DISNEY+", `(?i)\b(dsnp|dsny|disney\+?|disney[\s._-]?plus)\b`, nil},
+	{"s-hmax", "gs", "HBO MAX", `(?i)(\b(hmax|hbomax|hbo[\s._-]?max)\b|(?:^|[\s._-])max([\s._-]|$))`, nil},
+	{"s-hulu", "gs", "HULU", `(?i)\bhulu\b`, nil},
+	{"s-pcok", "gs", "PEACOCK", `(?i)\b(pcok|peacock)\b`, nil},
+	{"s-pamp", "gs", "PARAMOUNT+", `(?i)\b(pmtp|pamp|paramount\+?|paramount[\s._-]?plus)\b`, nil},
+	{"s-croll", "gs", "CRUNCHYROLL", `(?i)\b(crunchyroll|crunch)\b`, nil},
+	{"s-h265", "ge", "H265 HEVC", `(?i)\b(x265|h[._-]?265|hevc)\b`, nil},
+	{"s-h264", "ge", "H264 AVC", `(?i)\b(x264|h[._-]?264|avc)\b`, nil},
 }

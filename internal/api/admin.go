@@ -1,5 +1,5 @@
-// Version: 1.0.9
-// Change log: Strictly restored base v1.0.8, initialized matchedTitles as make([]string, 0), removed duplicate debrid helpers, and appended missing admin handlers.
+// Version: 1.1.1
+// Change log: Integrated a write-time failsafe in linkOfficialHandler and autoMatchHandler to sanitize empty API-returned titles via the local parser.ParseTitle before database commit.
 
 package api
 
@@ -39,6 +39,7 @@ func RegisterAdminRoutes(r *gin.RouterGroup) {
 	r.GET("/failures", failuresHandler)
 	r.POST("/retry-parse", retryParseHandler)
 	r.GET("/recent", recentHandler)
+	r.GET("/cinemeta-search", cinemetaSearchHandler) // Parallel Cinemeta search catalog resolver
 }
 
 func healthHandler(c *gin.Context) {
@@ -209,18 +210,18 @@ func linkOfficialHandler(c *gin.Context) {
 		idOnly = parts[1]
 	}
 
+	// This now triggers Cinemeta-First logic inside metadata.go if the ID begins with "tt"
 	tmdbResult, errTmdb := tmdbClient.GetByID(idOnly, mediaType)
 	if errTmdb != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Failed to resolve official ID on TMDB: " + errTmdb.Error()})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Failed to resolve official ID on Cinemeta/TMDB: " + errTmdb.Error()})
 		return
 	}
 
 	errTx := database.DB.Transaction(func(tx *gorm.DB) error {
-		// GORM-safe Collision Pre-check: Verify if this IMDb ID is already registered under an alternative TMDB ID
+		// GORM-safe Collision Pre-check: Verify if this IMDb ID is already registered
 		if tmdbResult.ImdbID != "" {
 			var fetched []database.TmdbMetadata
 			if tx.Where("imdb_id = ?", tmdbResult.ImdbID).Limit(1).Find(&fetched).Error == nil && len(fetched) > 0 {
-				// Re-route local pointers to use the pre-existing record, completely avoiding UNIQUE constraints issues
 				tmdbResult.TmdbID = fetched[0].TmdbID
 			}
 		}
@@ -228,7 +229,6 @@ func linkOfficialHandler(c *gin.Context) {
 		// Save TmdbMetadata records
 		rawDataBytes, _ := json.Marshal(tmdbResult.RawData)
 		
-		// CRITICAL FIX: Convert empty IMDb string to explicit NULL pointer for SQLite unique constraint
 		var imdbIDPtr *string
 		if tmdbResult.ImdbID != "" {
 			val := tmdbResult.ImdbID
@@ -253,7 +253,19 @@ func linkOfficialHandler(c *gin.Context) {
 		}
 
 		t.TmdbID = &tmdbResult.TmdbID
-		t.CleanTitle = tmdbResult.Title // Overwrite old dirty crawled title with the clean TMDB standard
+		
+		// Write-Time Sanitation Failsafe:
+		// If Cinemeta details API returned an empty title (skeleton card), sanitize RawTitle on-the-fly.
+		cleanTitle := tmdbResult.Title
+		if cleanTitle == "" {
+			parsed := parser.ParseTitle(t.RawTitle)
+			if parsed != nil && parsed.Title != "" {
+				cleanTitle = parsed.Title
+			} else {
+				cleanTitle = t.RawTitle
+			}
+		}
+		t.CleanTitle = cleanTitle
 		t.Status = "linked"
 		t.Type = mediaType
 		if tmdbResult.Year > 0 {
@@ -330,7 +342,6 @@ func linkOfficialHandler(c *gin.Context) {
 }
 
 // autoMatchHandler handles manual trigger of auto-matching on selected thread IDs using clean title parsing.
-// Overhauled with bounded concurrency to process bulk queues cleanly under proxy timeouts.
 func autoMatchHandler(c *gin.Context) {
 	var body struct {
 		ThreadIDs []int `json:"threadIds"`
@@ -359,7 +370,7 @@ func autoMatchHandler(c *gin.Context) {
 	var results []matchTaskResult
 	var mu sync.Mutex
 
-	// Bounded Concurrency: limit parallel API requests to maximum 5 workers to protect TMDB rate limits
+	// Bounded Concurrency: limit parallel API requests to maximum 5 workers to protect rate limits
 	sem := make(chan struct{}, 5)
 	var wg sync.WaitGroup
 
@@ -423,7 +434,6 @@ func autoMatchHandler(c *gin.Context) {
 			if res.Result.ImdbID != "" {
 				var fetched []database.TmdbMetadata
 				if tx.Where("imdb_id = ?", res.Result.ImdbID).Limit(1).Find(&fetched).Error == nil && len(fetched) > 0 {
-					// Re-route local pointers to use the pre-existing record, completely avoiding UNIQUE constraints issues
 					res.Result.TmdbID = fetched[0].TmdbID
 				}
 			}
@@ -454,7 +464,18 @@ func autoMatchHandler(c *gin.Context) {
 			}
 
 			res.Thread.TmdbID = &res.Result.TmdbID
-			res.Thread.CleanTitle = res.Result.Title // Overwrite old dirty crawled title with the clean TMDB standard
+			
+			// Write-Time Sanitation Failsafe:
+			cleanTitle := res.Result.Title
+			if cleanTitle == "" {
+				parsed := parser.ParseTitle(res.Thread.RawTitle)
+				if parsed != nil && parsed.Title != "" {
+					cleanTitle = parsed.Title
+				} else {
+					cleanTitle = res.Thread.RawTitle
+				}
+			}
+			res.Thread.CleanTitle = cleanTitle
 			res.Thread.Status = "linked"
 			if res.Result.Year > 0 {
 				res.Thread.Year = &res.Result.Year
@@ -551,6 +572,25 @@ func autoMatchHandler(c *gin.Context) {
 		"failCount":     failCount,
 		"matchedTitles": matchedTitles,
 	})
+}
+
+func cinemetaSearchHandler(c *gin.Context) {
+	query := c.Query("query")
+	if query == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Query parameter is required"})
+		return
+	}
+
+	cfg := config.Load()
+	tmdbClient := metadata.NewTMDBClient(cfg)
+
+	items, err := tmdbClient.SearchCinemeta(query)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Cinemeta lookup failed: " + err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, items)
 }
 
 // ── Appended Restored Admin Handlers ──
