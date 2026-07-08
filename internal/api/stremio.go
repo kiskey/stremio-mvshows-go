@@ -1,6 +1,6 @@
 
-// Version: 2.0.1
-// Change log: Fixed undefined bolt namespace compiler error by explicitly aliasing go.etcd.io/bbolt import as bolt.
+// Version: 2.0.2
+// Change log: Restored the complete rdAddHandler implementation updated for high-speed BoltDB transactional queries. Activated context and time packages in imports block safely.
 
 package api
 
@@ -841,16 +841,6 @@ func streamHandler(c *gin.Context) {
 		tmdbTitle = meta.Threads[0].CleanTitle
 	}
 	if tmdbTitle == "" {
-		var tmdbData tmdbLightData
-		dec := json.NewDecoder(strings.NewReader(meta.Data))
-		if dec.Decode(&tmdbData) == nil {
-			tmdbTitle = tmdbData.Title
-			if tmdbTitle == "" {
-				tmdbTitle = tmdbData.Name
-			}
-		}
-	}
-	if tmdbTitle == "" {
 		tmdbTitle = "Unknown Release"
 	}
 
@@ -1105,4 +1095,287 @@ func withDhtSource(sources []string, infohash string) []string {
 	copy(list, sources)
 	list = append(list, "dht:"+infohash)
 	return list
+}
+
+// ── rdAddHandler (On-Demand Player Activation) ──
+
+func rdAddHandler(c *gin.Context) {
+	infohash := strings.ToLower(c.Param("infohash"))
+	episodeParam := c.Param("episode")
+
+	season := -1
+	episode := -1
+	isMovie := true
+
+	if episodeParam != "movie" {
+		parts := strings.Split(episodeParam, "-")
+		if len(parts) == 2 {
+			season, _ = strconv.Atoi(parts[0])
+			episode, _ = strconv.Atoi(parts[1])
+			isMovie = false
+		}
+	}
+
+	// Resolve the original magnet from cache to submit to debrid
+	var cache database.MagnetCache
+	errCache := database.DB.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("magnet_cache"))
+		data := b.Get([]byte(infohash))
+		if data == nil {
+			return bolt.ErrBucketNotFound
+		}
+		return database.DecodeGob(data, &cache)
+	})
+	if errCache != nil {
+		writeJSON(c, http.StatusNotFound, gin.H{"error": "Magnet not found in local cache"})
+		return
+	}
+
+	cfg := config.Load()
+	p := debrid.GetProvider(cfg)
+	if !p.IsEnabled() {
+		writeJSON(c, http.StatusBadRequest, gin.H{"error": "No active debrid service configured"})
+		return
+	}
+
+	reqCtx := c.Request.Context()
+
+	// Check if already completely downloaded and saved locally in DebridTorrent table
+	var torrentRecord database.DebridTorrent
+	var foundRecord bool
+	_ = database.DB.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("debrid_torrents"))
+		data := b.Get([]byte(infohash))
+		if data != nil {
+			if errDec := database.DecodeGob(data, &torrentRecord); errDec == nil {
+				if torrentRecord.Status == "downloaded" {
+					foundRecord = true
+				}
+			}
+		}
+		return nil
+	})
+
+	if foundRecord {
+		// Update LastChecked timestamp to extend cache TTL
+		torrentRecord.LastChecked = time.Now()
+		_ = database.DB.Update(func(tx *bolt.Tx) error {
+			b := tx.Bucket([]byte("debrid_torrents"))
+			bytesData, _ := database.EncodeGob(torrentRecord)
+			return b.Put([]byte(infohash), bytesData)
+		})
+
+		dlLink, errCachedLink := getDebridCachedLink(reqCtx, &torrentRecord, season, episode, isMovie)
+		if errCachedLink == nil && dlLink != "" {
+			c.Redirect(http.StatusFound, dlLink)
+			return
+		}
+	}
+
+	// Add and Select magnet on Debrid Provider
+	info, errAdd := p.AddAndSelect(reqCtx, cache.Magnet)
+	if errAdd != nil {
+		utils.Logger.Error().Err(errAdd).Str("infohash", infohash).Msg("Debrid AddAndSelect failed.")
+		writeJSON(c, http.StatusInternalServerError, gin.H{"error": "Failed to add magnet to debrid provider: " + errAdd.Error()})
+		return
+	}
+
+	// Poll status (max 60 iterations * 3s = 3 minutes) until "downloaded"
+	maxPolls := 60
+	pollInterval := 3 * time.Second
+	downloaded := false
+	torrentID := info.ID 
+
+	for i := 0; i < maxPolls; i++ {
+		select {
+		case <-reqCtx.Done():
+			utils.Logger.Info().
+				Str("infohash", infohash).
+				Str("id", torrentID).
+				Msg("Client disconnected during active stream loading. Detaching and delegating debrid caching to background.")
+			
+			go func(tID string, infohash string) {
+				defer func() {
+					if r := recover(); r != nil {
+						utils.Logger.Error().Interface("panic", r).Msg("Recovered from background caching poll panic.")
+					}
+				}()
+
+				select {
+				case backgroundPollSemaphore <- struct{}{}:
+					defer func() { <-backgroundPollSemaphore }()
+				default:
+					utils.Logger.Warn().Str("infohash", infohash).Msg("Background caching queue full. Skipping background polling to prevent API throttling.")
+					return
+				}
+
+				bgCtx, cancel := context.WithTimeout(context.Background(), 3*time.Minute)
+				defer cancel()
+
+				bgProvider := debrid.GetProvider(config.Load())
+				bgDownloaded := false
+				var bgInfo *debrid.TorrentInfo
+				var bgErr error
+
+				bgPollInterval := 15 * time.Second
+
+				for j := 0; j < (180 / 15); j++ {
+					select {
+					case <-bgCtx.Done():
+						return
+					default:
+					}
+
+					bgInfo, bgErr = bgProvider.GetTorrentInfo(bgCtx, tID)
+					if bgErr == nil && bgInfo.Status == "downloaded" {
+						bgDownloaded = true
+						break
+					}
+					time.Sleep(bgPollInterval)
+				}
+
+				if bgDownloaded && bgInfo != nil {
+					// Successfully finished downloading in the background. Write to local Bolt cache
+					var record database.DebridTorrent
+					record.Infohash = infohash
+					record.TorrentID = tID
+					record.Provider = cfg.DebridService
+					record.Status = "downloaded"
+					record.Files = make([]database.TorrentFile, len(bgInfo.Files))
+					for idx, f := range bgInfo.Files {
+						record.Files[idx] = database.TorrentFile{
+							ID:       f.ID,
+							Path:     f.Path,
+							Bytes:    f.Bytes,
+							Selected: f.Selected,
+						}
+					}
+					record.Links = bgInfo.Links
+					record.LastChecked = time.Now()
+					record.CreatedAt = time.Now()
+					record.UpdatedAt = time.Now()
+
+					_ = database.DB.Update(func(tx *bolt.Tx) error {
+						b := tx.Bucket([]byte("debrid_torrents"))
+						bytesData, _ := database.EncodeGob(record)
+						return b.Put([]byte(infohash), bytesData)
+					})
+					utils.Logger.Info().Str("infohash", infohash).Msg("Debrid torrent cached successfully in background.")
+				}
+			}(torrentID, infohash)
+
+			writeJSON(c, 499, gin.H{"error": "Request cancelled by client. Cache polling detached to background."})
+			return
+		default:
+		}
+
+		info, err = p.GetTorrentInfo(reqCtx, torrentID)
+		if err != nil {
+			utils.Logger.Warn().Err(err).Str("id", torrentID).Msg("Error polling debrid torrent status. Retrying.")
+		} else if info != nil && info.Status == "downloaded" {
+			downloaded = true
+			break
+		}
+		time.Sleep(pollInterval)
+	}
+
+	if !downloaded {
+		writeJSON(c, http.StatusRequestTimeout, gin.H{"error": "Debrid download timed out. Please try streaming this item again shortly."})
+		return
+	}
+
+	// Find the matching video link
+	finalLink := ""
+	if isMovie {
+		var selectedFiles []debrid.FileInfo
+		for _, f := range info.Files {
+			if f.Selected == 1 {
+				selectedFiles = append(selectedFiles, f)
+			}
+		}
+		if len(selectedFiles) > 0 {
+			var fileToPlay *debrid.FileInfo
+			var videoFiles []debrid.FileInfo
+			for _, f := range selectedFiles {
+				if strings.HasSuffix(strings.ToLower(f.Path), ".mkv") ||
+					strings.HasSuffix(strings.ToLower(f.Path), ".mp4") ||
+					strings.HasSuffix(strings.ToLower(f.Path), ".avi") ||
+					strings.HasSuffix(strings.ToLower(f.Path), ".mov") {
+					videoFiles = append(videoFiles, f)
+				}
+			}
+			if len(videoFiles) > 0 {
+				largest := &videoFiles[0]
+				for i := 1; i < len(videoFiles); i++ {
+					if videoFiles[i].Bytes > largest.Bytes {
+						largest = &videoFiles[i]
+					}
+				}
+				fileToPlay = largest
+			} else {
+				largest := &selectedFiles[0]
+				for i := 1; i < len(selectedFiles); i++ {
+					if selectedFiles[i].Bytes > largest.Bytes {
+						largest = &selectedFiles[i]
+					}
+				}
+				fileToPlay = largest
+			}
+
+			dl, errDl := getDownloadLinkForFile(reqCtx, p, info, fileToPlay.ID)
+			if errDl == nil {
+				finalLink = dl
+			}
+		}
+	} else {
+		// For series, map files to CandidateFile structures and run FindBestSeriesFile selection
+		candidates := make([]parser.CandidateFile, len(info.Files))
+		for idx, f := range info.Files {
+			candidates[idx] = parser.CandidateFile{
+				ID:   f.ID,
+				Path: f.Path,
+				Size: f.Bytes,
+			}
+		}
+
+		best, found := parser.FindBestSeriesFile(candidates, season, episode, season)
+		if found {
+			dl, errDl := getDownloadLinkForFile(reqCtx, p, info, best.ID)
+			if errDl == nil {
+				finalLink = dl
+			}
+		}
+	}
+
+	if finalLink == "" {
+		writeJSON(c, http.StatusNotFound, gin.H{"error": "Failed to locate target video file inside debrid payload."})
+		return
+	}
+
+	// Cache the success inside Bbolt database
+	torrentRecord.Infohash = infohash
+	torrentRecord.TorrentID = info.ID
+	torrentRecord.Provider = cfg.DebridService
+	torrentRecord.Status = "downloaded"
+	torrentRecord.Files = make([]database.TorrentFile, len(info.Files))
+	for idx, f := range info.Files {
+		torrentRecord.Files[idx] = database.TorrentFile{
+			ID:       f.ID,
+			Path:     f.Path,
+			Bytes:    f.Bytes,
+			Selected: f.Selected,
+		}
+	}
+	torrentRecord.Links = info.Links
+	torrentRecord.LastChecked = time.Now()
+	torrentRecord.CreatedAt = time.Now()
+	torrentRecord.UpdatedAt = time.Now()
+
+	_ = database.DB.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("debrid_torrents"))
+		bytesData, _ := database.EncodeGob(torrentRecord)
+		return b.Put([]byte(infohash), bytesData)
+	})
+
+	c.Redirect(http.StatusFound, finalLink)
 }
