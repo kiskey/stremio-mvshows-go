@@ -1,6 +1,6 @@
 
-// Version: 1.1.3
-// Change log: Configured orchestrator sync transactions to populate dual-indexing keys and thread pointer maps natively during crawls.
+// Version: 1.1.4
+// Change log: Synced transaction schemas with Connection.go to maintain structural alignment. Removed GORM constraints, routing writes natively through database write targets.
 
 package orchestrator
 
