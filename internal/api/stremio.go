@@ -1,6 +1,6 @@
 
-// Version: 2.0.3
-// Change log: Restored missing getDebridCachedLink and getDownloadLinkForFile supporting methods at the bottom of the file to fix compiler undefined errors.
+// Version: 2.0.4
+// Change log: Removed the downloaded state tracker variable to resolve unused variable compilation errors. Polling success is evaluated directly against the resulting debrid torrent info structures.
 
 package api
 
@@ -1116,7 +1116,7 @@ func rdAddHandler(c *gin.Context) {
 		}
 	}
 
-	// Resolve the original magnet from cache to submit to debrid
+	// Resolve original magnet from cache database
 	var cache database.MagnetCache
 	errCache := database.DB.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte("magnet_cache"))
@@ -1183,7 +1183,6 @@ func rdAddHandler(c *gin.Context) {
 	// Poll status (max 60 iterations * 3s = 3 minutes) until "downloaded"
 	maxPolls := 60
 	pollInterval := 3 * time.Second
-	downloaded := false
 	torrentID := info.ID 
 
 	for i := 0; i < maxPolls; i++ {
@@ -1274,13 +1273,12 @@ func rdAddHandler(c *gin.Context) {
 		if errPoll != nil {
 			utils.Logger.Warn().Err(errPoll).Str("id", torrentID).Msg("Error polling debrid torrent status. Retrying.")
 		} else if info != nil && info.Status == "downloaded" {
-			downloaded := true
 			break
 		}
 		time.Sleep(pollInterval)
 	}
 
-	if !downloaded {
+	if info == nil || info.Status != "downloaded" {
 		writeJSON(c, http.StatusRequestTimeout, gin.H{"error": "Debrid download timed out. Please try streaming this item again shortly."})
 		return
 	}
