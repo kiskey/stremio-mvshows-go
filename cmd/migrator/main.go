@@ -1,6 +1,6 @@
 
-// Version: 2.0.0
-// Description: Offline database conversion utility extracting records sequentially from GORM SQLite, serialization wrapping, and building clean chronological descending indexing arrays inside Bbolt Buckets.
+// Version: 2.0.1
+// Change log: Fixed undefined bolt namespace compiler error by explicitly aliasing go.etcd.io/bbolt import as bolt. Normalized Sqlite variable loops to prevent compilation crashes during database transition.
 
 package main
 
@@ -14,7 +14,7 @@ import (
 
 	"github.com/glebarez/sqlite"
 	"github.com/kiskey/stremio-mvshows-go/internal/database"
-	"go.etcd.io/bbolt"
+	bolt "go.etcd.io/bbolt"
 	"gorm.io/gorm"
 )
 
@@ -140,8 +140,6 @@ func main() {
 	}
 	defer boltDB.Close()
 
-	// ── Sequential Table Extractor and Writer Transactions ──
-
 	// A. Process threads and generate fast-catalog indexes
 	log.Println("Migrating threads and compiling index caches...")
 	var sqliteThreads []SqliteThread
@@ -172,7 +170,6 @@ func main() {
 				bytesData, _ := database.EncodeGob(thread)
 				_ = threadBucket.Put([]byte(thread.ThreadHash), bytesData)
 
-				// Pre-Sorted Inverse Timestamps index keys
 				if thread.Status == "linked" && thread.Catalog != "" {
 					postedTime := time.Now()
 					if thread.PostedAt != nil {
@@ -222,7 +219,6 @@ func main() {
 	if err := sqlDB.Find(&sqliteStreams).Error; err == nil {
 		log.Printf("Loaded %d stream records.\n", len(sqliteStreams))
 		
-		// BoltDB stream optimization: group items in memory to write them as arrays
 		byTMDB := make(map[string][]database.Stream)
 		for _, ss := range sqliteStreams {
 			stream := database.Stream{
@@ -257,27 +253,9 @@ func main() {
 	log.Println("Migrating parsing failures records...")
 	var sqliteFailed []SqliteFailedThread
 	if err := sqlDB.Find(&sqliteFailed).Error; err == nil {
-		errTx := boltDB.Update(func(tx *bolt.Tx) error {
-			bucket := tx.Bucket([]byte("failed_threads"))
-			for _, f := range failures { // Wait! Typo in loop variable name mapping, let's keep it safe:
-				// Map iterating list cleanly
-			}
-			// Map failed records
-			for _, f := range failures {
-				var ft database.FailedThread
-				ft.ThreadHash = f.ThreadHash
-				ft.RawTitle = f.RawTitle
-				ft.Reason = f.Reason
-				ft.LastAttempt = f.LastAttempt
-				bytesData, _ := database.EncodeGob(ft)
-				_ = b.Put([]byte(ft.ThreadHash), bytesData)
-			}
-			return nil
-		})
-		// Simple direct mapping
 		_ = boltDB.Update(func(tx *bolt.Tx) error {
 			b := tx.Bucket([]byte("failed_threads"))
-			for _, f := range failures {
+			for _, f := range sqliteFailed {
 				ft := database.FailedThread{
 					ThreadHash:  f.ThreadHash,
 					RawTitle:    f.RawTitle,
@@ -292,11 +270,12 @@ func main() {
 	}
 
 	// E. Process debrid_torrents
-	var debridTorrents []DebridTorrent
-	if err := sqliteDB.Find(&debridTorrents).Error; err == nil {
+	log.Println("Migrating debrid torrents download registers...")
+	var sqliteDebridTorrents []SqliteDebridTorrent
+	if err := sqlDB.Find(&sqliteDebridTorrents).Error; err == nil {
 		_ = boltDB.Update(func(tx *bolt.Tx) error {
 			b := tx.Bucket([]byte("debrid_torrents"))
-			for _, dt := range debridTorrents {
+			for _, dt := range sqliteDebridTorrents {
 				var files []database.TorrentFile
 				for _, f := range dt.Files {
 					files = append(files, database.TorrentFile{
@@ -312,7 +291,7 @@ func main() {
 					Provider:    dt.Provider,
 					Status:      dt.Status,
 					Files:       files,
-					Links:       dt.Links,
+					Links:       []string(dt.Links),
 					LastChecked: dt.LastChecked,
 					CreatedAt:   dt.CreatedAt,
 					UpdatedAt:   dt.UpdatedAt,
@@ -325,11 +304,11 @@ func main() {
 	}
 
 	// F. Process locks
-	var locks []DebridCacheLock
-	if err := sqliteDB.Find(&locks).Error == nil {
+	var sqliteLocks []SqliteDebridCacheLock
+	if err := sqlDB.Find(&sqliteLocks).Error; err == nil {
 		_ = boltDB.Update(func(tx *bolt.Tx) error {
 			b := tx.Bucket([]byte("debrid_cache_locks"))
-			for _, l := range locks {
+			for _, l := range sqliteLocks {
 				lock := database.DebridCacheLock{Infohash: l.Infohash, CreatedAt: l.CreatedAt}
 				bytesData, _ := database.EncodeGob(lock)
 				_ = b.Put([]byte(l.Infohash), bytesData)
@@ -339,11 +318,11 @@ func main() {
 	}
 
 	// G. Process magnet_cache
-	var magnets []MagnetCache
-	if err := sqliteDB.Find(&magnets).Error == nil {
+	var sqliteMagnets []SqliteMagnetCache
+	if err := sqlDB.Find(&sqliteMagnets).Error; err == nil {
 		_ = boltDB.Update(func(tx *bolt.Tx) error {
 			b := tx.Bucket([]byte("magnet_cache"))
-			for _, mc := range magnets {
+			for _, mc := range sqliteMagnets {
 				r := database.MagnetCache{Infohash: mc.Infohash, Magnet: mc.Magnet, CreatedAt: mc.CreatedAt}
 				bytesData, _ := database.EncodeGob(r)
 				_ = b.Put([]byte(mc.Infohash), bytesData)
@@ -353,11 +332,11 @@ func main() {
 	}
 
 	// H. Process torbox_id_map
-	var torboxMap []TorboxIdMap
-	if err := sqliteDB.Find(&torboxMap).Error == nil {
+	var sqliteTorboxMap []SqliteTorboxIdMap
+	if err := sqlDB.Find(&sqliteTorboxMap).Error; err == nil {
 		_ = boltDB.Update(func(tx *bolt.Tx) error {
 			b := tx.Bucket([]byte("torbox_id_map"))
-			for _, m := range torboxMap {
+			for _, m := range sqliteTorboxMap {
 				r := database.TorboxIdMap{TorrentID: m.TorrentID, Hash: m.Hash}
 				bytesData, _ := database.EncodeGob(r)
 				_ = b.Put([]byte(fmt.Sprintf("%d", m.TorrentID)), bytesData)
@@ -371,8 +350,8 @@ func main() {
 	log.Println("► DIAGNOSTIC INTEGRITY VERIFICATION REPORT")
 	
 	var sqliteThreadCount, sqliteMetaCount int64
-	_ = sqliteDB.Model(&SqliteThread{}).Count(&sqliteThreadCount)
-	_ = sqliteDB.Model(&SqliteTmdbMetadata{}).Count(&sqliteMetaCount)
+	_ = sqlDB.Model(&SqliteThread{}).Count(&sqliteThreadCount)
+	_ = sqlDB.Model(&SqliteTmdbMetadata{}).Count(&sqliteMetaCount)
 
 	var boltThreadCount, boltMetaCount, boltIndexCount int
 	_ = boltDB.View(func(tx *bolt.Tx) error {
