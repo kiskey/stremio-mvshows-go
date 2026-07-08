@@ -1,6 +1,5 @@
-
-// Version: 1.2.7
-// Change log: Removed upfront debrid_torrents pre-fetching queries and sequential unrestricting loops inside streamHandler. All streams resolve on-demand using standard /rd-add/ paths for peak performance.
+// Version: 1.2.8
+// Change log: Updated ParseTitle calls inside stremio.go handlers to pass context-aware t.Type to ensure titles starting with numbers are matched correctly.
 
 package api
 
@@ -392,7 +391,7 @@ func catalogHandler(c *gin.Context) {
 		if title == "" {
 			// Read-Time Sanitization Failsafe:
 			// If CleanTitle is empty, parse and clean the RawTitle on-the-fly to prevent raw torrent tag leaks.
-			parsed := parser.ParseTitle(t.RawTitle)
+			parsed := parser.ParseTitle(t.RawTitle, t.Type)
 			if parsed != nil && parsed.Title != "" {
 				title = parsed.Title
 			} else {
