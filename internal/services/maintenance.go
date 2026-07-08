@@ -1,6 +1,6 @@
 
-// Version: 2.0.0
-// Change log: Removed relational SQLite Exec PRAGMA commands, introducing BoltDB-native in-place file system compaction (defragmentation) to minimize storage footprint.
+// Version: 2.0.1
+// Change log: Fixed undefined bolt namespace compiler error by explicitly aliasing go.etcd.io/bbolt import as bolt.
 
 package maintenance
 
@@ -11,7 +11,7 @@ import (
 	"github.com/kiskey/stremio-mvshows-go/internal/config"
 	"github.com/kiskey/stremio-mvshows-go/internal/database"
 	"github.com/kiskey/stremio-mvshows-go/internal/utils"
-	"go.etcd.io/bbolt"
+	bolt "go.etcd.io/bbolt"
 )
 
 // PerformMaintenance removes expired cache keys and runs memory-mapped file compaction.
@@ -73,7 +73,7 @@ func PerformMaintenance() {
 	// Safely close connection to swap files
 	_ = database.DB.Close()
 
-	if errRename := os.Rename(tempPath, dbPath); errDec := os.Rename(tempPath, dbPath); errRename != nil {
+	if errRename := os.Rename(tempPath, dbPath); errRename != nil {
 		utils.Logger.Error().Err(errRename).Msg("Failed to swap compacted file. Attempting recovery...")
 	} else {
 		utils.Logger.Info().Msg("Compaction completed successfully.")
