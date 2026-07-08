@@ -1,6 +1,6 @@
 
-// Version: 1.0.9
-// Change log: Removed the erroneous duplicate assignment "thread.TmdbID" and cleaned up the unused "encoding/json" import to resolve build errors.
+// Version: 1.1.0
+// Change log: Updated processThread to supply context-aware (thread.Type) parameter to parser.ParseTitle, resolving misclassifications of leading numbers.
 
 package orchestrator
 
@@ -170,14 +170,8 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 		_ = database.DB.Where("tmdb_id = ?", existing.TmdbID).Delete(&database.Stream{})
 	}
 
-	// 2. Parse the RawTitle to clean it up
-	parsed := parser.ParseTitle(thread.RawTitle)
-	if parsed == nil || parsed.Title != "" {
-		// If parsed is nil or parsed has a title, we continue.
-	} else {
-		_ = database.LogFailedThread(thread.ThreadHash, thread.RawTitle, "Title parsing failed critically", nil)
-		return
-	}
+	// 2. Parse the RawTitle to clean it up with context-aware logic
+	parsed := parser.ParseTitle(thread.RawTitle, thread.Type)
 	if parsed == nil || parsed.Title == "" {
 		_ = database.LogFailedThread(thread.ThreadHash, thread.RawTitle, "Title parsing failed critically", nil)
 		return
@@ -250,7 +244,7 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 		// If Cinemeta details API returned an empty title (skeleton card), sanitize RawTitle on-the-fly.
 		cleanTitle := tmdbResult.Title
 		if cleanTitle == "" {
-			parsed := parser.ParseTitle(thread.RawTitle)
+			parsed := parser.ParseTitle(thread.RawTitle, thread.Type)
 			if parsed != nil && parsed.Title != "" {
 				cleanTitle = parsed.Title
 			} else {
@@ -298,7 +292,7 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 			errCache := tx.Clauses(clause.OnConflict{
 				Columns:   []clause.Column{{Name: "infohash"}},
 				UpdateAll: true,
-			}).Create(&cacheRecord).Error
+			}).Create(&cacheRecord)
 			if errCache != nil {
 				return errCache
 			}
@@ -329,7 +323,6 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 					stream.Episode = &startVal
 					stream.EpisodeEnd = &endVal
 				} else {
-					// Full Season Pack (Episode fields remain NULL to capture any target match)
 					stream.Episode = nil
 					stream.EpisodeEnd = nil
 				}
