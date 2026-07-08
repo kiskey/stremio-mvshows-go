@@ -1,6 +1,6 @@
 
-// Version: 1.1.2
-// Change log: Refactored database logic from GORM to high-performance BoltDB transactional bucket queries to resolve build errors and ensure functional parity.
+// Version: 1.1.3
+// Change log: Configured orchestrator sync transactions to populate dual-indexing keys and thread pointer maps natively during crawls.
 
 package orchestrator
 
@@ -88,7 +88,6 @@ func UpdateDashboardCache() {
 
 // RunFullWorkflow triggers the full sequence: scrape, parse, TMDB lookup, and relational linking.
 func RunFullWorkflow(cfg *config.Config) {
-	// Defensive panic recovery to prevent unhandled background panics from crashing the entire process
 	defer func() {
 		if r := recover(); r != nil {
 			utils.Logger.Error().Interface("panic", r).Msg("Recovered from panic inside RunFullWorkflow background thread.")
@@ -118,30 +117,14 @@ func RunFullWorkflow(cfg *config.Config) {
 
 	utils.Logger.Info().Msg("Starting full crawling and processing workflow...")
 
-	// Option 1 & Option 3: Check database-seeding state to determine the dynamic crawling mode
 	incremental := false
 	if database.DB != nil {
-		var count int
+		var count int64
 		_ = database.DB.View(func(tx *bolt.Tx) error {
-			b := tx.Bucket([]byte("threads"))
-			if b != nil {
-				c := b.Cursor()
-				for k, v := c.First(); k != nil; k, v = c.Next() {
-					var t database.Thread
-					if err := database.DecodeGob(v, &t); err == nil {
-						if t.Status == "linked" {
-							count++
-							if count > 50 {
-								break
-							}
-						}
-					}
-				}
-			}
+			b := tx.Bucket([]byte("catalog_index"))
+			count = int64(b.Stats().KeyN)
 			return nil
 		})
-
-		// If database already contains more than 50 seeded records, safely transition to fast incremental sync
 		if count > 50 && !cfg.ForceFullScrape {
 			incremental = true
 		}
@@ -176,7 +159,6 @@ func RunFullWorkflow(cfg *config.Config) {
 }
 
 func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient, incremental bool) {
-	// Defensive panic recovery for individual thread processing
 	defer func() {
 		if r := recover(); r != nil {
 			utils.Logger.Error().
@@ -186,41 +168,52 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 		}
 	}()
 
-	// 1. Check existing thread by raw_title using Bolt point lookup
-	existing, err := database.FindThreadByRawTitle(nil, thread.RawTitle)
-	if err == nil && existing != nil {
-		// If thread hash matches exactly, nothing changed.
+	var existing database.Thread
+	var hasExisting bool
+	_ = database.DB.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("threads"))
+		c := b.Cursor()
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			var t database.Thread
+			if err := database.DecodeGob(v, &t); err == nil {
+				if t.RawTitle == thread.RawTitle {
+					existing = t
+					hasExisting = true
+					break
+				}
+			}
+		}
+		return nil
+	})
+
+	if hasExisting {
 		if existing.ThreadHash == thread.ThreadHash {
-			// Self-Healing Rule: If the thread is in "pending_tmdb" status, only skip it during 
-			// lightweight incremental runs.
 			if existing.Status == "pending_tmdb" && !incremental {
-				// Retry matching in background during full scraper runs
+				// Retry
 			} else {
 				return
 			}
 		}
 
-		// If thread hash changed, delete the old stream relationships to prevent duplicates
 		if existing.TmdbID != nil {
 			_ = database.DB.Update(func(tx *bolt.Tx) error {
-				return tx.Bucket([]byte("streams")).Delete([]byte(*existing.TmdbID))
+				_ = tx.Bucket([]byte("streams")).Delete([]byte(*existing.TmdbID))
+				_ = tx.Bucket([]byte("tmdb_thread_index")).Delete([]byte(*existing.TmdbID))
+				return nil
 			})
 		}
 	}
 
-	// 2. Parse the RawTitle to clean it up with context-aware logic
 	parsed := parser.ParseTitle(thread.RawTitle, thread.Type)
 	if parsed == nil || parsed.Title == "" {
 		_ = database.LogFailedThread(nil, thread.ThreadHash, thread.RawTitle, "Title parsing failed critically")
 		return
 	}
 
-	// 3. TMDB lookup
 	tmdbResult, errTmdb := tmdbClient.Search(parsed.Title, parsed.Year, thread.Type)
 	if errTmdb != nil {
 		utils.Logger.Warn().Err(errTmdb).Str("title", parsed.Title).Msg("TMDB lookup failed or score below threshold. Storing as pending_tmdb.")
 
-		// Save as pending_tmdb for admin rescue panel
 		pending := &database.Thread{
 			ThreadHash:        thread.ThreadHash,
 			RawTitle:          thread.RawTitle,
@@ -248,7 +241,6 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 		metaBucket := tx.Bucket([]byte("tmdb_metadata"))
 		magnetBucket := tx.Bucket([]byte("magnet_cache"))
 
-		// Check if this IMDb ID is already registered under an alternative TMDB ID
 		if tmdbResult.ImdbID != "" {
 			c := metaBucket.Cursor()
 			for k, v := c.First(); k != nil; k, v = c.Next() {
@@ -262,9 +254,6 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 			}
 		}
 
-		// ZERO-STALE METADATA OPTIMIZATION: Discard massive external API JSON strings 
-		// and save a lightweight empty structure "{}" as placeholder.
-		// Cinemeta dynamically renders descriptions, artwork, and reviews on request.
 		rawDataBytes := []byte("{}")
 		
 		var imdbIDPtr *string
@@ -293,8 +282,11 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 			return err
 		}
 
-		// Write-Time Sanitation Failsafe:
-		// If Cinemeta details API returned an empty title (skeleton card), sanitize RawTitle on-the-fly.
+		// Pre-populate dynamic secondary lookup indexing for immediate pointer resolves
+		if tmdbMetadata.ImdbID != nil && *tmdbMetadata.ImdbID != "" {
+			_ = metaBucket.Put([]byte(*tmdbMetadata.ImdbID), metaBytes)
+		}
+
 		cleanTitle := tmdbResult.Title
 		if cleanTitle == "" {
 			parsed := parser.ParseTitle(thread.RawTitle, thread.Type)
@@ -305,7 +297,6 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 			}
 		}
 
-		// Create Thread record
 		linkedThread := &database.Thread{
 			ThreadHash: thread.ThreadHash,
 			RawTitle:   thread.RawTitle,
@@ -328,18 +319,15 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 			return err
 		}
 
-		// Cache hot properties outside loop to avoid redundant heap string copies on every magnet
 		isSeries := strings.ToLower(thread.Type) == "series"
 		var streams []database.Stream
 
-		// Extract, construct, and upsert each magnet URI into a stream mapping
 		for _, magnet := range thread.MagnetURIs {
 			parsedMagnet := parser.ParseMagnet(magnet, thread.Type)
 			if parsedMagnet == nil {
 				continue
 			}
 
-			// Store magnet mapping in Cache so on-demand RD lookup can find it later by infohash
 			cacheRecord := database.MagnetCache{
 				Infohash:  parsedMagnet.Infohash,
 				Magnet:    magnet,
@@ -348,7 +336,6 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 			cacheBytes, _ := database.EncodeGob(cacheRecord)
 			_ = magnetBucket.Put([]byte(parsedMagnet.Infohash), cacheBytes)
 
-			// Generate stream
 			stream := database.Stream{
 				TmdbID:    tmdbResult.TmdbID,
 				Infohash:  parsedMagnet.Infohash,
@@ -387,7 +374,6 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 			}
 		}
 
-		// Clean up any old error parsing logs
 		_ = database.DeleteFailedThread(tx, thread.ThreadHash)
 		return nil
 	})
