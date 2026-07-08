@@ -177,6 +177,7 @@ func createExplicitTables(db *gorm.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_threads_posted_at ON threads(posted_at);`,
 		`CREATE INDEX IF NOT EXISTS idx_threads_catalog ON threads(catalog);`,
 		`CREATE INDEX IF NOT EXISTS idx_threads_last_seen ON threads(last_seen);`,
+		`CREATE INDEX IF NOT EXISTS idx_threads_catalog_status_type_posted ON threads(catalog, status, type, posted_at DESC);`,
 
 		`CREATE TABLE IF NOT EXISTS streams (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
