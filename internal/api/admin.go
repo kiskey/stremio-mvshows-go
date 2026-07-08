@@ -1,5 +1,6 @@
-// Version: 1.1.3
-// Change log: Removed unused "encoding/json" import to satisfy the strict Go compiler and ensure successful compilation.
+
+// Version: 1.1.4
+// Change log: Updated manual linking endpoints to propagate the context-aware type to ParseTitle, ensuring correct title resolving.
 
 package api
 
@@ -258,7 +259,7 @@ func linkOfficialHandler(c *gin.Context) {
 		// If Cinemeta details API returned an empty title (skeleton card), sanitize RawTitle on-the-fly.
 		cleanTitle := tmdbResult.Title
 		if cleanTitle == "" {
-			parsed := parser.ParseTitle(t.RawTitle)
+			parsed := parser.ParseTitle(t.RawTitle, t.Type)
 			if parsed != nil && parsed.Title != "" {
 				cleanTitle = parsed.Title
 			} else {
@@ -394,7 +395,7 @@ func autoMatchHandler(c *gin.Context) {
 			}
 
 			// Clean the title using our newly optimized parser logic
-			parsed := parser.ParseTitle(t.RawTitle)
+			parsed := parser.ParseTitle(t.RawTitle, t.Type)
 			if parsed == nil || parsed.Title == "" {
 				mu.Lock()
 				failCount++
@@ -470,7 +471,7 @@ func autoMatchHandler(c *gin.Context) {
 			// Write-Time Sanitation Failsafe:
 			cleanTitle := res.Result.Title
 			if cleanTitle == "" {
-				parsed := parser.ParseTitle(res.Thread.RawTitle)
+				parsed := parser.ParseTitle(res.Thread.RawTitle, res.Thread.Type)
 				if parsed != nil && parsed.Title != "" {
 					cleanTitle = parsed.Title
 				} else {
