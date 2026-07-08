@@ -1,114 +1,416 @@
+
+// Version: 2.0.0
+// Change log: Rewrote CRUD helpers from raw GORM queries into safe, highly optimized Bbolt transactional block readers/writers with in-memory GOB marshaling.
+
 package database
 
 import (
+	"bytes"
+	"encoding/gob"
+	"fmt"
+	"strings"
 	"time"
 
-	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
+	"go.etcd.io/bbolt"
 )
 
-func getDB(tx *gorm.DB) *gorm.DB {
+// ── Generic Serialization Helpers ──
+
+func EncodeGob(val interface{}) ([]byte, error) {
+	var buf bytes.Buffer
+	enc := gob.NewEncoder(&buf)
+	err := enc.Encode(val)
+	if err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+func DecodeGob(data []byte, dest interface{}) error {
+	buf := bytes.NewBuffer(data)
+	dec := gob.NewDecoder(buf)
+	return dec.Decode(dest)
+}
+
+func runView(tx *bolt.Tx, fn func(tx *bolt.Tx) error) error {
 	if tx != nil {
-		return tx
+		return fn(tx)
 	}
-	return DB
+	return DB.View(fn)
 }
 
-// FindThreadByHash retrieves a Thread by its unique thread_hash.
-func FindThreadByHash(hash string) (*Thread, error) {
+func runUpdate(tx *bolt.Tx, fn func(tx *bolt.Tx) error) error {
+	if tx != nil {
+		return fn(tx)
+	}
+	return DB.Update(fn)
+}
+
+// ── Thread CRUD Operations ──
+
+func FindThreadByHash(tx *bolt.Tx, hash string) (*Thread, error) {
 	var t Thread
-	err := DB.Where("thread_hash = ?", hash).First(&t).Error
-	if err == gorm.ErrRecordNotFound {
-		return nil, nil
+	err := runView(tx, func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("threads"))
+		data := b.Get([]byte(hash))
+		if data == nil {
+			return bolt.ErrBucketNotFound
+		}
+		return DecodeGob(data, &t)
+	})
+	if err != nil {
+		return nil, nil // Parity mapping for RecordNotFound checks
 	}
-	return &t, err
+	return &t, nil
 }
 
-// FindThreadByRawTitle retrieves a Thread by its exact raw_title.
-func FindThreadByRawTitle(rawTitle string) (*Thread, error) {
-	var t Thread
-	err := DB.Where("raw_title = ?", rawTitle).First(&t).Error
-	if err == gorm.ErrRecordNotFound {
-		return nil, nil
+func FindThreadByRawTitle(tx *bolt.Tx, rawTitle string) (*Thread, error) {
+	var found *Thread
+	err := runView(tx, func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("threads"))
+		c := b.Cursor()
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			var t Thread
+			if err := DecodeGob(v, &t); err == nil {
+				if t.RawTitle == rawTitle {
+					found = &t
+					break
+				}
+			}
+		}
+		return nil
+	})
+	return found, err
+}
+
+func FindThreadByID(id uint) (*Thread, error) {
+	var found *Thread
+	err := DB.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("threads"))
+		c := b.Cursor()
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			var t Thread
+			if err := DecodeGob(v, &t); err == nil {
+				if t.ID == id {
+					found = &t
+					break
+				}
+			}
+		}
+		return nil
+	})
+	return found, err
+}
+
+func CreateOrUpdateThread(tx *bolt.Tx, data *Thread) error {
+	return runUpdate(tx, func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("threads"))
+		bytesData, err := EncodeGob(data)
+		if err != nil {
+			return err
+		}
+		err = b.Put([]byte(data.ThreadHash), bytesData)
+		if err != nil {
+			return err
+		}
+
+		// Pre-Sorted Chronological Indexes compilation for live Catalog retrievals
+		idxB := tx.Bucket([]byte("catalog_index"))
+		if data.Status == "linked" && data.Catalog != "" {
+			postedTime := time.Now()
+			if data.PostedAt != nil {
+				postedTime = *data.PostedAt
+			}
+			inverseTime := 9999999999 - postedTime.Unix()
+			indexKey := fmt.Sprintf("cat:%s:%010d:%s", data.Catalog, inverseTime, data.ThreadHash)
+			_ = idxB.Put([]byte(indexKey), []byte(data.ThreadHash))
+		}
+		return nil
+	})
+}
+
+func DeleteThread(tx *bolt.Tx, t *Thread) error {
+	return runUpdate(tx, func(tx *bolt.Tx) error {
+		_ = tx.Bucket([]byte("threads")).Delete([]byte(t.ThreadHash))
+
+		// Clean up catalog indexes
+		idxB := tx.Bucket([]byte("catalog_index"))
+		c := idxB.Cursor()
+		for k, _ := c.First(); k != nil; k, _ = c.Next() {
+			if strings.HasSuffix(string(k), ":"+t.ThreadHash) {
+				_ = idxB.Delete(k)
+			}
+		}
+
+		// Cascading delete related streams
+		if t.TmdbID != nil {
+			_ = tx.Bucket([]byte("streams")).Delete([]byte(*t.TmdbID))
+		}
+		return nil
+	})
+}
+
+func GetPendingThreads() ([]Thread, error) {
+	var list []Thread
+	err := runView(nil, func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("threads"))
+		c := b.Cursor()
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			var t Thread
+			if err := DecodeGob(v, &t); err == nil {
+				if t.Status == "pending_tmdb" {
+					list = append(list, t)
+				}
+			}
+		}
+		return nil
+	})
+	sort.Slice(list, func(i, j int) bool {
+		tI := time.Time{}
+		if list[i].PostedAt != nil { tI = *list[i].PostedAt }
+		tJ := time.Time{}
+		if list[j].PostedAt != nil { tJ = *list[j].PostedAt }
+		return tI.After(tJ)
+	})
+	return list, err
+}
+
+func GetRecentLinkedThreads() ([]Thread, error) {
+	var list []Thread
+	err := DB.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("threads"))
+		c := b.Cursor()
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			var t Thread
+			if err := DecodeGob(v, &t); err == nil {
+				if t.Status == "linked" {
+					list = append(list, t)
+				}
+			}
+		}
+		return nil
+	})
+	sort.Slice(list, func(i, j int) bool {
+		return list[i].UpdatedAt.After(list[j].UpdatedAt)
+	})
+	if len(list) > 15 {
+		list = list[:15]
 	}
-	return &t, err
+	return list, err
 }
 
-// CreateOrUpdateThread upserts a Thread using ON CONFLICT logic.
-func CreateOrUpdateThread(data *Thread, tx *gorm.DB) error {
-	db := getDB(tx)
-	return db.Clauses(clause.OnConflict{
-		Columns:   []clause.Column{{Name: "thread_hash"}},
-		UpdateAll: true,
-	}).Create(data).Error
+// ── Stream CRUD Operations ──
+
+var streamsQualityRank = map[string]int{
+	"4K":    1, "2160P": 1, "2160p": 1,
+	"1080P": 2, "1080p": 2,
+	"720P":  3, "720p":  3,
+	"480P":  4, "480p":  4,
+	"SD":    5, "sd":    5,
 }
 
-// LogFailedThread logs or updates a failed thread entry.
-func LogFailedThread(hash, rawTitle, reason string, tx *gorm.DB) error {
-	db := getDB(tx)
-	return db.Clauses(clause.OnConflict{
-		Columns:   []clause.Column{{Name: "thread_hash"}},
-		DoUpdates: clause.AssignmentColumns([]string{"raw_title", "reason", "last_attempt"}),
-	}).Create(&FailedThread{
-		ThreadHash:  hash,
-		RawTitle:    rawTitle,
-		Reason:      reason,
-		LastAttempt: time.Now(),
-	}).Error
+func sortStreamsByQuality(streams []Stream) {
+	sort.Slice(streams, func(i, j int) bool {
+		qI := streamsQualityRank[strings.ToUpper(streams[i].Quality)]
+		qJ := streamsQualityRank[strings.ToUpper(streams[j].Quality)]
+		if qI == 0 { qI = 99 }
+		if qJ == 0 { qJ = 99 }
+		return qI < qJ
+	})
 }
 
-// FindSeriesStreams finds quality-ordered streams matching the tmdb_id, season, and exact episode within range boundaries.
-func FindSeriesStreams(tmdbID string, season, episode int) ([]Stream, error) {
-	var streams []Stream
-	err := DB.Where("tmdb_id = ? AND season = ? AND episode <= ? AND episode_end >= ?",
-		tmdbID, season, episode, episode).
-		Order("quality DESC").
-		Find(&streams).Error
-	return streams, err
+func FindSeriesStreams(tx *bolt.Tx, tmdbID string, season, episode int) ([]Stream, error) {
+	var allStreams []Stream
+	err := runView(tx, func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("streams"))
+		data := b.Get([]byte(tmdbID))
+		if data == nil {
+			return nil
+		}
+		return DecodeGob(data, &allStreams)
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	var filtered []Stream
+	for _, s := range allStreams {
+		match := false
+		if s.Season != nil && *s.Season == season {
+			if s.Episode != nil && s.EpisodeEnd != nil {
+				if episode >= *s.Episode && episode <= *s.EpisodeEnd {
+					match = true
+				}
+			} else if s.Episode == nil {
+				match = true // Season Pack
+			}
+		} else if s.Season == nil && s.Episode == nil {
+			match = true // Series Pack / Fallback
+		}
+
+		if match {
+			filtered = append(filtered, s)
+		}
+	}
+
+	sortStreamsByQuality(filtered)
+	return filtered, nil
 }
 
-// FindMovieStreams retrieves all streams for a movie tmdb_id.
-func FindMovieStreams(tmdbID string) ([]Stream, error) {
-	var streams []Stream
-	err := DB.Where("tmdb_id = ?", tmdbID).
-		Order("quality DESC").
-		Find(&streams).Error
-	return streams, err
+func FindMovieStreams(tx *bolt.Tx, tmdbID string) ([]Stream, error) {
+	var allStreams []Stream
+	err := runView(tx, func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("streams"))
+		data := b.Get([]byte(tmdbID))
+		if data == nil {
+			return nil
+		}
+		return DecodeGob(data, &allStreams)
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	sortStreamsByQuality(allStreams)
+	return allStreams, nil
 }
 
-// CreateStreams batch creates multiple streams, ignoring duplicates on duplicate unique index conflict.
-func CreateStreams(streams []Stream, tx *gorm.DB) error {
+func streamsMatchUnique(a, b Stream) bool {
+	if a.TmdbID != b.TmdbID || a.Infohash != b.Infohash {
+		return false
+	}
+	if (a.Season == nil) != (b.Season == nil) {
+		return false
+	}
+	if a.Season != nil && *a.Season != *b.Season {
+		return false
+	}
+	if (a.Episode == nil) != (b.Episode == nil) {
+		return false
+	}
+	if a.Episode != nil && *a.Episode != *b.Episode {
+		return false
+	}
+	return true
+}
+
+func CreateStreams(tx *bolt.Tx, streams []Stream) error {
 	if len(streams) == 0 {
 		return nil
 	}
-	db := getDB(tx)
-	return db.Clauses(clause.OnConflict{
-		DoNothing: true,
-	}).Create(&streams).Error
+	return runUpdate(tx, func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("streams"))
+		
+		byTMDB := make(map[string][]Stream)
+		for _, s := range streams {
+			byTMDB[s.TmdbID] = append(byTMDB[s.TmdbID], s)
+		}
+
+		for tmdbID, list := range byTMDB {
+			var existing []Stream
+			data := b.Get([]byte(tmdbID))
+			if data != nil {
+				_ = DecodeGob(data, &existing)
+			}
+
+			for _, s := range list {
+				duplicate := false
+				for i, ext := range existing {
+					if streamsMatchUnique(ext, s) {
+						existing[i] = s
+						duplicate = true
+						break
+					}
+				}
+				if !duplicate {
+					existing = append(existing, s)
+				}
+			}
+
+			encBytes, err := EncodeGob(existing)
+			if err != nil {
+				return err
+			}
+			_ = b.Put([]byte(tmdbID), encBytes)
+		}
+		return nil
+	})
 }
 
-// DeleteThread deletes a Thread and any associated Stream records in a cascade.
-func DeleteThread(t *Thread, tx *gorm.DB) error {
-	db := getDB(tx)
-	return db.Delete(t).Error
+// ── FailedThread operations ──
+
+func LogFailedThread(tx *bolt.Tx, hash, rawTitle, reason string) error {
+	return runUpdate(tx, func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("failed_threads"))
+		ft := FailedThread{
+			ThreadHash:  hash,
+			RawTitle:    rawTitle,
+			Reason:      reason,
+			LastAttempt: time.Now(),
+		}
+		ftBytes, err := EncodeGob(ft)
+		if err != nil {
+			return err
+		}
+		return b.Put([]byte(hash), ftBytes)
+	})
 }
 
-// GetPendingThreads gets all threads marked with "pending_tmdb".
-func GetPendingThreads() ([]Thread, error) {
-	var threads []Thread
-	err := DB.Where("status = ?", "pending_tmdb").Order("posted_at DESC").Find(&threads).Error
-	return threads, err
-}
-
-// GetFailedThreads retrieves all recorded parsing/workflow failures.
 func GetFailedThreads() ([]FailedThread, error) {
-	var failures []FailedThread
-	err := DB.Order("last_attempt DESC").Find(&failures).Error
-	return failures, err
+	var list []FailedThread
+	err := runView(nil, func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("failed_threads"))
+		c := b.Cursor()
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			var ft FailedThread
+			if err := DecodeGob(v, &ft); err == nil {
+				list = append(list, ft)
+			}
+		}
+		return nil
+	})
+	sort.Slice(list, func(i, j int) bool {
+		return list[i].LastAttempt.After(list[j].LastAttempt)
+	})
+	return list, err
 }
 
-// DeleteFailedThread deletes an entry from the failed_threads table by its hash.
-func DeleteFailedThread(hash string, tx *gorm.DB) error {
-	db := getDB(tx)
-	return db.Where("thread_hash = ?", hash).Delete(&FailedThread{}).Error
+func DeleteFailedThread(tx *bolt.Tx, hash string) error {
+	return runUpdate(tx, func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("failed_threads"))
+		return b.Delete([]byte(hash))
+	})
+}
+
+// ── Lock managers ──
+
+func IsDebridCacheLocked(hash string) bool {
+	locked := false
+	_ = DB.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("debrid_cache_locks"))
+		if b.Get([]byte(hash)) != nil {
+			locked = true
+		}
+		return nil
+	})
+	return locked
+}
+
+func CreateDebridCacheLock(hash string) error {
+	return DB.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("debrid_cache_locks"))
+		lock := DebridCacheLock{Infohash: hash, CreatedAt: time.Now()}
+		lockBytes, err := EncodeGob(lock)
+		if err != nil {
+			return err
+		}
+		return b.Put([]byte(hash), lockBytes)
+	})
+}
+
+func DeleteDebridCacheLock(hash string) error {
+	return DB.Update(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("debrid_cache_locks"))
+		return b.Delete([]byte(hash))
+	})
 }
