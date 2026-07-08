@@ -1,5 +1,6 @@
-// Version: 1.2.8
-// Change log: Updated ParseTitle calls inside stremio.go handlers to pass context-aware t.Type to ensure titles starting with numbers are matched correctly.
+
+// Version: 1.2.9
+// Change log: Updated catalog and stream handlers to supply context-aware t.Type parameter to ParseTitle, ensuring correct title parsing.
 
 package api
 
