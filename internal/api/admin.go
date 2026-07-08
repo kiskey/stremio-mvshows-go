@@ -1,6 +1,6 @@
 
-// Version: 2.0.2
-// Change log: Fixed undefined fmt compiler errors by adding "fmt" to the imports block.
+// Version: 2.0.3
+// Change log: Fixed invalid bbolt Cursor range loops by converting them to standard lexicographical cursor traversals.
 
 package api
 
@@ -223,7 +223,7 @@ func linkOfficialHandler(c *gin.Context) {
 
 		// Check if this IMDb ID is already registered under an alternative TMDB ID
 		c := metaBucket.Cursor()
-		for k, v := range c {
+		for k, v := c.First(); k != nil; k, v = c.Next() {
 			var metadataRecord database.TmdbMetadata
 			if errDec := database.DecodeGob(v, &metadataRecord); errDec == nil {
 				if metadataRecord.ImdbID != nil && *metadataRecord.ImdbID == tmdbResult.ImdbID {
@@ -243,9 +243,11 @@ func linkOfficialHandler(c *gin.Context) {
 		}
 
 		tmdbMetadata := database.TmdbMetadata{
-			TmdbID: tmdbResult.TmdbID,
-			ImdbID: imdbIDPtr,
-			Data:   string(rawDataBytes),
+			TmdbID:    tmdbResult.TmdbID,
+			ImdbID:    imdbIDPtr,
+			Data:      string(rawDataBytes),
+			CreatedAt: time.Now(),
+			UpdatedAt: time.Now(),
 		}
 		if tmdbResult.Year > 0 {
 			tmdbMetadata.Year = &tmdbResult.Year
@@ -448,7 +450,7 @@ func autoMatchHandler(c *gin.Context) {
 
 			// GORM-safe Collision Pre-check: Verify if this IMDb ID is already registered under an alternative TMDB ID
 			c := metaBucket.Cursor()
-			for k, v := range c {
+			for k, v := c.First(); k != nil; k, v = c.Next() {
 				var fetched database.TmdbMetadata
 				if errDec := database.DecodeGob(v, &fetched); errDec == nil {
 					if fetched.ImdbID != nil && *fetched.ImdbID == res.Result.ImdbID {
@@ -467,9 +469,11 @@ func autoMatchHandler(c *gin.Context) {
 			}
 
 			tmdbMetadata := database.TmdbMetadata{
-				TmdbID: res.Result.TmdbID,
-				ImdbID: imdbIDPtr,
-				Data:   string(rawDataBytes),
+				TmdbID:    res.Result.TmdbID,
+				ImdbID:    imdbIDPtr,
+				Data:      string(rawDataBytes),
+				CreatedAt: time.Now(),
+				UpdatedAt: time.Now(),
 			}
 			if res.Result.Year > 0 {
 				tmdbMetadata.Year = &res.Result.Year
@@ -653,7 +657,7 @@ func cachePendingHandler(c *gin.Context) {
 	cfg := config.Load()
 	p := debrid.GetProvider(cfg)
 	if !p.IsEnabled() {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Debrid provider is currently disabled"})
+		writeJSON(c, http.StatusBadRequest, gin.H{"error": "Debrid provider is currently disabled"})
 		return
 	}
 
