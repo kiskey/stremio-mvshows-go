@@ -1,5 +1,6 @@
-// Version: 1.2.5
-// Change log: Refactored catalogHandler database queries from slow IN (SELECT ...) subqueries into high-performance INNER JOINs to eliminate offset paging CPU spikes and hangs completely.
+
+// Version: 1.2.6
+// Change log: Removed heavy JSON decoding allocations inside hot-path endpoints. Catalog cards render details locally from index fields with dynamic Metahub poster URL paths.
 
 package api
 
@@ -399,41 +400,11 @@ func catalogHandler(c *gin.Context) {
 			}
 		}
 
-		var tmdbData tmdbLightData
+		// ZERO-STALE METADATA OPTIMIZATION: Discard heavy local JSON decoding.
+		// Since we store placeholder "{}" values, load year directly from thread indices.
+		// Stremio will dynamically fetch plots, cast, ratings, and banners from Cinemeta on demand.
 		releaseInfo := ""
-		var imdbRating *string
-		var genresList []string
-
-		if t.TmdbMetadata != nil {
-			// Memory Optimization: decode directly from strings.NewReader to prevent []byte cast and allocations
-			dec := json.NewDecoder(strings.NewReader(t.TmdbMetadata.Data))
-			if dec.Decode(&tmdbData) == nil {
-				// Extract release year from TMDB date
-				dateStr := tmdbData.ReleaseDate
-				if dateStr == "" {
-					dateStr = tmdbData.FirstAirDate
-				}
-				if len(dateStr) >= 4 {
-					releaseInfo = dateStr[:4]
-				}
-
-				// Extract IMDb rating
-				if tmdbData.VoteAverage > 0 {
-					rating := fmt.Sprintf("%.1f", tmdbData.VoteAverage)
-					imdbRating = &rating
-				}
-
-				// Extract genre names
-				for _, g := range tmdbData.Genres {
-					if g.Name != "" {
-						genresList = append(genresList, g.Name)
-					}
-				}
-			}
-		}
-
-		// Fallback releaseInfo from Thread.Year
-		if releaseInfo == "" && t.Year != nil {
+		if t.Year != nil {
 			releaseInfo = strconv.Itoa(*t.Year)
 		}
 
@@ -445,9 +416,8 @@ func catalogHandler(c *gin.Context) {
 			poster = *t.CustomPoster
 		}
 
-		// Set default description if TMDBoverview failed
-		desc := tmdbData.Overview
-
+		// Set default description if fallback is empty
+		desc := ""
 		if t.CustomDescription != nil && *t.CustomDescription != "" {
 			desc = *t.CustomDescription
 		}
@@ -462,12 +432,6 @@ func catalogHandler(c *gin.Context) {
 
 		if desc != "" {
 			metaEntry.Description = desc
-		}
-		if imdbRating != nil {
-			metaEntry.ImdbRating = *imdbRating
-		}
-		if len(genresList) > 0 {
-			metaEntry.Genres = genresList
 		}
 
 		metas = append(metas, metaEntry)
@@ -511,112 +475,84 @@ func metaHandler(c *gin.Context) {
 			}
 		}
 
-		var details tmdbLightData
-		// Memory Optimization: decode directly from strings.NewReader to prevent allocations
-		dec := json.NewDecoder(strings.NewReader(meta.Data))
-		if dec.Decode(&details) == nil {
-			mediaType := "movie"
-			if len(meta.Threads) > 0 {
-				mediaType = meta.Threads[0].Type
-			}
-
-			displayName := details.Title
-			if displayName == "" {
-				displayName = details.Name
-			}
-
-			poster := "https://images.metahub.space/poster/medium/" + cleanID + "/img"
-
-			// Apply custom metadata overrides if defined by the admin
-			overview := details.Overview
-			if len(meta.Threads) > 0 {
-				t := meta.Threads[0]
-				if t.CustomPoster != nil && *t.CustomPoster != "" {
-					poster = *t.CustomPoster
-				}
-				if t.CustomDescription != nil && *t.CustomDescription != "" {
-					overview = *t.CustomDescription
-				}
-			}
-
-			releaseInfo := ""
-			dateStr := details.ReleaseDate
-			if dateStr == "" {
-				dateStr = details.FirstAirDate
-			}
-			if len(dateStr) >= 4 {
-				releaseInfo = dateStr[:4]
-			}
-			if releaseInfo == "" && meta.Year != nil {
-				releaseInfo = strconv.Itoa(*meta.Year)
-			}
-
-			metaObj := StremioMetaDetail{
-				ID:          id,
-				Type:        mediaType,
-				Name:        displayName,
-				ReleaseInfo: releaseInfo,
-				Poster:      poster,
-			}
-
-			if overview != "" {
-				metaObj.Description = overview
-			}
-
-			if details.VoteAverage > 0 {
-				metaObj.ImdbRating = fmt.Sprintf("%.1f", details.VoteAverage)
-			}
-			if len(details.Genres) > 0 {
-				genreNames := make([]string, 0, len(details.Genres))
-				for _, g := range details.Genres {
-					if g.Name != "" {
-						genreNames = append(genreNames, g.Name)
-					}
-				}
-				if len(genreNames) > 0 {
-					metaObj.Genres = genreNames
-				}
-			}
-
-			if mediaType == "series" {
-				// Fetch linked streams to build Stremio series videos navigation
-				var streams []database.Stream
-				_ = database.DB.Where("tmdb_id = ?", meta.TmdbID).Order("season ASC, episode ASC").Find(&streams)
-
-				videos := make([]StremioVideoDetail, 0)
-				seen := make(map[string]bool)
-
-				for _, s := range streams {
-					if s.Season != nil && s.Episode != nil {
-						sVal := *s.Season
-						eVal := *s.Episode
-						endVal := eVal
-						if s.EpisodeEnd != nil {
-							endVal = *s.EpisodeEnd
-						}
-
-						for ep := eVal; ep <= endVal; ep++ {
-							vKey := fmt.Sprintf("%d:%d", sVal, ep)
-							if seen[vKey] {
-								continue
-							}
-							seen[vKey] = true
-
-							videos = append(videos, StremioVideoDetail{
-								ID:      fmt.Sprintf("%s:%d:%d", id, sVal, ep),
-								Season:  sVal,
-								Episode: ep,
-								Title:   fmt.Sprintf("Season %d - Episode %d", sVal, ep),
-							})
-						}
-					}
-				}
-				metaObj.Videos = videos
-			}
-
-			writeJSON(c, http.StatusOK, StremioMetaResponse{Meta: metaObj})
-			return
+		// ZERO-STALE METADATA OPTIMIZATION: Extract display identities locally 
+		// to bypass unneeded JSON reads from the placeholder structures.
+		displayName := "Unknown"
+		if len(meta.Threads) > 0 {
+			displayName = meta.Threads[0].CleanTitle
 		}
+
+		mediaType := "movie"
+		if len(meta.Threads) > 0 {
+			mediaType = meta.Threads[0].Type
+		}
+
+		poster := "https://images.metahub.space/poster/medium/" + cleanID + "/img"
+
+		// Apply custom metadata overrides if defined by the admin
+		overview := "Up-to-date metadata resolving on Cinemeta."
+		if len(meta.Threads) > 0 {
+			t := meta.Threads[0]
+			if t.CustomPoster != nil && *t.CustomPoster != "" {
+				poster = *t.CustomPoster
+			}
+			if t.CustomDescription != nil && *t.CustomDescription != "" {
+				overview = *t.CustomDescription
+			}
+		}
+
+		releaseInfo := ""
+		if meta.Year != nil {
+			releaseInfo = strconv.Itoa(*meta.Year)
+		}
+
+		metaObj := StremioMetaDetail{
+			ID:          id,
+			Type:        mediaType,
+			Name:        displayName,
+			ReleaseInfo: releaseInfo,
+			Poster:      poster,
+			Description: overview,
+		}
+
+		if mediaType == "series" {
+			// Fetch linked streams to build Stremio series videos navigation
+			var streams []database.Stream
+			_ = database.DB.Where("tmdb_id = ?", meta.TmdbID).Order("season ASC, episode ASC").Find(&streams)
+
+			videos := make([]StremioVideoDetail, 0)
+			seen := make(map[string]bool)
+
+			for _, s := range streams {
+				if s.Season != nil && s.Episode != nil {
+					sVal := *s.Season
+					eVal := *s.Episode
+					endVal := eVal
+					if s.EpisodeEnd != nil {
+						endVal = *s.EpisodeEnd
+					}
+
+					for ep := eVal; ep <= endVal; ep++ {
+						vKey := fmt.Sprintf("%d:%d", sVal, ep)
+						if seen[vKey] {
+							continue
+						}
+						seen[vKey] = true
+
+						videos = append(videos, StremioVideoDetail{
+							ID:      fmt.Sprintf("%s:%d:%d", id, sVal, ep),
+							Season:  sVal,
+							Episode: ep,
+							Title:   fmt.Sprintf("Season %d - Episode %d", sVal, ep),
+						})
+					}
+				}
+			}
+			metaObj.Videos = videos
+		}
+
+		writeJSON(c, http.StatusOK, StremioMetaResponse{Meta: metaObj})
+		return
 	}
 
 	var threads []database.Thread
@@ -829,15 +765,24 @@ func streamHandler(c *gin.Context) {
 		mediaType = meta.Threads[0].Type
 	}
 
-	// Pre-fetch TMDB title for movie/series streams
-	var tmdbTitle string
-	var tmdbData tmdbLightData
-	dec := json.NewDecoder(strings.NewReader(meta.Data))
-	if dec.Decode(&tmdbData) == nil {
-		tmdbTitle = tmdbData.Title
-		if tmdbTitle == "" {
-			tmdbTitle = tmdbData.Name
+	// ZERO-STALE METADATA OPTIMIZATION: Extract display title directly from index fields.
+	// Bypasses JSON parsing on stream hot-paths, resolving with a safe fallback mapping.
+	tmdbTitle := ""
+	if len(meta.Threads) > 0 {
+		tmdbTitle = meta.Threads[0].CleanTitle
+	}
+	if tmdbTitle == "" {
+		var tmdbData tmdbLightData
+		dec := json.NewDecoder(strings.NewReader(meta.Data))
+		if dec.Decode(&tmdbData) == nil {
+			tmdbTitle = tmdbData.Title
+			if tmdbTitle == "" {
+				tmdbTitle = tmdbData.Name
+			}
 		}
+	}
+	if tmdbTitle == "" {
+		tmdbTitle = "Unknown Release"
 	}
 
 	for _, s := range streams {
