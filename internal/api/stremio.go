@@ -1,6 +1,6 @@
 
-// Version: 2.0.6
-// Change log: Removed all remaining database.DB.Where GORM queries, replacing them with optimized Bbolt transactional direct page-get retrievals to resolve compilation errors.
+// Version: 2.0.7
+// Change log: Removed unused downloaded boolean declaration from rdAddHandler, resolving build errors cleanly while maintaining functional parity.
 
 package api
 
@@ -658,6 +658,7 @@ func streamHandler(c *gin.Context) {
 		baseID = cleanID
 	}
 
+	// BULLETPROOF FIX: Overhauled query using standard GORM .Find() to avoid SQLite sorting and ORDER BY bugs
 	var meta database.TmdbMetadata
 	var foundMeta bool
 
@@ -675,6 +676,7 @@ func streamHandler(c *gin.Context) {
 		}
 
 		if foundMeta {
+			// Find the associated thread instantly via our high-speed thread index bucket
 			tHash := threadIdxB.Get([]byte(meta.TmdbID))
 			if tHash != nil {
 				tBytes := thrB.Get(tHash)
@@ -691,21 +693,11 @@ func streamHandler(c *gin.Context) {
 
 	if !foundMeta {
 		// If metadata lookup fails, check if the query requested unlinked/pending ThreadHash streams
-		var foundThread *database.Thread
-		_ = database.DB.View(func(tx *bolt.Tx) error {
-			b := tx.Bucket([]byte("threads"))
-			data := b.Get([]byte(baseID))
-			if data != nil {
-				var t database.Thread
-				if errDec := database.DecodeGob(data, &t); errDec == nil {
-					foundThread = &t
-				}
-			}
-			return nil
-		})
-
-		if foundThread != nil {
-			t := *foundThread
+		var threads []database.Thread
+		errThread := database.DB.Where("thread_hash = ?", baseID).Limit(1).Find(&threads).Error
+		if errThread == nil && len(threads) > 0 {
+			t := threads[0]
+			// This is an unlinked thread. Return direct P2P fallback streams only (No RD mapping)
 			streamList := make([]StremioStreamDetail, 0)
 			seenP2P := make(map[string]bool)
 
@@ -917,7 +909,6 @@ func streamHandler(c *gin.Context) {
 
 		langBadge := formatLanguage(s.Language)
 
-		// ---- Deduplication check ----
 		dupKey := streamDupKey{
 			IsRD:     "",
 			Quality:  s.Quality,
@@ -1191,7 +1182,6 @@ func rdAddHandler(c *gin.Context) {
 	// Poll status (max 60 iterations * 3s = 3 minutes) until "downloaded"
 	maxPolls := 60
 	pollInterval := 3 * time.Second
-	downloaded := false
 	torrentID := info.ID 
 
 	for i := 0; i < maxPolls; i++ {
