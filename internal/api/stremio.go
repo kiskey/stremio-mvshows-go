@@ -1,6 +1,6 @@
 
-// Version: 2.0.7
-// Change log: Removed unused downloaded boolean declaration from rdAddHandler, resolving build errors cleanly while maintaining functional parity.
+// Version: 2.0.8
+// Change log: Removed the last remaining legacy database.DB.Where GORM reference, substituting it with a high-speed memory-mapped BoltDB key-lookup view transaction.
 
 package api
 
@@ -658,7 +658,6 @@ func streamHandler(c *gin.Context) {
 		baseID = cleanID
 	}
 
-	// BULLETPROOF FIX: Overhauled query using standard GORM .Find() to avoid SQLite sorting and ORDER BY bugs
 	var meta database.TmdbMetadata
 	var foundMeta bool
 
@@ -694,10 +693,20 @@ func streamHandler(c *gin.Context) {
 	if !foundMeta {
 		// If metadata lookup fails, check if the query requested unlinked/pending ThreadHash streams
 		var threads []database.Thread
-		errThread := database.DB.Where("thread_hash = ?", baseID).Limit(1).Find(&threads).Error
+		errThread := database.DB.View(func(tx *bolt.Tx) error {
+			b := tx.Bucket([]byte("threads"))
+			data := b.Get([]byte(baseID))
+			if data != nil {
+				var t database.Thread
+				if errDec := database.DecodeGob(data, &t); errDec == nil {
+					threads = append(threads, t)
+				}
+			}
+			return nil
+		})
+
 		if errThread == nil && len(threads) > 0 {
 			t := threads[0]
-			// This is an unlinked thread. Return direct P2P fallback streams only (No RD mapping)
 			streamList := make([]StremioStreamDetail, 0)
 			seenP2P := make(map[string]bool)
 
@@ -785,7 +794,7 @@ func streamHandler(c *gin.Context) {
 		return
 	}
 
-	// BULK PRE-FETCH: Load all magnet display names from magnet_cache table
+	// ⚡ High-Speed Memory-Mapped Bbolt Index lookups mapping directly to parent structs:
 	magnetMap := make(map[string]string)
 	_ = database.DB.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte("magnet_cache"))
