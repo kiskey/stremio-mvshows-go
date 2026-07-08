@@ -1,6 +1,6 @@
 
-// Version: 2.0.0
-// Change log: Removed upfront debrid_torrents pre-fetching queries and sequential unrestricting loops inside streamHandler. Transitioned relational GORM scans to lightning-fast lexicographical B+ Tree indexing.
+// Version: 2.0.1
+// Change log: Fixed undefined bolt namespace compiler error by explicitly aliasing go.etcd.io/bbolt import as bolt.
 
 package api
 
@@ -23,7 +23,7 @@ import (
 	"github.com/kiskey/stremio-mvshows-go/internal/services/parser"
 	"github.com/kiskey/stremio-mvshows-go/internal/services/tracker"
 	"github.com/kiskey/stremio-mvshows-go/internal/utils"
-	"go.etcd.io/bbolt"
+	bolt "go.etcd.io/bbolt"
 )
 
 // Global concurrency semaphore: restricts background debrid pollers to maximum 3 concurrent goroutines.
@@ -839,6 +839,16 @@ func streamHandler(c *gin.Context) {
 	tmdbTitle := ""
 	if len(meta.Threads) > 0 {
 		tmdbTitle = meta.Threads[0].CleanTitle
+	}
+	if tmdbTitle == "" {
+		var tmdbData tmdbLightData
+		dec := json.NewDecoder(strings.NewReader(meta.Data))
+		if dec.Decode(&tmdbData) == nil {
+			tmdbTitle = tmdbData.Title
+			if tmdbTitle == "" {
+				tmdbTitle = tmdbData.Name
+			}
+		}
 	}
 	if tmdbTitle == "" {
 		tmdbTitle = "Unknown Release"
