@@ -1,6 +1,6 @@
 
-// Version: 2.0.4
-// Change log: Corrected Go conditional initialization syntax errors across the locks, magnets, and torbox map extraction blocks by properly inserting the semicolon delimiters.
+// Version: 2.0.5
+// Change log: Aligned GOB serialization schemas with connection indices. Thread catalog keys are packed chronologically with type boundaries, and metadata is mapped under dual lookup keys.
 
 package main
 
@@ -229,13 +229,14 @@ func main() {
 				bytesData, _ := database.EncodeGob(thread)
 				_ = threadBucket.Put([]byte(thread.ThreadHash), bytesData)
 
+				// Pre-Sorted Inverse Timestamps index keys containing TYPE for O(1) paging skips
 				if thread.Status == "linked" && thread.Catalog != "" {
 					postedTime := time.Now()
 					if thread.PostedAt != nil {
 						postedTime = *thread.PostedAt
 					}
 					inverseTime := 9999999999 - postedTime.Unix()
-					indexKey := fmt.Sprintf("cat:%s:%010d:%s", thread.Catalog, inverseTime, thread.ThreadHash)
+					indexKey := fmt.Sprintf("cat:%s:%s:%010d:%s", thread.Catalog, thread.Type, inverseTime, thread.ThreadHash)
 					_ = indexBucket.Put([]byte(indexKey), []byte(thread.ThreadHash))
 				}
 
@@ -379,6 +380,7 @@ func main() {
 	}
 
 	// F. Process locks
+	log.Println("Migrating debrid cache locks...")
 	var sqliteLocks []SqliteDebridCacheLock
 	if err := sqlDB.Find(&sqliteLocks).Error; err == nil {
 		_ = boltDB.Update(func(tx *bolt.Tx) error {
@@ -393,6 +395,7 @@ func main() {
 	}
 
 	// G. Process magnet_cache
+	log.Println("Migrating infohash magnet lookup caches...")
 	var sqliteMagnets []SqliteMagnetCache
 	if err := sqlDB.Find(&sqliteMagnets).Error; err == nil {
 		_ = boltDB.Update(func(tx *bolt.Tx) error {
@@ -407,6 +410,7 @@ func main() {
 	}
 
 	// H. Process torbox_id_map
+	log.Println("Migrating Torbox provider ID registers...")
 	var sqliteTorboxMap []SqliteTorboxIdMap
 	if err := sqlDB.Find(&sqliteTorboxMap).Error; err == nil {
 		_ = boltDB.Update(func(tx *bolt.Tx) error {
