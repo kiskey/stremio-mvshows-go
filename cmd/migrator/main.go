@@ -1,11 +1,12 @@
 
-// Version: 2.0.1
-// Change log: Fixed undefined bolt namespace compiler error by explicitly aliasing go.etcd.io/bbolt import as bolt. Normalized Sqlite variable loops to prevent compilation crashes during database transition.
+// Version: 2.0.2
+// Change log: Locally defined custom JSONStringArray and JSONFileList drivers to handle raw GORM SQLite textual column deserialization, fully isolating legacy relational interfaces inside the offline migrator.
 
 package main
 
 import (
-	"encoding/gob"
+	"database/sql/driver"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -18,24 +19,78 @@ import (
 	"gorm.io/gorm"
 )
 
-// Define old SQLite relational schemas locally to execute sequential queries safely
+// ── Legacy SQL Scanners/Valuers Isolated Locally inside CLI ──
+
+type JSONStringArray []string
+
+func (j *JSONStringArray) Scan(value interface{}) error {
+	bytes, ok := value.([]byte)
+	if !ok {
+		str, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("failed to unmarshal JSONStringArray: unexpected type")
+		}
+		bytes = []byte(str)
+	}
+	return json.Unmarshal(bytes, j)
+}
+
+func (j JSONStringArray) Value() (driver.Value, error) {
+	if len(j) == 0 {
+		return "[]", nil
+	}
+	bytes, err := json.Marshal(j)
+	return string(bytes), err
+}
+
+type TorrentFile struct {
+	ID       int    `json:"id"`
+	Path     string `json:"path"`
+	Bytes    int64  `json:"bytes"`
+	Selected int    `json:"selected"`
+}
+
+type JSONFileList []TorrentFile
+
+func (j *JSONFileList) Scan(value interface{}) error {
+	bytes, ok := value.([]byte)
+	if !ok {
+		str, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("failed to unmarshal JSONFileList: unexpected type")
+		}
+		bytes = []byte(str)
+	}
+	return json.Unmarshal(bytes, j)
+}
+
+func (j JSONFileList) Value() (driver.Value, error) {
+	if len(j) == 0 {
+		return "[]", nil
+	}
+	bytes, err := json.Marshal(j)
+	return string(bytes), err
+}
+
+// ── GORM-Compatible Relational Table Models ──
+
 type SqliteThread struct {
-	ID                uint      `gorm:"column:id;primaryKey"`
-	ThreadHash        string    `gorm:"column:thread_hash"`
-	RawTitle          string    `gorm:"column:raw_title"`
-	CleanTitle        string    `gorm:"column:clean_title"`
-	Year              *int      `gorm:"column:year"`
-	TmdbID            *string   `gorm:"column:tmdb_id"`
-	Status            string    `gorm:"column:status"`
-	Type              string    `gorm:"column:type"`
-	PostedAt          *time.Time `gorm:"column:posted_at"`
-	Catalog           string    `gorm:"column:catalog"`
-	MagnetURIs        database.JSONStringArray `gorm:"column:magnet_uris;type:text"`
-	CustomPoster      *string   `gorm:"column:custom_poster"`
-	CustomDescription *string   `gorm:"column:custom_description"`
-	LastSeen          time.Time `gorm:"column:last_seen"`
-	CreatedAt         time.Time `gorm:"column:created_at"`
-	UpdatedAt         time.Time `gorm:"column:updated_at"`
+	ID                uint            `gorm:"column:id;primaryKey"`
+	ThreadHash        string          `gorm:"column:thread_hash"`
+	RawTitle          string          `gorm:"column:raw_title"`
+	CleanTitle        string          `gorm:"column:clean_title"`
+	Year              *int            `gorm:"column:year"`
+	TmdbID            *string         `gorm:"column:tmdb_id"`
+	Status            string          `gorm:"column:status"`
+	Type              string          `gorm:"column:type"`
+	PostedAt          *time.Time      `gorm:"column:posted_at"`
+	Catalog           string          `gorm:"column:catalog"`
+	MagnetURIs        JSONStringArray `gorm:"column:magnet_uris;type:text"`
+	CustomPoster      *string         `gorm:"column:custom_poster"`
+	CustomDescription *string         `gorm:"column:custom_description"`
+	LastSeen          time.Time       `gorm:"column:last_seen"`
+	CreatedAt         time.Time       `gorm:"column:created_at"`
+	UpdatedAt         time.Time       `gorm:"column:updated_at"`
 }
 
 func (SqliteThread) TableName() string { return "threads" }
@@ -76,15 +131,15 @@ type SqliteFailedThread struct {
 func (SqliteFailedThread) TableName() string { return "failed_threads" }
 
 type SqliteDebridTorrent struct {
-	Infohash    string                   `gorm:"column:infohash;primaryKey"`
-	TorrentID   string                   `gorm:"column:torrent_id"`
-	Provider    string                   `gorm:"column:provider"`
-	Status      string                   `gorm:"column:status"`
-	Files       database.JSONFileList   `gorm:"column:files"`
-	Links       database.JSONStringArray `gorm:"column:links"`
-	LastChecked time.Time                `gorm:"column:last_checked"`
-	CreatedAt   time.Time                `gorm:"column:created_at"`
-	UpdatedAt   time.Time                `gorm:"column:updated_at"`
+	Infohash    string          `gorm:"column:infohash;primaryKey"`
+	TorrentID   string          `gorm:"column:torrent_id"`
+	Provider    string          `gorm:"column:provider"`
+	Status      string          `gorm:"column:status"`
+	Files       JSONFileList    `gorm:"column:files"`
+	Links       JSONStringArray `gorm:"column:links"`
+	LastChecked time.Time       `gorm:"column:last_checked"`
+	CreatedAt   time.Time       `gorm:"column:created_at"`
+	UpdatedAt   time.Time       `gorm:"column:updated_at"`
 }
 
 func (SqliteDebridTorrent) TableName() string { return "debrid_torrents" }
@@ -140,6 +195,8 @@ func main() {
 	}
 	defer boltDB.Close()
 
+	// ── Sequential Table Extractor and Writer Transactions ──
+
 	// A. Process threads and generate fast-catalog indexes
 	log.Println("Migrating threads and compiling index caches...")
 	var sqliteThreads []SqliteThread
@@ -170,6 +227,7 @@ func main() {
 				bytesData, _ := database.EncodeGob(thread)
 				_ = threadBucket.Put([]byte(thread.ThreadHash), bytesData)
 
+				// Pre-Sorted Inverse Timestamps index keys
 				if thread.Status == "linked" && thread.Catalog != "" {
 					postedTime := time.Now()
 					if thread.PostedAt != nil {
@@ -253,7 +311,7 @@ func main() {
 	log.Println("Migrating parsing failures records...")
 	var sqliteFailed []SqliteFailedThread
 	if err := sqlDB.Find(&sqliteFailed).Error; err == nil {
-		_ = boltDB.Update(func(tx *bolt.Tx) error {
+		errTx := boltDB.Update(func(tx *bolt.Tx) error {
 			b := tx.Bucket([]byte("failed_threads"))
 			for _, f := range sqliteFailed {
 				ft := database.FailedThread{
@@ -267,13 +325,16 @@ func main() {
 			}
 			return nil
 		})
+		if errTx != nil {
+			log.Fatalf("Failed threads transactional write failed: %v\n", errTx)
+		}
 	}
 
 	// E. Process debrid_torrents
 	log.Println("Migrating debrid torrents download registers...")
 	var sqliteDebridTorrents []SqliteDebridTorrent
 	if err := sqlDB.Find(&sqliteDebridTorrents).Error; err == nil {
-		_ = boltDB.Update(func(tx *bolt.Tx) error {
+		errTx := boltDB.Update(func(tx *bolt.Tx) error {
 			b := tx.Bucket([]byte("debrid_torrents"))
 			for _, dt := range sqliteDebridTorrents {
 				var files []database.TorrentFile
@@ -301,12 +362,16 @@ func main() {
 			}
 			return nil
 		})
+		if errTx != nil {
+			log.Fatalf("Debrid torrents transactional write failed: %v\n", errTx)
+		}
 	}
 
 	// F. Process locks
+	log.Println("Migrating debrid cache locks...")
 	var sqliteLocks []SqliteDebridCacheLock
 	if err := sqlDB.Find(&sqliteLocks).Error; err == nil {
-		_ = boltDB.Update(func(tx *bolt.Tx) error {
+		errTx := boltDB.Update(func(tx *bolt.Tx) error {
 			b := tx.Bucket([]byte("debrid_cache_locks"))
 			for _, l := range sqliteLocks {
 				lock := database.DebridCacheLock{Infohash: l.Infohash, CreatedAt: l.CreatedAt}
@@ -315,12 +380,16 @@ func main() {
 			}
 			return nil
 		})
+		if errTx != nil {
+			log.Fatalf("Debrid locks transactional write failed: %v\n", errTx)
+		}
 	}
 
 	// G. Process magnet_cache
+	log.Println("Migrating infohash magnet lookup caches...")
 	var sqliteMagnets []SqliteMagnetCache
 	if err := sqlDB.Find(&sqliteMagnets).Error; err == nil {
-		_ = boltDB.Update(func(tx *bolt.Tx) error {
+		errTx := boltDB.Update(func(tx *bolt.Tx) error {
 			b := tx.Bucket([]byte("magnet_cache"))
 			for _, mc := range sqliteMagnets {
 				r := database.MagnetCache{Infohash: mc.Infohash, Magnet: mc.Magnet, CreatedAt: mc.CreatedAt}
@@ -329,12 +398,16 @@ func main() {
 			}
 			return nil
 		})
+		if errTx != nil {
+			log.Fatalf("Magnet cache transactional write failed: %v\n", errTx)
+		}
 	}
 
 	// H. Process torbox_id_map
+	log.Println("Migrating Torbox provider ID registers...")
 	var sqliteTorboxMap []SqliteTorboxIdMap
 	if err := sqlDB.Find(&sqliteTorboxMap).Error; err == nil {
-		_ = boltDB.Update(func(tx *bolt.Tx) error {
+		errTx := boltDB.Update(func(tx *bolt.Tx) error {
 			b := tx.Bucket([]byte("torbox_id_map"))
 			for _, m := range sqliteTorboxMap {
 				r := database.TorboxIdMap{TorrentID: m.TorrentID, Hash: m.Hash}
@@ -343,6 +416,9 @@ func main() {
 			}
 			return nil
 		})
+		if errTx != nil {
+			log.Fatalf("Torbox ID mapping transactional write failed: %v\n", errTx)
+		}
 	}
 
 	// ── Post-Load Verification Diagnostics ──
