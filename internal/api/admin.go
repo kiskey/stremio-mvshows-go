@@ -1,6 +1,6 @@
 
-// Version: 2.0.0
-// Change log: Transitioned GORM query and transaction syntax to safe transactional blocks using pure-Go Bolt/SQLite key-value structures.
+// Version: 2.0.1
+// Change log: Fixed undefined bolt namespace compiler error by explicitly aliasing go.etcd.io/bbolt import as bolt.
 
 package api
 
@@ -22,7 +22,7 @@ import (
 	"github.com/kiskey/stremio-mvshows-go/internal/services/parser"
 	"github.com/kiskey/stremio-mvshows-go/internal/services/tracker"
 	"github.com/kiskey/stremio-mvshows-go/internal/utils"
-	"go.etcd.io/bbolt"
+	bolt "go.etcd.io/bbolt"
 )
 
 func RegisterAdminRoutes(r *gin.RouterGroup) {
@@ -222,7 +222,7 @@ func linkOfficialHandler(c *gin.Context) {
 
 		// Check if this IMDb ID is already registered under an alternative TMDB ID
 		c := metaBucket.Cursor()
-		for k, v := range c {
+		for k, v := c.First(); k != nil; k, v = c.Next() {
 			var metadataRecord database.TmdbMetadata
 			if errDec := database.DecodeGob(v, &metadataRecord); errDec == nil {
 				if metadataRecord.ImdbID != nil && *metadataRecord.ImdbID == tmdbResult.ImdbID {
@@ -447,7 +447,7 @@ func autoMatchHandler(c *gin.Context) {
 
 			// GORM-safe Collision Pre-check: Verify if this IMDb ID is already registered under an alternative TMDB ID
 			c := metaBucket.Cursor()
-			for k, v := range c {
+			for k, v := c.First(); k != nil; k, v = c.Next() {
 				var fetched database.TmdbMetadata
 				if errDec := database.DecodeGob(v, &fetched); errDec == nil {
 					if fetched.ImdbID != nil && *fetched.ImdbID == res.Result.ImdbID {
