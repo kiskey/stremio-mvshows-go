@@ -1,6 +1,6 @@
 
-// Version: 2.0.3
-// Change log: Fixed invalid bbolt Cursor range loops by converting them to standard lexicographical cursor traversals.
+// Version: 2.0.4
+// Change log: Refactored linkOfficialHandler and autoMatchHandler transactional write blocks to cleanly compile dual-indexing metadata keys and register high-speed tmdb_thread_index records.
 
 package api
 
@@ -218,7 +218,6 @@ func linkOfficialHandler(c *gin.Context) {
 
 	errTx := database.DB.Update(func(tx *bolt.Tx) error {
 		metaBucket := tx.Bucket([]byte("tmdb_metadata"))
-		threadBucket := tx.Bucket([]byte("threads"))
 		magnetBucket := tx.Bucket([]byte("magnet_cache"))
 
 		// Check if this IMDb ID is already registered under an alternative TMDB ID
@@ -258,6 +257,11 @@ func linkOfficialHandler(c *gin.Context) {
 			return err
 		}
 		_ = metaBucket.Put([]byte(tmdbResult.TmdbID), metaBytes)
+		
+		// ⚡ DUAL-INDEX POINT-LOOKUP WRITES:
+		if tmdbMetadata.ImdbID != nil && *tmdbMetadata.ImdbID != "" {
+			_ = metaBucket.Put([]byte(*tmdbMetadata.ImdbID), metaBytes)
+		}
 
 		t.TmdbID = &tmdbResult.TmdbID
 		
@@ -278,22 +282,11 @@ func linkOfficialHandler(c *gin.Context) {
 			t.Year = &tmdbResult.Year
 		}
 
-		// Save updated thread
-		tBytes, err := database.EncodeGob(t)
+		// Save updated thread. Standardizing via helper compiles index-keys and thread pointers automatically!
+		err = database.CreateOrUpdateThread(tx, t)
 		if err != nil {
 			return err
 		}
-		_ = threadBucket.Put([]byte(t.ThreadHash), tBytes)
-
-		// Create chronological indexes
-		idxB := tx.Bucket([]byte("catalog_index"))
-		postedTime := time.Now()
-		if t.PostedAt != nil {
-			postedTime = *t.PostedAt
-		}
-		inverseTime := 9999999999 - postedTime.Unix()
-		indexKey := fmt.Sprintf("cat:%s:%010d:%s", t.Catalog, inverseTime, t.ThreadHash)
-		_ = idxB.Put([]byte(indexKey), []byte(t.ThreadHash))
 
 		// Create associated streams
 		var newStreams []database.Stream
@@ -305,17 +298,20 @@ func linkOfficialHandler(c *gin.Context) {
 
 			// Store cache record
 			cacheRecord := database.MagnetCache{
-				Infohash: parsedMagnet.Infohash,
-				Magnet:   magnet,
+				Infohash:  parsedMagnet.Infohash,
+				Magnet:    magnet,
+				CreatedAt: time.Now(),
 			}
 			cacheBytes, _ := database.EncodeGob(cacheRecord)
 			_ = magnetBucket.Put([]byte(parsedMagnet.Infohash), cacheBytes)
 
 			stream := database.Stream{
-				TmdbID:   tmdbResult.TmdbID,
-				Infohash: parsedMagnet.Infohash,
-				Quality:  parsedMagnet.Quality,
-				Language: parsedMagnet.Language,
+				TmdbID:    tmdbResult.TmdbID,
+				Infohash:  parsedMagnet.Infohash,
+				Quality:   parsedMagnet.Quality,
+				Language:  parsedMagnet.Language,
+				CreatedAt: time.Now(),
+				UpdatedAt: time.Now(),
 			}
 
 			if mediaType == "series" {
@@ -445,7 +441,6 @@ func autoMatchHandler(c *gin.Context) {
 	for idx, res := range results {
 		errTx := database.DB.Update(func(tx *bolt.Tx) error {
 			metaBucket := tx.Bucket([]byte("tmdb_metadata"))
-			threadBucket := tx.Bucket([]byte("threads"))
 			magnetBucket := tx.Bucket([]byte("magnet_cache"))
 
 			// GORM-safe Collision Pre-check: Verify if this IMDb ID is already registered under an alternative TMDB ID
@@ -485,6 +480,11 @@ func autoMatchHandler(c *gin.Context) {
 			}
 			_ = metaBucket.Put([]byte(res.Result.TmdbID), metaBytes)
 
+			// ⚡ DUAL-INDEX POINT-LOOKUP WRITES:
+			if tmdbMetadata.ImdbID != nil && *tmdbMetadata.ImdbID != "" {
+				_ = metaBucket.Put([]byte(*tmdbMetadata.ImdbID), metaBytes)
+			}
+
 			res.Thread.TmdbID = &res.Result.TmdbID
 			
 			// Write-Time Sanitation Failsafe:
@@ -503,21 +503,11 @@ func autoMatchHandler(c *gin.Context) {
 				res.Thread.Year = &res.Result.Year
 			}
 
-			tBytes, err := database.EncodeGob(res.Thread)
+			// Standardizing thread write automatically registers both catalog indexes and tmdb_thread_index!
+			err = database.CreateOrUpdateThread(tx, &res.Thread)
 			if err != nil {
 				return err
 			}
-			_ = threadBucket.Put([]byte(res.Thread.ThreadHash), tBytes)
-
-			// Maintain catalog indexes
-			idxB := tx.Bucket([]byte("catalog_index"))
-			postedTime := time.Now()
-			if res.Thread.PostedAt != nil {
-				postedTime = *res.Thread.PostedAt
-			}
-			inverseTime := 9999999999 - postedTime.Unix()
-			indexKey := fmt.Sprintf("cat:%s:%010d:%s", res.Thread.Catalog, inverseTime, res.Thread.ThreadHash)
-			_ = idxB.Put([]byte(indexKey), []byte(res.Thread.ThreadHash))
 
 			var newStreams []database.Stream
 			for _, magnet := range res.Thread.MagnetURIs {
@@ -527,17 +517,20 @@ func autoMatchHandler(c *gin.Context) {
 				}
 
 				cacheRecord := database.MagnetCache{
-					Infohash: parsedMagnet.Infohash,
-					Magnet:   magnet,
+					Infohash:  parsedMagnet.Infohash,
+					Magnet:    magnet,
+					CreatedAt: time.Now(),
 				}
 				cacheBytes, _ := database.EncodeGob(cacheRecord)
 				_ = magnetBucket.Put([]byte(parsedMagnet.Infohash), cacheBytes)
 
 				stream := database.Stream{
-					TmdbID:   res.Result.TmdbID,
-					Infohash: parsedMagnet.Infohash,
-					Quality:  parsedMagnet.Quality,
-					Language: parsedMagnet.Language,
+					TmdbID:    res.Result.TmdbID,
+					Infohash:  parsedMagnet.Infohash,
+					Quality:   parsedMagnet.Quality,
+					Language:  parsedMagnet.Language,
+					CreatedAt: time.Now(),
+					UpdatedAt: time.Now(),
 				}
 
 				if res.Thread.Type == "series" {
@@ -657,7 +650,7 @@ func cachePendingHandler(c *gin.Context) {
 	cfg := config.Load()
 	p := debrid.GetProvider(cfg)
 	if !p.IsEnabled() {
-		writeJSON(c, http.StatusBadRequest, gin.H{"error": "Debrid provider is currently disabled"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Debrid provider is currently disabled"})
 		return
 	}
 
