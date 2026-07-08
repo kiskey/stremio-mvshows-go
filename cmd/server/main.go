@@ -1,6 +1,6 @@
 
-// Version: 2.0.0
-// Change log: Removed GORM SQLite initialization pipelines, booting server directly into etcd-io/bbolt.
+// Version: 2.0.5
+// Change log: Removed all SQLite GORM connection logging pools and initialization pathways, booting the primary process directly into the bbolt transactional B+ Tree memory-mapped index layer.
 
 package main
 
@@ -90,6 +90,7 @@ func main() {
 
 	// 7. Fire initial background crawl workflow on cold start to immediately sync fresh releases
 	go func() {
+		// Small delay to let the HTTP server launch first
 		time.Sleep(3 * time.Second)
 		orchestrator.RunFullWorkflow(cfg)
 	}()
