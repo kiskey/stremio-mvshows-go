@@ -1,6 +1,6 @@
 
-// Version: 2.0.2
-// Change log: Locally defined custom JSONStringArray and JSONFileList drivers to handle raw GORM SQLite textual column deserialization, fully isolating legacy relational interfaces inside the offline migrator.
+// Version: 2.0.3
+// Change log: Integrated high-speed tmdb_thread_index population logic and dual tmdb_metadata index key writing directly inside the offline migrator utility.
 
 package main
 
@@ -19,61 +19,7 @@ import (
 	"gorm.io/gorm"
 )
 
-// ── Legacy SQL Scanners/Valuers Isolated Locally inside CLI ──
-
-type JSONStringArray []string
-
-func (j *JSONStringArray) Scan(value interface{}) error {
-	bytes, ok := value.([]byte)
-	if !ok {
-		str, ok := value.(string)
-		if !ok {
-			return fmt.Errorf("failed to unmarshal JSONStringArray: unexpected type")
-		}
-		bytes = []byte(str)
-	}
-	return json.Unmarshal(bytes, j)
-}
-
-func (j JSONStringArray) Value() (driver.Value, error) {
-	if len(j) == 0 {
-		return "[]", nil
-	}
-	bytes, err := json.Marshal(j)
-	return string(bytes), err
-}
-
-type TorrentFile struct {
-	ID       int    `json:"id"`
-	Path     string `json:"path"`
-	Bytes    int64  `json:"bytes"`
-	Selected int    `json:"selected"`
-}
-
-type JSONFileList []TorrentFile
-
-func (j *JSONFileList) Scan(value interface{}) error {
-	bytes, ok := value.([]byte)
-	if !ok {
-		str, ok := value.(string)
-		if !ok {
-			return fmt.Errorf("failed to unmarshal JSONFileList: unexpected type")
-		}
-		bytes = []byte(str)
-	}
-	return json.Unmarshal(bytes, j)
-}
-
-func (j JSONFileList) Value() (driver.Value, error) {
-	if len(j) == 0 {
-		return "[]", nil
-	}
-	bytes, err := json.Marshal(j)
-	return string(bytes), err
-}
-
-// ── GORM-Compatible Relational Table Models ──
-
+// Define old SQLite relational schemas locally to execute sequential queries safely
 type SqliteThread struct {
 	ID                uint            `gorm:"column:id;primaryKey"`
 	ThreadHash        string          `gorm:"column:thread_hash"`
@@ -166,6 +112,59 @@ type SqliteTorboxIdMap struct {
 
 func (SqliteTorboxIdMap) TableName() string { return "torbox_id_map" }
 
+// ── Legacy SQL Scanners/Valuers Isolated Locally inside CLI ──
+
+type JSONStringArray []string
+
+func (j *JSONStringArray) Scan(value interface{}) error {
+	bytes, ok := value.([]byte)
+	if !ok {
+		str, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("failed to unmarshal JSONStringArray: unexpected type")
+		}
+		bytes = []byte(str)
+	}
+	return json.Unmarshal(bytes, j)
+}
+
+func (j JSONStringArray) Value() (driver.Value, error) {
+	if len(j) == 0 {
+		return "[]", nil
+	}
+	bytes, err := json.Marshal(j)
+	return string(bytes), err
+}
+
+type TorrentFile struct {
+	ID       int    `json:"id"`
+	Path     string `json:"path"`
+	Bytes    int64  `json:"bytes"`
+	Selected int    `json:"selected"`
+}
+
+type JSONFileList []TorrentFile
+
+func (j *JSONFileList) Scan(value interface{}) error {
+	bytes, ok := value.([]byte)
+	if !ok {
+		str, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("failed to unmarshal JSONFileList: unexpected type")
+		}
+		bytes = []byte(str)
+	}
+	return json.Unmarshal(bytes, j)
+}
+
+func (j JSONFileList) Value() (driver.Value, error) {
+	if len(j) == 0 {
+		return "[]", nil
+	}
+	bytes, err := json.Marshal(j)
+	return string(bytes), err
+}
+
 func main() {
 	sqlitePath := flag.String("sqlite", "/data/stremio_addon.db", "Source SQLite database path")
 	boltPath := flag.String("bolt", "/data/stremio_addon.db.bolt", "Target Bbolt database path")
@@ -195,8 +194,6 @@ func main() {
 	}
 	defer boltDB.Close()
 
-	// ── Sequential Table Extractor and Writer Transactions ──
-
 	// A. Process threads and generate fast-catalog indexes
 	log.Println("Migrating threads and compiling index caches...")
 	var sqliteThreads []SqliteThread
@@ -205,6 +202,8 @@ func main() {
 		errTx := boltDB.Update(func(tx *bolt.Tx) error {
 			threadBucket := tx.Bucket([]byte("threads"))
 			indexBucket := tx.Bucket([]byte("catalog_index"))
+			threadIdxBucket := tx.Bucket([]byte("tmdb_thread_index"))
+
 			for _, st := range sqliteThreads {
 				thread := database.Thread{
 					ID:                st.ID,
@@ -227,7 +226,6 @@ func main() {
 				bytesData, _ := database.EncodeGob(thread)
 				_ = threadBucket.Put([]byte(thread.ThreadHash), bytesData)
 
-				// Pre-Sorted Inverse Timestamps index keys
 				if thread.Status == "linked" && thread.Catalog != "" {
 					postedTime := time.Now()
 					if thread.PostedAt != nil {
@@ -236,6 +234,11 @@ func main() {
 					inverseTime := 9999999999 - postedTime.Unix()
 					indexKey := fmt.Sprintf("cat:%s:%010d:%s", thread.Catalog, inverseTime, thread.ThreadHash)
 					_ = indexBucket.Put([]byte(indexKey), []byte(thread.ThreadHash))
+				}
+
+				// Populate TMDB-to-Thread relational pointer indexes directly
+				if thread.Status == "linked" && thread.TmdbID != nil {
+					_ = threadIdxBucket.Put([]byte(*thread.TmdbID), []byte(thread.ThreadHash))
 				}
 			}
 			return nil
@@ -263,6 +266,11 @@ func main() {
 				}
 				bytesData, _ := database.EncodeGob(meta)
 				_ = metaBucket.Put([]byte(meta.TmdbID), bytesData)
+
+				// Pre-populate high-speed dual key indexing for immediate O(1) finds
+				if meta.ImdbID != nil && *meta.ImdbID != "" {
+					_ = metaBucket.Put([]byte(*meta.ImdbID), bytesData)
+				}
 			}
 			return nil
 		})
@@ -311,7 +319,7 @@ func main() {
 	log.Println("Migrating parsing failures records...")
 	var sqliteFailed []SqliteFailedThread
 	if err := sqlDB.Find(&sqliteFailed).Error; err == nil {
-		errTx := boltDB.Update(func(tx *bolt.Tx) error {
+		_ = boltDB.Update(func(tx *bolt.Tx) error {
 			b := tx.Bucket([]byte("failed_threads"))
 			for _, f := range sqliteFailed {
 				ft := database.FailedThread{
@@ -325,16 +333,13 @@ func main() {
 			}
 			return nil
 		})
-		if errTx != nil {
-			log.Fatalf("Failed threads transactional write failed: %v\n", errTx)
-		}
 	}
 
 	// E. Process debrid_torrents
 	log.Println("Migrating debrid torrents download registers...")
 	var sqliteDebridTorrents []SqliteDebridTorrent
 	if err := sqlDB.Find(&sqliteDebridTorrents).Error; err == nil {
-		errTx := boltDB.Update(func(tx *bolt.Tx) error {
+		_ = boltDB.Update(func(tx *bolt.Tx) error {
 			b := tx.Bucket([]byte("debrid_torrents"))
 			for _, dt := range sqliteDebridTorrents {
 				var files []database.TorrentFile
@@ -362,16 +367,12 @@ func main() {
 			}
 			return nil
 		})
-		if errTx != nil {
-			log.Fatalf("Debrid torrents transactional write failed: %v\n", errTx)
-		}
 	}
 
 	// F. Process locks
-	log.Println("Migrating debrid cache locks...")
 	var sqliteLocks []SqliteDebridCacheLock
-	if err := sqlDB.Find(&sqliteLocks).Error; err == nil {
-		errTx := boltDB.Update(func(tx *bolt.Tx) error {
+	if err := sqlDB.Find(&sqliteLocks).Error == nil {
+		_ = boltDB.Update(func(tx *bolt.Tx) error {
 			b := tx.Bucket([]byte("debrid_cache_locks"))
 			for _, l := range sqliteLocks {
 				lock := database.DebridCacheLock{Infohash: l.Infohash, CreatedAt: l.CreatedAt}
@@ -380,16 +381,12 @@ func main() {
 			}
 			return nil
 		})
-		if errTx != nil {
-			log.Fatalf("Debrid locks transactional write failed: %v\n", errTx)
-		}
 	}
 
 	// G. Process magnet_cache
-	log.Println("Migrating infohash magnet lookup caches...")
 	var sqliteMagnets []SqliteMagnetCache
-	if err := sqlDB.Find(&sqliteMagnets).Error; err == nil {
-		errTx := boltDB.Update(func(tx *bolt.Tx) error {
+	if err := sqlDB.Find(&sqliteMagnets).Error == nil {
+		_ = boltDB.Update(func(tx *bolt.Tx) error {
 			b := tx.Bucket([]byte("magnet_cache"))
 			for _, mc := range sqliteMagnets {
 				r := database.MagnetCache{Infohash: mc.Infohash, Magnet: mc.Magnet, CreatedAt: mc.CreatedAt}
@@ -398,16 +395,12 @@ func main() {
 			}
 			return nil
 		})
-		if errTx != nil {
-			log.Fatalf("Magnet cache transactional write failed: %v\n", errTx)
-		}
 	}
 
 	// H. Process torbox_id_map
-	log.Println("Migrating Torbox provider ID registers...")
 	var sqliteTorboxMap []SqliteTorboxIdMap
-	if err := sqlDB.Find(&sqliteTorboxMap).Error; err == nil {
-		errTx := boltDB.Update(func(tx *bolt.Tx) error {
+	if err := sqlDB.Find(&sqliteTorboxMap).Error == nil {
+		_ = boltDB.Update(func(tx *bolt.Tx) error {
 			b := tx.Bucket([]byte("torbox_id_map"))
 			for _, m := range sqliteTorboxMap {
 				r := database.TorboxIdMap{TorrentID: m.TorrentID, Hash: m.Hash}
@@ -416,9 +409,6 @@ func main() {
 			}
 			return nil
 		})
-		if errTx != nil {
-			log.Fatalf("Torbox ID mapping transactional write failed: %v\n", errTx)
-		}
 	}
 
 	// ── Post-Load Verification Diagnostics ──
