@@ -1,5 +1,5 @@
-# Version: 1.0.4
-# Change log: Added a dynamic ternary-style tag_name fallback to "latest" to allow manual and branch-push events to compile and publish releases cleanly without "requires a tag" errors.
+# Version: 1.0.5
+# Change log: Added cross-compilation and artifact release uploads for the offline database conversion migrator utility (AMD64 and ARM64), enabling seamless single-command offline executions on target unprivileged host environments.
 
 name: Build & Release Static Binaries
 
@@ -70,17 +70,19 @@ jobs:
           go mod tidy
           go mod download
 
-      - name: Build Static Binary (Linux AMD64)
+      - name: Build Static Server Binaries
         run: |
           CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -installsuffix cgo -o stremio-mvshows-linux-amd64 ./cmd/server
-
-      - name: Build Static Binary (Linux ARM64)
-        run: |
           CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -installsuffix cgo -o stremio-mvshows-linux-arm64 ./cmd/server
+
+      - name: Build Static Offline Migrator Binaries
+        run: |
+          CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -ldflags="-s -w" -installsuffix cgo -o stremio-migrator-linux-amd64 ./cmd/migrator
+          CGO_ENABLED=0 GOOS=linux GOARCH=arm64 go build -ldflags="-s -w" -installsuffix cgo -o stremio-migrator-linux-arm64 ./cmd/migrator
 
       - name: Generate Checksums
         run: |
-          sha256sum stremio-mvshows-linux-amd64 stremio-mvshows-linux-arm64 > checksums.txt
+          sha256sum stremio-mvshows-linux-amd64 stremio-mvshows-linux-arm64 stremio-migrator-linux-amd64 stremio-migrator-linux-arm64 > checksums.txt
 
       - name: Create Release and Upload Assets
         uses: softprops/action-gh-release@v2
@@ -91,6 +93,8 @@ jobs:
           files: |
             stremio-mvshows-linux-amd64
             stremio-mvshows-linux-arm64
+            stremio-migrator-linux-amd64
+            stremio-migrator-linux-arm64
             checksums.txt
           draft: false
           prerelease: false
