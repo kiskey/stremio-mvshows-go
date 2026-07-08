@@ -1,6 +1,6 @@
 
-// Version: 2.0.0
-// Change log: Overhauled GORM SQLite connections, transitioning to etcd-io/bbolt memory-mapped B+ Tree storage with custom Bucket schemas.
+// Version: 2.0.1
+// Change log: Fixed undefined bolt namespace compiler error by explicitly aliasing go.etcd.io/bbolt import as bolt.
 
 package database
 
@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"time"
 
-	"go.etcd.io/bbolt"
+	bolt "go.etcd.io/bbolt"
 )
 
 var DB *bolt.DB
