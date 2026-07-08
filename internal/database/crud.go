@@ -1,6 +1,6 @@
 
-// Version: 2.0.1
-// Change log: Fixed undefined bolt namespace compiler error by explicitly aliasing go.etcd.io/bbolt import as bolt.
+// Version: 2.0.2
+// Change log: Integrated automatic tmdb_thread_index mappings inside CreateOrUpdateThread and cascaded deletes safely inside DeleteThread.
 
 package database
 
@@ -124,6 +124,13 @@ func CreateOrUpdateThread(tx *bolt.Tx, data *Thread) error {
 			indexKey := fmt.Sprintf("cat:%s:%010d:%s", data.Catalog, inverseTime, data.ThreadHash)
 			_ = idxB.Put([]byte(indexKey), []byte(data.ThreadHash))
 		}
+
+		// Compile Direct TMDB to Thread Pointer Index for microsecond-scale meta listings
+		if data.Status == "linked" && data.TmdbID != nil {
+			threadIdxB := tx.Bucket([]byte("tmdb_thread_index"))
+			_ = threadIdxB.Put([]byte(*data.TmdbID), []byte(data.ThreadHash))
+		}
+
 		return nil
 	})
 }
@@ -141,8 +148,9 @@ func DeleteThread(tx *bolt.Tx, t *Thread) error {
 			}
 		}
 
-		// Cascading delete related streams
+		// Clean up TMDB relational thread pointer index
 		if t.TmdbID != nil {
+			_ = tx.Bucket([]byte("tmdb_thread_index")).Delete([]byte(*t.TmdbID))
 			_ = tx.Bucket([]byte("streams")).Delete([]byte(*t.TmdbID))
 		}
 		return nil
