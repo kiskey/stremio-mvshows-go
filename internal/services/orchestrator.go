@@ -1,5 +1,5 @@
 
-// Version: 1.1.0
+// Version: 1.1.1
 // Change log: Updated processThread to supply context-aware (thread.Type) parameter to parser.ParseTitle, resolving misclassifications of leading numbers.
 
 package orchestrator
@@ -292,7 +292,7 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 			errCache := tx.Clauses(clause.OnConflict{
 				Columns:   []clause.Column{{Name: "infohash"}},
 				UpdateAll: true,
-			}).Create(&cacheRecord)
+			}).Create(&cacheRecord).Error
 			if errCache != nil {
 				return errCache
 			}
