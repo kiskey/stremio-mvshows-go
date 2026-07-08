@@ -1,5 +1,5 @@
-// Version: 1.0.7
-// Change log: Appended `.Error` accessor to GORM's Create call on MagnetCache to resolve compilation error.
+// Version: 1.0.8
+// Change log: Optimized metadata footprint by discarding raw TMDB search payload, saving "{}" inside the link tables to let Stremio's Cinemeta provide live metadata.
 
 package orchestrator
 
@@ -199,28 +199,24 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 			pending.Year = &parsed.Year
 		}
 
-		_ = database.DB.Transaction(func(tx *gorm.DB) error {
-			_ = database.DeleteFailedThread(thread.ThreadHash, tx)
-			return database.CreateOrUpdateThread(pending, tx)
-		})
+		_ = database.CreateOrUpdateThread(pending, nil)
 		return
 	}
 
-	// 4. Resolve and save linked metadata and streams inside a safe transaction block
 	errTx := database.DB.Transaction(func(tx *gorm.DB) error {
-		// GORM-safe Collision Pre-check: Verify if this IMDb ID is already registered under an alternative TMDB ID
+		// GORM-safe Collision Pre-check: Verify if this IMDb ID is already registered
 		if tmdbResult.ImdbID != "" {
 			var fetched []database.TmdbMetadata
 			if tx.Where("imdb_id = ?", tmdbResult.ImdbID).Limit(1).Find(&fetched).Error == nil && len(fetched) > 0 {
-				// Re-route local pointers to use the pre-existing record, completely avoiding UNIQUE constraints issues
 				tmdbResult.TmdbID = fetched[0].TmdbID
 			}
 		}
 
-		// Save TmdbMetadata records
-		rawDataBytes, _ := json.Marshal(tmdbResult.RawData)
+		// ZERO-STALE METADATA OPTIMIZATION: Discard massive external API JSON strings 
+		// and save a lightweight empty structure "{}" as placeholder.
+		// Cinemeta dynamically renders descriptions, artwork, and reviews on request.
+		rawDataBytes := []byte("{}")
 		
-		// CRITICAL FIX: Convert empty IMDb string to explicit NULL pointer for SQLite unique constraint
 		var imdbIDPtr *string
 		if tmdbResult.ImdbID != "" {
 			val := tmdbResult.ImdbID
@@ -244,8 +240,10 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 			return errMeta
 		}
 
+		thread.TmdbID = &tmdbResult.TmdbID
+		
 		// Write-Time Sanitation Failsafe:
-		// If TMDB search returns an empty title (e.g. some regional items), auto-fallback on parser output.
+		// If Cinemeta details API returned an empty title (skeleton card), sanitize RawTitle on-the-fly.
 		cleanTitle := tmdbResult.Title
 		if cleanTitle == "" {
 			parsed := parser.ParseTitle(thread.RawTitle)
@@ -296,7 +294,7 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 			errCache := tx.Clauses(clause.OnConflict{
 				Columns:   []clause.Column{{Name: "infohash"}},
 				UpdateAll: true,
-			}).Create(&cacheRecord).Error // EXPLICIT FIX: Appended .Error here to extract the actual Go error from GORM DB pointer
+			}).Create(&cacheRecord).Error
 			if errCache != nil {
 				return errCache
 			}
