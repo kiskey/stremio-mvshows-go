@@ -1,6 +1,6 @@
 
-// Version: 2.0.5
-// Change log: Optimized meta and stream endpoints to leverage high-speed tmdb_thread_index point lookups, avoiding nested loops and completely resolving stream-loading CORS errors.
+// Version: 2.0.6
+// Change log: Removed all remaining database.DB.Where GORM queries, replacing them with optimized Bbolt transactional direct page-get retrievals to resolve compilation errors.
 
 package api
 
@@ -546,9 +546,8 @@ func metaHandler(c *gin.Context) {
 		}
 
 		if mediaType == "series" {
-			// Fetch linked streams to build Stremio series videos navigation
-			var streams []database.Stream
-			_ = database.DB.Where("tmdb_id = ?", meta.TmdbID).Order("season ASC, episode ASC").Find(&streams)
+			// Fetch linked streams directly from Bbolt to build videos GUIDE selectors
+			streams, _ := database.FindMovieStreams(nil, meta.TmdbID)
 
 			videos := make([]StremioVideoDetail, 0)
 			seen := make(map[string]bool)
@@ -585,10 +584,21 @@ func metaHandler(c *gin.Context) {
 		return
 	}
 
-	var threads []database.Thread
-	errThread := database.DB.Where("thread_hash = ?", cleanID).Limit(1).Find(&threads).Error
-	if errThread == nil && len(threads) > 0 {
-		t := threads[0]
+	var foundThread *database.Thread
+	_ = database.DB.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("threads"))
+		data := b.Get([]byte(cleanID))
+		if data != nil {
+			var t database.Thread
+			if errDec := database.DecodeGob(data, &t); errDec == nil {
+				foundThread = &t
+			}
+		}
+		return nil
+	})
+
+	if foundThread != nil {
+		t := *foundThread
 		metaObj := StremioMetaDetail{
 			ID:          id,
 			Type:        t.Type,
@@ -617,10 +627,8 @@ func streamHandler(c *gin.Context) {
 		id = decoded
 	}
 
-	// Trim trailing extensions and whitespaces to prevent SQL mismatch
 	id = strings.TrimSpace(strings.TrimSuffix(id, ".json"))
 
-	// Strip pending prefix robustly if looking up unlinked thread streams
 	cleanID := id
 	if idx := strings.Index(id, ":pending:"); idx != -1 {
 		cleanID = id[idx+len(":pending:"):]
@@ -630,8 +638,6 @@ func streamHandler(c *gin.Context) {
 	season := -1
 	episode := -1
 
-	// Smart ID Splitting: Accurately identifies base ID vs Season/Episode parameters.
-	// Allocation Optimization: Use strings.LastIndex to bypass heap-allocating Split arrays
 	lastColon := strings.LastIndex(cleanID, ":")
 	if lastColon != -1 {
 		secondLastColon := strings.LastIndex(cleanID[:lastColon], ":")
@@ -652,7 +658,6 @@ func streamHandler(c *gin.Context) {
 		baseID = cleanID
 	}
 
-	// BULLETPROOF FIX: Overhauled query using standard GORM .Find() to avoid SQLite sorting and ORDER BY bugs
 	var meta database.TmdbMetadata
 	var foundMeta bool
 
@@ -670,7 +675,6 @@ func streamHandler(c *gin.Context) {
 		}
 
 		if foundMeta {
-			// Find the associated thread instantly via our high-speed thread index bucket
 			tHash := threadIdxB.Get([]byte(meta.TmdbID))
 			if tHash != nil {
 				tBytes := thrB.Get(tHash)
@@ -687,11 +691,21 @@ func streamHandler(c *gin.Context) {
 
 	if !foundMeta {
 		// If metadata lookup fails, check if the query requested unlinked/pending ThreadHash streams
-		var threads []database.Thread
-		errThread := database.DB.Where("thread_hash = ?", baseID).Limit(1).Find(&threads).Error
-		if errThread == nil && len(threads) > 0 {
-			t := threads[0]
-			// This is an unlinked thread. Return direct P2P fallback streams only (No RD mapping)
+		var foundThread *database.Thread
+		_ = database.DB.View(func(tx *bolt.Tx) error {
+			b := tx.Bucket([]byte("threads"))
+			data := b.Get([]byte(baseID))
+			if data != nil {
+				var t database.Thread
+				if errDec := database.DecodeGob(data, &t); errDec == nil {
+					foundThread = &t
+				}
+			}
+			return nil
+		})
+
+		if foundThread != nil {
+			t := *foundThread
 			streamList := make([]StremioStreamDetail, 0)
 			seenP2P := make(map[string]bool)
 
@@ -780,15 +794,22 @@ func streamHandler(c *gin.Context) {
 	}
 
 	// BULK PRE-FETCH: Load all magnet display names from magnet_cache table
-	var magnetCaches []database.MagnetCache
-	_ = database.DB.Where("infohash IN ?", allHashes).Find(&magnetCaches)
 	magnetMap := make(map[string]string)
-	for _, mc := range magnetCaches {
-		// Safe fallback parser robustly resolves raw display names on unescaped symbols (R-004)
-		if dn := parser.ExtractMagnetDisplayName(mc.Magnet); dn != "" {
-			magnetMap[mc.Infohash] = dn
+	_ = database.DB.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("magnet_cache"))
+		for _, h := range allHashes {
+			data := b.Get([]byte(h))
+			if data != nil {
+				var mc database.MagnetCache
+				if errDec := database.DecodeGob(data, &mc); errDec == nil {
+					if dn := parser.ExtractMagnetDisplayName(mc.Magnet); dn != "" {
+						magnetMap[h] = dn
+					}
+				}
+			}
 		}
-	}
+		return nil
+	})
 
 	var cachedStreams []StremioStreamDetail   // Instant ⚡ streams
 	var uncachedStreams []StremioStreamDetail // Downloading ⏳ streams
@@ -1170,6 +1191,7 @@ func rdAddHandler(c *gin.Context) {
 	// Poll status (max 60 iterations * 3s = 3 minutes) until "downloaded"
 	maxPolls := 60
 	pollInterval := 3 * time.Second
+	downloaded := false
 	torrentID := info.ID 
 
 	for i := 0; i < maxPolls; i++ {
