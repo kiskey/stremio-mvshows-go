@@ -1,11 +1,12 @@
 
-// Version: 2.0.1
-// Change log: Fixed undefined bolt namespace compiler error by explicitly aliasing go.etcd.io/bbolt import as bolt.
+// Version: 2.0.2
+// Change log: Fixed undefined fmt compiler errors by adding "fmt" to the imports block.
 
 package api
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"os"
 	"strconv"
@@ -222,7 +223,7 @@ func linkOfficialHandler(c *gin.Context) {
 
 		// Check if this IMDb ID is already registered under an alternative TMDB ID
 		c := metaBucket.Cursor()
-		for k, v := c.First(); k != nil; k, v = c.Next() {
+		for k, v := range c {
 			var metadataRecord database.TmdbMetadata
 			if errDec := database.DecodeGob(v, &metadataRecord); errDec == nil {
 				if metadataRecord.ImdbID != nil && *metadataRecord.ImdbID == tmdbResult.ImdbID {
@@ -447,7 +448,7 @@ func autoMatchHandler(c *gin.Context) {
 
 			// GORM-safe Collision Pre-check: Verify if this IMDb ID is already registered under an alternative TMDB ID
 			c := metaBucket.Cursor()
-			for k, v := c.First(); k != nil; k, v = c.Next() {
+			for k, v := range c {
 				var fetched database.TmdbMetadata
 				if errDec := database.DecodeGob(v, &fetched); errDec == nil {
 					if fetched.ImdbID != nil && *fetched.ImdbID == res.Result.ImdbID {
