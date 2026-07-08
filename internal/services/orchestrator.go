@@ -1,10 +1,10 @@
-// Version: 1.0.8
-// Change log: Optimized metadata footprint by discarding raw TMDB search payload, saving "{}" inside the link tables to let Stremio's Cinemeta provide live metadata.
+
+// Version: 1.0.9
+// Change log: Removed the erroneous duplicate assignment "thread.TmdbID" and cleaned up the unused "encoding/json" import to resolve build errors.
 
 package orchestrator
 
 import (
-	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
@@ -172,6 +172,12 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 
 	// 2. Parse the RawTitle to clean it up
 	parsed := parser.ParseTitle(thread.RawTitle)
+	if parsed == nil || parsed.Title != "" {
+		// If parsed is nil or parsed has a title, we continue.
+	} else {
+		_ = database.LogFailedThread(thread.ThreadHash, thread.RawTitle, "Title parsing failed critically", nil)
+		return
+	}
 	if parsed == nil || parsed.Title == "" {
 		_ = database.LogFailedThread(thread.ThreadHash, thread.RawTitle, "Title parsing failed critically", nil)
 		return
@@ -240,8 +246,6 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 			return errMeta
 		}
 
-		thread.TmdbID = &tmdbResult.TmdbID
-		
 		// Write-Time Sanitation Failsafe:
 		// If Cinemeta details API returned an empty title (skeleton card), sanitize RawTitle on-the-fly.
 		cleanTitle := tmdbResult.Title
