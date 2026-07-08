@@ -1,6 +1,6 @@
 
-// Version: 1.2.6
-// Change log: Removed heavy JSON decoding allocations inside hot-path endpoints. Catalog cards render details locally from index fields with dynamic Metahub poster URL paths.
+// Version: 1.2.7
+// Change log: Removed upfront debrid_torrents pre-fetching queries and sequential unrestricting loops inside streamHandler. All streams resolve on-demand using standard /rd-add/ paths for peak performance.
 
 package api
 
@@ -747,14 +747,6 @@ func streamHandler(c *gin.Context) {
 		}
 	}
 
-	// BULK PRE-FETCH: Load all debrid torrent records to fetch active downloaded file structures/sizes
-	var debridTorrents []database.DebridTorrent
-	_ = database.DB.Where("infohash IN ?", allHashes).Find(&debridTorrents)
-	debridTorrentMap := make(map[string]database.DebridTorrent)
-	for _, dt := range debridTorrents {
-		debridTorrentMap[dt.Infohash] = dt
-	}
-
 	var cachedStreams []StremioStreamDetail   // Instant ⚡ streams
 	var uncachedStreams []StremioStreamDetail // Downloading ⏳ streams
 
@@ -823,15 +815,7 @@ func streamHandler(c *gin.Context) {
 		}
 
 		// Append overall file size to the badges line if known, falling back on direct regex name parsing if uncached
-		var totalSize int64 = 0
-		if dt, ok := debridTorrentMap[s.Infohash]; ok {
-			for _, f := range dt.Files {
-				totalSize += f.Bytes
-			}
-		}
-		if totalSize > 0 {
-			badgeLine += "  |  💾 " + utils.FormatSize(totalSize)
-		} else if dn != "" {
+		if dn != "" {
 			if parsedSize := parser.ExtractFileSize(dn); parsedSize != "" {
 				badgeLine += "  |  💾 " + parsedSize
 			}
@@ -882,41 +866,9 @@ func streamHandler(c *gin.Context) {
 		seenStreams[dupKey] = true
 
 		if p.IsEnabled() {
-			// ---- Attempt instant playback for already-downloaded torrents ----
-			var debridTorrent database.DebridTorrent
-			if dt, ok := debridTorrentMap[s.Infohash]; ok && dt.Status == "downloaded" && len(dt.Files) > 0 && len(dt.Links) > 0 {
-				debridTorrent = dt
-				fileToStream, linkIndex := pickBestDebridFile(debridTorrent.Files, debridTorrent.Links, mediaType, season, episode)
-				if fileToStream != nil && linkIndex >= 0 && linkIndex < len(debridTorrent.Links) {
-					unrestricted, errUnrestrict := p.UnrestrictLink(c.Request.Context(), debridTorrent.Links[linkIndex])
-					if errUnrestrict == nil && unrestricted != nil && unrestricted.Download != "" {
-						badgeName := "⚡ RD+" + resTag
-						if cfg.DebridService == "torbox" {
-							badgeName = "⚡ TB+" + resTag
-						}
-
-						formattedTitle := fmt.Sprintf("%s\n✨ %s\n🔊 %s\n📦 File: %s (%s)", 
-							detailsHeader, 
-							badgeLine, 
-							langBadge, 
-							fileToStream.Path, 
-							utils.FormatSize(fileToStream.Bytes),
-						)
-
-						item := StremioStreamDetail{
-							Name:     badgeName,
-							Title:    formattedTitle,
-							URL:      unrestricted.Download,
-							Quality:  s.Quality,
-							Language: s.Language,
-						}
-						cachedStreams = append(cachedStreams, item)
-						continue // Skip the /rd-add/ fallback for this stream
-					}
-				}
-			}
-
-			// ---- Standard RD/TB stream (redirects through /rd-add/) ----
+			// ---- Strict On-Demand Debrid Stream Model ----
+			// All cached streams are generated with /rd-add/ redirection paths. No upfront unrestrict 
+			// calls are executed, resulting in instant listing menus and minimal server footprint.
 			targetEpStr := "movie"
 			if season != -1 && episode != -1 {
 				targetEpStr = fmt.Sprintf("%d-%d", season, episode)
