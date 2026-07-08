@@ -1,6 +1,6 @@
 
-// Version: 2.0.2
-// Change log: Integrated automatic tmdb_thread_index mappings inside CreateOrUpdateThread and cascaded deletes safely inside DeleteThread.
+// Version: 2.0.3
+// Change log: Added a resilient panic-recovery wrapper inside DecodeGob to handle future schema model changes without crashes. Configured CreateOrUpdateThread to automatically locate and prune outdated catalog index records on modifications to prevent ghost duplicates.
 
 package database
 
@@ -27,7 +27,14 @@ func EncodeGob(val interface{}) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-func DecodeGob(data []byte, val interface{}) error {
+// DecodeGob implements a resilient, panic-recovering GOB decoder to insulate the application
+// from future struct changes (e.g. data type adjustments or field renamings) without server crashes.
+func DecodeGob(data []byte, val interface{}) (err error) {
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("gob deserialization panic rescued: %v", r)
+		}
+	}()
 	return gob.NewDecoder(bytes.NewReader(data)).Decode(val)
 }
 
@@ -104,6 +111,27 @@ func FindThreadByID(id uint) (*Thread, error) {
 func CreateOrUpdateThread(tx *bolt.Tx, data *Thread) error {
 	return runUpdate(tx, func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte("threads"))
+		idxB := tx.Bucket([]byte("catalog_index"))
+
+		// 1. SELF-HEALING INDEX REGISTRY (Resolves Risk 1):
+		// Locate and prune old index files if the thread's PostedAt timestamp, Catalog, or Type is updated
+		existingData := b.Get([]byte(data.ThreadHash))
+		if existingData != nil {
+			var oldThread Thread
+			if errDec := DecodeGob(existingData, &oldThread); errDec == nil {
+				if oldThread.Catalog != "" {
+					oldPosted := time.Now()
+					if oldThread.PostedAt != nil {
+						oldPosted = *oldThread.PostedAt
+					}
+					oldInverse := 9999999999 - oldPosted.Unix()
+					oldIndexKey := fmt.Sprintf("cat:%s:%s:%010d:%s", oldThread.Catalog, oldThread.Type, oldInverse, oldThread.ThreadHash)
+					_ = idxB.Delete([]byte(oldIndexKey))
+				}
+			}
+		}
+
+		// 2. Commit the updated Thread structure to the threads bucket
 		bytesData, err := EncodeGob(data)
 		if err != nil {
 			return err
@@ -113,19 +141,18 @@ func CreateOrUpdateThread(tx *bolt.Tx, data *Thread) error {
 			return err
 		}
 
-		// Pre-Sorted Chronological Indexes compilation for live Catalog retrievals
-		idxB := tx.Bucket([]byte("catalog_index"))
+		// 3. Write new, chronological pre-sorted catalog index key (Resolves Risk 3)
 		if data.Status == "linked" && data.Catalog != "" {
 			postedTime := time.Now()
 			if data.PostedAt != nil {
 				postedTime = *data.PostedAt
 			}
 			inverseTime := 9999999999 - postedTime.Unix()
-			indexKey := fmt.Sprintf("cat:%s:%010d:%s", data.Catalog, inverseTime, data.ThreadHash)
+			indexKey := fmt.Sprintf("cat:%s:%s:%010d:%s", data.Catalog, data.Type, inverseTime, data.ThreadHash)
 			_ = idxB.Put([]byte(indexKey), []byte(data.ThreadHash))
 		}
 
-		// Compile Direct TMDB to Thread Pointer Index for microsecond-scale meta listings
+		// 4. Update the high-speed TMDB mapping index
 		if data.Status == "linked" && data.TmdbID != nil {
 			threadIdxB := tx.Bucket([]byte("tmdb_thread_index"))
 			_ = threadIdxB.Put([]byte(*data.TmdbID), []byte(data.ThreadHash))
