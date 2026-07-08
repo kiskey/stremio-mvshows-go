@@ -1,6 +1,6 @@
 
-// Version: 2.0.2
-// Change log: Restored the complete rdAddHandler implementation updated for high-speed BoltDB transactional queries. Activated context and time packages in imports block safely.
+// Version: 2.0.3
+// Change log: Restored missing getDebridCachedLink and getDownloadLinkForFile supporting methods at the bottom of the file to fix compiler undefined errors.
 
 package api
 
@@ -1269,11 +1269,12 @@ func rdAddHandler(c *gin.Context) {
 		default:
 		}
 
-		info, err = p.GetTorrentInfo(reqCtx, torrentID)
-		if err != nil {
-			utils.Logger.Warn().Err(err).Str("id", torrentID).Msg("Error polling debrid torrent status. Retrying.")
+		var errPoll error
+		info, errPoll = p.GetTorrentInfo(reqCtx, torrentID)
+		if errPoll != nil {
+			utils.Logger.Warn().Err(errPoll).Str("id", torrentID).Msg("Error polling debrid torrent status. Retrying.")
 		} else if info != nil && info.Status == "downloaded" {
-			downloaded = true
+			downloaded := true
 			break
 		}
 		time.Sleep(pollInterval)
@@ -1378,4 +1379,115 @@ func rdAddHandler(c *gin.Context) {
 	})
 
 	c.Redirect(http.StatusFound, finalLink)
+}
+
+// ── Cached Debrid Link Resolver ──
+
+func getDebridCachedLink(ctx context.Context, r *database.DebridTorrent, season, episode int, isMovie bool) (string, error) {
+	cfg := config.Load()
+	p := debrid.GetProvider(cfg)
+
+	// Map DB record back to TorrentInfo shape to utilize our universal link resolver
+	info := &debrid.TorrentInfo{
+		ID:    r.TorrentID,
+		Links: r.Links,
+	}
+	info.Files = make([]debrid.FileInfo, len(r.Files))
+	for i, f := range r.Files {
+		info.Files[i] = debrid.FileInfo{
+			ID:       f.ID,
+			Path:     f.Path,
+			Bytes:    f.Bytes,
+			Selected: f.Selected,
+		}
+	}
+
+	if isMovie {
+		var selectedFiles []debrid.FileInfo
+		for _, f := range info.Files {
+			if f.Selected == 1 {
+				selectedFiles = append(selectedFiles, f)
+			}
+		}
+		if len(selectedFiles) == 0 {
+			return "", fmt.Errorf("no selected files")
+		}
+		var fileToPlay *debrid.FileInfo
+		var videoFiles []debrid.FileInfo
+		for _, f := range selectedFiles {
+			if strings.HasSuffix(strings.ToLower(f.Path), ".mkv") ||
+				strings.HasSuffix(strings.ToLower(f.Path), ".mp4") ||
+				strings.HasSuffix(strings.ToLower(f.Path), ".avi") {
+				videoFiles = append(videoFiles, f)
+			}
+		}
+		if len(videoFiles) > 0 {
+			largest := &videoFiles[0]
+			for i := 1; i < len(videoFiles); i++ {
+				if videoFiles[i].Bytes > largest.Bytes {
+					largest = &videoFiles[i]
+				}
+			}
+			fileToPlay = largest
+		} else {
+			largest := &selectedFiles[0]
+			for i := 1; i < len(selectedFiles); i++ {
+				if selectedFiles[i].Bytes > largest.Bytes {
+					largest = &selectedFiles[i]
+				}
+			}
+			fileToPlay = largest
+		}
+
+		return getDownloadLinkForFile(ctx, p, info, fileToPlay.ID)
+	}
+
+	// Build Series Candidates list
+	candidates := make([]parser.CandidateFile, len(info.Files))
+	for idx, f := range info.Files {
+		candidates[idx] = parser.CandidateFile{
+			ID:   f.ID,
+			Path: f.Path,
+			Size: f.Bytes,
+		}
+	}
+
+	best, found := parser.FindBestSeriesFile(candidates, season, episode, season)
+	if found {
+		return getDownloadLinkForFile(ctx, p, info, best.ID)
+	}
+
+	return "", fmt.Errorf("best file match not found")
+}
+
+// getDownloadLinkForFile dynamically asserts if the provider implements direct link resolution (TorBox) or index-based unrestrict (Real-Debrid)
+func getDownloadLinkForFile(ctx context.Context, p debrid.Provider, info *debrid.TorrentInfo, fileID int) (string, error) {
+	if dlProvider, ok := p.(interface {
+		GetDownloadLinkForFile(context.Context, string, string) (string, error)
+	}); ok {
+		return dlProvider.GetDownloadLinkForFile(ctx, info.ID, strconv.Itoa(fileID))
+	}
+
+	// Real-Debrid / Fallback index-based link unrestriction
+	linkIndex := -1
+	selectedCount := 0
+	for _, f := range info.Files {
+		if f.Selected == 1 {
+			if f.ID == fileID {
+				linkIndex = selectedCount
+				break
+			}
+			selectedCount++
+		}
+	}
+
+	if linkIndex < 0 || linkIndex >= len(info.Links) {
+		return "", fmt.Errorf("file ID %d not selected or links index out of range", fileID)
+	}
+
+	unrestricted, err := p.UnrestrictLink(ctx, info.Links[linkIndex])
+	if err != nil {
+		return "", err
+	}
+	return unrestricted.Download, nil
 }
