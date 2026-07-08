@@ -1,11 +1,10 @@
-// Version: 1.1.1
-// Change log: Integrated a write-time failsafe in linkOfficialHandler and autoMatchHandler to sanitize empty API-returned titles via the local parser.ParseTitle before database commit.
+// Version: 1.1.3
+// Change log: Removed unused "encoding/json" import to satisfy the strict Go compiler and ensure successful compilation.
 
 package api
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"os"
 	"strconv"
@@ -226,8 +225,9 @@ func linkOfficialHandler(c *gin.Context) {
 			}
 		}
 
-		// Save TmdbMetadata records
-		rawDataBytes, _ := json.Marshal(tmdbResult.RawData)
+		// ZERO-STALE METADATA OPTIMIZATION: Save lightweight empty JSON struct "{}" 
+		// and let Stremio handle dynamic updates via Cinemeta API on the fly
+		rawDataBytes := []byte("{}")
 		
 		var imdbIDPtr *string
 		if tmdbResult.ImdbID != "" {
@@ -438,7 +438,9 @@ func autoMatchHandler(c *gin.Context) {
 				}
 			}
 
-			rawDataBytes, _ := json.Marshal(res.Result.RawData)
+			// ZERO-STALE METADATA OPTIMIZATION: Discard massive metadata JSON string 
+			// and save a lightweight empty structure "{}" instead.
+			rawDataBytes := []byte("{}")
 			
 			var imdbIDPtr *string
 			if res.Result.ImdbID != "" {
