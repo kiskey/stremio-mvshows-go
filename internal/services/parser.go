@@ -1,5 +1,6 @@
-// Version: 1.1.6
-// Change log: Refactored parser to introduce context-aware (movie/series) logic, index-0 truncation guardrails, and no-empty noise filter failsafes to align with Sonarr/Radarr parsing engines.
+
+// Version: 1.1.7
+// Change log: Integrated Year-Anchored Left-Parsing, Linear-Time Balanced Rune-Stack Bracket cleansing, Boundary-Sensitive punctuation preserving, and Regional Indian Audio mapping to reach parity with Sonarr/Radarr standards.
 
 package parser
 
@@ -52,6 +53,11 @@ type BadgeFilter struct {
 	Name      string
 	Positive  *regexp.Regexp
 	Negatives []*regexp.Regexp
+}
+
+type bracketPair struct {
+	start int
+	end   int
 }
 
 var languageToISO = map[rtp.Language]string{
@@ -121,6 +127,21 @@ var infohashRegex = regexp.MustCompile(`(?i)btih:([a-f0-9]{40})`)
 var fileSizeRegex = regexp.MustCompile(`\b\d+(\.\d+)?[gmk]b\b`)
 var channelRegex = regexp.MustCompile(`\b(?:ddp)?\d\.\d(?:\.\d)?\b`)
 var sizeCaptureRegex = regexp.MustCompile(`(?i)\b\d+(?:\.\d+)?\s*(?:GB|MB|KB)\b`)
+
+var wrappedYearRegex = regexp.MustCompile(`[\(\[]((?:19|20)\d{2})[\)\]]`)
+var plainYearRegex = regexp.MustCompile(`\b((?:19|20)\d{2})\b`)
+
+var regionalLanguagePatterns = []struct {
+	Lang string
+	Pat  *regexp.Regexp
+}{
+	{"ta", regexp.MustCompile(`(?i)\b(tamil|tam|ta)\b`)},
+	{"te", regexp.MustCompile(`(?i)\b(telugu|tel|te)\b`)},
+	{"hi", regexp.MustCompile(`(?i)\b(hindi|hin|hi)\b`)},
+	{"ml", regexp.MustCompile(`(?i)\b(malayalam|mal|ml)\b`)},
+	{"kn", regexp.MustCompile(`(?i)\b(kannada|kan|kn)\b`)},
+	{"en", regexp.MustCompile(`(?i)\b(english|eng|en)\b`)},
+}
 
 // Patterns that identify the boundary of series/episode identifiers to truncate trailing metadata noise
 var truncationRegexes = []*regexp.Regexp{
@@ -389,18 +410,145 @@ func truncateSeriesJunk(s string) string {
 	return strings.Trim(s, " .-_[]()/\\")
 }
 
-func replacePunctuation(r rune) rune {
-	if r == '(' || r == ')' || r == '[' || r == ']' || r == '-' || r == '+' || r == '/' || r == ':' || r == ',' || r == '&' || r == '.' || r == '*' || r == '!' || r == '?' {
-		return ' '
+func isMetadataBlock(content string) bool {
+	normalized := strings.ToLower(content)
+	metadataTokens := []string{
+		"1080p", "720p", "2160p", "4k", "uhd", "bluray", "bdrip", "brrip",
+		"web-dl", "webdl", "webrip", "hdrip", "dvdrip", "hdtv", "hevc", "x264", "x265",
+		"aac", "ddp", "dd5", "ac3", "dts", "atmos", "esub", "msub", "dubbed", "dub",
+		"audios", "kbps", "untouched", "multi", "original",
 	}
-	return r
+	for _, tok := range metadataTokens {
+		if strings.Contains(normalized, tok) {
+			return true
+		}
+	}
+	if fileSizeRegex.MatchString(normalized) || sizeCaptureRegex.MatchString(normalized) {
+		return true
+	}
+	return false
+}
+
+func cleanBalancedBrackets(input string) string {
+	runes := []rune(input)
+	var stack []int
+	var pairs []bracketPair
+
+	for i, r := range runes {
+		if r == '[' || r == '(' {
+			stack = append(stack, i)
+		} else if r == ']' || r == ')' {
+			if len(stack) > 0 {
+				startIdx := stack[len(stack)-1]
+				stack = stack[:len(stack)-1]
+				if len(pairs) < 50 {
+					pairs = append(pairs, bracketPair{start: startIdx, end: i})
+				}
+			}
+		}
+	}
+
+	keep := make([]bool, len(runes))
+	for i := range keep {
+		keep[i] = true
+	}
+
+	for _, p := range pairs {
+		if p.start >= 0 && p.end < len(runes) && p.start < p.end {
+			content := string(runes[p.start+1 : p.end])
+			if isMetadataBlock(content) {
+				for idx := p.start; idx <= p.end; idx++ {
+					keep[idx] = false
+				}
+			}
+		}
+	}
+
+	var b strings.Builder
+	b.Grow(len(runes))
+	for i, r := range runes {
+		if keep[i] {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+func replacePunctuationSmart(input string) string {
+	runes := []rune(input)
+	var b strings.Builder
+	b.Grow(len(runes))
+
+	for i, r := range runes {
+		if r == '(' || r == ')' || r == '[' || r == ']' || r == '-' || r == '+' || r == '/' || r == '*' || r == '!' || r == '?' || r == ',' || r == '&' {
+			b.WriteRune(' ')
+		} else if r == '.' || r == ':' {
+			// Boundary Check Lookaround: Preserve decimals (e.g., "3.6.9") or timestamps
+			isDecimalOrTime := false
+			if i > 0 && i < len(runes)-1 {
+				prev := runes[i-1]
+				next := runes[i+1]
+				if unicode.IsDigit(prev) && unicode.IsDigit(next) {
+					isDecimalOrTime = true
+				}
+			}
+			if isDecimalOrTime {
+				b.WriteRune(r)
+			} else {
+				b.WriteRune(' ')
+			}
+		} else {
+			b.WriteRune(r)
+		}
+	}
+	return b.String()
+}
+
+func extractYearAnchor(s string) (int, string) {
+	matches := wrappedYearRegex.FindAllStringSubmatchIndex(s, -1)
+	if len(matches) > 0 {
+		lastMatch := matches[len(matches)-1]
+		yearStr := s[lastMatch[2]:lastMatch[3]]
+		if yr, err := strconv.Atoi(yearStr); err == nil && yr >= 1900 && yr <= 2030 {
+			leftPart := strings.TrimSpace(s[:lastMatch[0]])
+			if leftPart != "" {
+				return yr, leftPart
+			}
+		}
+	}
+
+	plainMatches := plainYearRegex.FindAllStringSubmatchIndex(s, -1)
+	if len(plainMatches) > 0 {
+		for i := len(plainMatches) - 1; i >= 0; i-- {
+			m := plainMatches[i]
+			yearStr := s[m[2]:m[3]]
+			if yr, err := strconv.Atoi(yearStr); err == nil && yr >= 1900 && yr <= 2030 {
+				leftPart := strings.TrimSpace(s[:m[0]])
+				if leftPart != "" {
+					return yr, leftPart
+				}
+			}
+		}
+	}
+
+	return 0, s
+}
+
+func detectRegionalLanguage(title string) string {
+	for _, rp := range regionalLanguagePatterns {
+		if rp.Pat.MatchString(title) {
+			return rp.Lang
+		}
+	}
+	return ""
 }
 
 func filterTorrentNoise(title string, originalTitle string) string {
 	title = collapseSpaces(strings.ToLower(title))
 	title = fileSizeRegex.ReplaceAllString(title, " ")
 	title = channelRegex.ReplaceAllString(title, " ")
-	title = strings.Map(replacePunctuation, title)
+	
+	title = replacePunctuationSmart(title)
 
 	words := strings.Fields(title)
 	filteredWords := make([]string, 0, len(words))
@@ -450,7 +598,20 @@ func RobustParseInfo(title string, fallbackSeason int, contentType string) *Pars
 	}
 	parseCacheMu.RUnlock()
 
-	clean := SanitizeName(title)
+	// Step 1: Pre-process balanced brackets to strip complex metadata blocks recursively
+	balancedClean := cleanBalancedBrackets(title)
+	if balancedClean == "" {
+		balancedClean = title
+	}
+
+	// Step 2: Extract true Release Year and isolate Title Candidate
+	extractedYear, leftTitleCandidate := extractYearAnchor(balancedClean)
+
+	// Step 3: Check regional Indian audio track languages before they are cleaned
+	detectedLang := detectRegionalLanguage(title)
+
+	// Step 4: Run standard sanitization on isolated Title Candidate
+	clean := SanitizeName(leftTitleCandidate)
 	searchTitle := truncateSeriesJunk(clean)
 
 	var res *ParseResult
@@ -464,6 +625,9 @@ func RobustParseInfo(title string, fallbackSeason int, contentType string) *Pars
 			lang := "en"
 			if len(movie.Languages) > 0 {
 				lang = getISO(movie.Languages[0])
+			}
+			if detectedLang != "" {
+				lang = detectedLang
 			}
 			res = &ParseResult{
 				Title:    movie.PrimaryMovieTitle(),
@@ -483,6 +647,9 @@ func RobustParseInfo(title string, fallbackSeason int, contentType string) *Pars
 			if len(info.Languages) > 0 {
 				lang = getISO(info.Languages[0])
 			}
+			if detectedLang != "" {
+				lang = detectedLang
+			}
 			episode := 0
 			if len(info.EpisodeNumbers) > 0 {
 				episode = info.EpisodeNumbers[0]
@@ -500,7 +667,7 @@ func RobustParseInfo(title string, fallbackSeason int, contentType string) *Pars
 				res.EpisodeStart = info.EpisodeNumbers[0]
 				res.EpisodeEnd = info.EpisodeNumbers[len(info.EpisodeNumbers)-1]
 			}
-			res.Title = filterTorrentNoise(res.Title)
+			res.Title = filterTorrentNoise(res.Title, searchTitle)
 		} else {
 			// Movie Fallback
 			movie := rtp.ParseMovieTitle(searchTitle)
@@ -508,6 +675,9 @@ func RobustParseInfo(title string, fallbackSeason int, contentType string) *Pars
 				lang := "en"
 				if len(movie.Languages) > 0 {
 					lang = getISO(movie.Languages[0])
+				}
+				if detectedLang != "" {
+					lang = detectedLang
 				}
 				res = &ParseResult{
 					Title:    movie.PrimaryMovieTitle(),
@@ -530,7 +700,14 @@ func RobustParseInfo(title string, fallbackSeason int, contentType string) *Pars
 			Language: "en",
 			Quality:  "sd",
 		}
+		if detectedLang != "" {
+			res.Language = detectedLang
+		}
 		res.Title = filterTorrentNoise(res.Title, searchTitle)
+	}
+
+	if res.Year == 0 && extractedYear != 0 {
+		res.Year = extractedYear
 	}
 
 	if res.EpisodeStart == 0 && res.EpisodeEnd == 0 {
@@ -1023,7 +1200,7 @@ var filtersDef = []struct {
 	{"r-4k", "gr", "4K", `(?i)\b2160[pi]?\b|\b4k\b|\buhd\b`, []string{`(?i)\b1080[pi]?\b|\b720[pi]?\b`}},
 	{"r-1080", "gr", "1080p", `(?i)\b1080[pi]?\b`, nil},
 	{"r-720", "gr", "720p", `(?i)\b720[pi]?\b`, nil},
-	{"v-seadex", "gv", "SeaDex", `(?i)\b(seadex|best[\s\-_]?)?filter\b`, nil}, // Fixed regex syntax and simplified matching logic
+	{"v-seadex", "gv", "SeaDex", `(?i)\b(seadex|best[\s\-_]?)?filter\b`, nil},
 	{"v-seadex-fallback", "gv", "SeaDex", `(?i)\b(seadex|best)\b`, nil},
 	{"v-seadex-gr", "gr", "SeaDex", `(?i)\b(seadex|best)\b`, nil},
 }
