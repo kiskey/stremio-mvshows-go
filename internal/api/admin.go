@@ -1,6 +1,6 @@
 
-// Version: 1.1.4
-// Change log: Updated manual linking endpoints to propagate the context-aware type to ParseTitle, ensuring correct title resolving.
+// Version: 1.1.5
+// Change log: Passed contextual parameters directly to ParseTitle inside linkOfficialHandler and autoMatchHandler to ensure precise movie parsing execution.
 
 package api
 
