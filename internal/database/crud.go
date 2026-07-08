@@ -1,6 +1,6 @@
 
-// Version: 2.0.0
-// Change log: Rewrote CRUD helpers from raw GORM queries into safe, highly optimized Bbolt transactional block readers/writers with in-memory GOB marshaling.
+// Version: 2.0.1
+// Change log: Fixed undefined bolt namespace compiler error by explicitly aliasing go.etcd.io/bbolt import as bolt.
 
 package database
 
@@ -8,10 +8,11 @@ import (
 	"bytes"
 	"encoding/gob"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 
-	"go.etcd.io/bbolt"
+	bolt "go.etcd.io/bbolt"
 )
 
 // ── Generic Serialization Helpers ──
@@ -26,10 +27,8 @@ func EncodeGob(val interface{}) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-func DecodeGob(data []byte, dest interface{}) error {
-	buf := bytes.NewBuffer(data)
-	dec := gob.NewDecoder(buf)
-	return dec.Decode(dest)
+func DecodeGob(data []byte, val interface{}) error {
+	return gob.NewDecoder(bytes.NewReader(data)).Decode(val)
 }
 
 func runView(tx *bolt.Tx, fn func(tx *bolt.Tx) error) error {
