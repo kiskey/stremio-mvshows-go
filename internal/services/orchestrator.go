@@ -1,10 +1,10 @@
-// Version: 1.0.7
-// Change log: Appended `.Error` accessor to GORM's Create call on MagnetCache to resolve compilation error.
+
+// Version: 1.1.1
+// Change log: Updated processThread to supply context-aware (thread.Type) parameter to parser.ParseTitle, resolving misclassifications of leading numbers.
 
 package orchestrator
 
 import (
-	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
@@ -170,8 +170,8 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 		_ = database.DB.Where("tmdb_id = ?", existing.TmdbID).Delete(&database.Stream{})
 	}
 
-	// 2. Parse the RawTitle to clean it up
-	parsed := parser.ParseTitle(thread.RawTitle)
+	// 2. Parse the RawTitle to clean it up with context-aware logic
+	parsed := parser.ParseTitle(thread.RawTitle, thread.Type)
 	if parsed == nil || parsed.Title == "" {
 		_ = database.LogFailedThread(thread.ThreadHash, thread.RawTitle, "Title parsing failed critically", nil)
 		return
@@ -199,28 +199,24 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 			pending.Year = &parsed.Year
 		}
 
-		_ = database.DB.Transaction(func(tx *gorm.DB) error {
-			_ = database.DeleteFailedThread(thread.ThreadHash, tx)
-			return database.CreateOrUpdateThread(pending, tx)
-		})
+		_ = database.CreateOrUpdateThread(pending, nil)
 		return
 	}
 
-	// 4. Resolve and save linked metadata and streams inside a safe transaction block
 	errTx := database.DB.Transaction(func(tx *gorm.DB) error {
-		// GORM-safe Collision Pre-check: Verify if this IMDb ID is already registered under an alternative TMDB ID
+		// GORM-safe Collision Pre-check: Verify if this IMDb ID is already registered
 		if tmdbResult.ImdbID != "" {
 			var fetched []database.TmdbMetadata
 			if tx.Where("imdb_id = ?", tmdbResult.ImdbID).Limit(1).Find(&fetched).Error == nil && len(fetched) > 0 {
-				// Re-route local pointers to use the pre-existing record, completely avoiding UNIQUE constraints issues
 				tmdbResult.TmdbID = fetched[0].TmdbID
 			}
 		}
 
-		// Save TmdbMetadata records
-		rawDataBytes, _ := json.Marshal(tmdbResult.RawData)
+		// ZERO-STALE METADATA OPTIMIZATION: Discard massive external API JSON strings 
+		// and save a lightweight empty structure "{}" as placeholder.
+		// Cinemeta dynamically renders descriptions, artwork, and reviews on request.
+		rawDataBytes := []byte("{}")
 		
-		// CRITICAL FIX: Convert empty IMDb string to explicit NULL pointer for SQLite unique constraint
 		var imdbIDPtr *string
 		if tmdbResult.ImdbID != "" {
 			val := tmdbResult.ImdbID
@@ -245,10 +241,10 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 		}
 
 		// Write-Time Sanitation Failsafe:
-		// If TMDB search returns an empty title (e.g. some regional items), auto-fallback on parser output.
+		// If Cinemeta details API returned an empty title (skeleton card), sanitize RawTitle on-the-fly.
 		cleanTitle := tmdbResult.Title
 		if cleanTitle == "" {
-			parsed := parser.ParseTitle(thread.RawTitle)
+			parsed := parser.ParseTitle(thread.RawTitle, thread.Type)
 			if parsed != nil && parsed.Title != "" {
 				cleanTitle = parsed.Title
 			} else {
@@ -296,7 +292,7 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 			errCache := tx.Clauses(clause.OnConflict{
 				Columns:   []clause.Column{{Name: "infohash"}},
 				UpdateAll: true,
-			}).Create(&cacheRecord).Error // EXPLICIT FIX: Appended .Error here to extract the actual Go error from GORM DB pointer
+			}).Create(&cacheRecord).Error
 			if errCache != nil {
 				return errCache
 			}
@@ -327,7 +323,6 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 					stream.Episode = &startVal
 					stream.EpisodeEnd = &endVal
 				} else {
-					// Full Season Pack (Episode fields remain NULL to capture any target match)
 					stream.Episode = nil
 					stream.EpisodeEnd = nil
 				}

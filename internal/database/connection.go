@@ -1,3 +1,4 @@
+
 package database
 
 import (
@@ -56,6 +57,13 @@ func Init(dbPath string, level gormlogger.LogLevel) (*gorm.DB, error) {
 	DB.Exec("PRAGMA synchronous=NORMAL;")
 	DB.Exec("PRAGMA foreign_keys=OFF;") // Keeps SQLite database execution free of physical key mismatches
 	DB.Exec("PRAGMA busy_timeout=5000;") // Wait up to 5s for locks to clear before throwing an error
+
+	// PEAK PERFORMANCE TUNING: Force temporary databases into memory and allocate page cache buffers (~20MB)
+	DB.Exec("PRAGMA temp_store=MEMORY;")
+	DB.Exec("PRAGMA cache_size=-20000;")
+	
+	// Configure migration-safe non-blocking incremental auto-vacuum
+	DB.Exec("PRAGMA auto_vacuum=INCREMENTAL;")
 
 	// Ensure legacy non-composite unique indexes are cleared
 	DB.Exec("DROP INDEX IF EXISTS idx_streams_infohash;")
@@ -177,6 +185,7 @@ func createExplicitTables(db *gorm.DB) error {
 		`CREATE INDEX IF NOT EXISTS idx_threads_posted_at ON threads(posted_at);`,
 		`CREATE INDEX IF NOT EXISTS idx_threads_catalog ON threads(catalog);`,
 		`CREATE INDEX IF NOT EXISTS idx_threads_last_seen ON threads(last_seen);`,
+		`CREATE INDEX IF NOT EXISTS idx_threads_catalog_status_type_posted ON threads(catalog, status, type, posted_at DESC);`,
 
 		`CREATE TABLE IF NOT EXISTS streams (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,

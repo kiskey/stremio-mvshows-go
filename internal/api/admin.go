@@ -1,11 +1,11 @@
-// Version: 1.1.1
-// Change log: Integrated a write-time failsafe in linkOfficialHandler and autoMatchHandler to sanitize empty API-returned titles via the local parser.ParseTitle before database commit.
+
+// Version: 1.1.5
+// Change log: Passed contextual parameters directly to ParseTitle inside linkOfficialHandler and autoMatchHandler to ensure precise movie parsing execution.
 
 package api
 
 import (
 	"context"
-	"encoding/json"
 	"net/http"
 	"os"
 	"strconv"
@@ -226,8 +226,9 @@ func linkOfficialHandler(c *gin.Context) {
 			}
 		}
 
-		// Save TmdbMetadata records
-		rawDataBytes, _ := json.Marshal(tmdbResult.RawData)
+		// ZERO-STALE METADATA OPTIMIZATION: Save lightweight empty JSON struct "{}" 
+		// and let Stremio handle dynamic updates via Cinemeta API on the fly
+		rawDataBytes := []byte("{}")
 		
 		var imdbIDPtr *string
 		if tmdbResult.ImdbID != "" {
@@ -258,7 +259,7 @@ func linkOfficialHandler(c *gin.Context) {
 		// If Cinemeta details API returned an empty title (skeleton card), sanitize RawTitle on-the-fly.
 		cleanTitle := tmdbResult.Title
 		if cleanTitle == "" {
-			parsed := parser.ParseTitle(t.RawTitle)
+			parsed := parser.ParseTitle(t.RawTitle, t.Type)
 			if parsed != nil && parsed.Title != "" {
 				cleanTitle = parsed.Title
 			} else {
@@ -394,7 +395,7 @@ func autoMatchHandler(c *gin.Context) {
 			}
 
 			// Clean the title using our newly optimized parser logic
-			parsed := parser.ParseTitle(t.RawTitle)
+			parsed := parser.ParseTitle(t.RawTitle, t.Type)
 			if parsed == nil || parsed.Title == "" {
 				mu.Lock()
 				failCount++
@@ -438,7 +439,9 @@ func autoMatchHandler(c *gin.Context) {
 				}
 			}
 
-			rawDataBytes, _ := json.Marshal(res.Result.RawData)
+			// ZERO-STALE METADATA OPTIMIZATION: Discard massive metadata JSON string 
+			// and save a lightweight empty structure "{}" instead.
+			rawDataBytes := []byte("{}")
 			
 			var imdbIDPtr *string
 			if res.Result.ImdbID != "" {
@@ -468,7 +471,7 @@ func autoMatchHandler(c *gin.Context) {
 			// Write-Time Sanitation Failsafe:
 			cleanTitle := res.Result.Title
 			if cleanTitle == "" {
-				parsed := parser.ParseTitle(res.Thread.RawTitle)
+				parsed := parser.ParseTitle(res.Thread.RawTitle, res.Thread.Type)
 				if parsed != nil && parsed.Title != "" {
 					cleanTitle = parsed.Title
 				} else {
