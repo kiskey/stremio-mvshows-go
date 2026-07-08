@@ -1,3 +1,4 @@
+
 package maintenance
 
 import (
@@ -8,8 +9,8 @@ import (
 	"github.com/kiskey/stremio-mvshows-go/internal/utils"
 )
 
-// PerformMaintenance runs WAL checkpoint truncation, database VACUUM, ANALYZE queries,
-// and clears unaccessed debrid cache entries older than the configured expiry threshold.
+// PerformMaintenance runs incremental page vacuuming, optimizations, statistics calibrations,
+// and truncates transaction logs cleanly without acquiring blocking exclusive system locks.
 func PerformMaintenance() {
 	utils.Logger.Info().Msg("Starting database maintenance routines...")
 
@@ -38,28 +39,29 @@ func PerformMaintenance() {
 		}
 	}
 
-	// 2. Truncate the Write-Ahead Log (WAL) to shrink wal file sizes safely
-	err := database.DB.Exec("PRAGMA wal_checkpoint(TRUNCATE);").Error
+	// 2. Incremental Vacuum: Safely release deleted pages back to OS without blocking locks
+	err := database.DB.Exec("PRAGMA incremental_vacuum(200);").Error
+	if err != nil {
+		utils.Logger.Warn().Err(err).Msg("PRAGMA incremental_vacuum failed during maintenance.")
+	} else {
+		utils.Logger.Debug().Msg("Incremental vacuum completed successfully.")
+	}
+
+	// 3. Recalculate index stats on active query structures with threshold boundaries
+	_ = database.DB.Exec("PRAGMA analysis_limit=400;")
+	err = database.DB.Exec("PRAGMA optimize;").Error
+	if err != nil {
+		utils.Logger.Warn().Err(err).Msg("PRAGMA optimize failed during maintenance.")
+	} else {
+		utils.Logger.Debug().Msg("PRAGMA optimize completed successfully.")
+	}
+
+	// 4. Truncate WAL cleanly AFTER all write/vacuuming operations have finished writing
+	err = database.DB.Exec("PRAGMA wal_checkpoint(TRUNCATE);").Error
 	if err != nil {
 		utils.Logger.Warn().Err(err).Msg("PRAGMA wal_checkpoint failed during maintenance.")
 	} else {
-		utils.Logger.Debug().Msg("WAL checkpoint completed.")
-	}
-
-	// 3. Rebuild the database file, defragmenting and shrinking file size
-	err = database.DB.Exec("VACUUM;").Error
-	if err != nil {
-		utils.Logger.Error().Err(err).Msg("VACUUM execution failed during maintenance.")
-	} else {
-		utils.Logger.Debug().Msg("VACUUM completed.")
-	}
-
-	// 4. Recalculate index statistics to help the SQLite optimizer make smarter queries
-	err = database.DB.Exec("ANALYZE;").Error
-	if err != nil {
-		utils.Logger.Warn().Err(err).Msg("ANALYZE execution failed during maintenance.")
-	} else {
-		utils.Logger.Debug().Msg("ANALYZE completed.")
+		utils.Logger.Debug().Msg("WAL checkpoint and transaction truncation completed.")
 	}
 
 	utils.Logger.Info().Msg("Database maintenance routines completed successfully.")
