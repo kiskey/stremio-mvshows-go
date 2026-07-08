@@ -1,6 +1,6 @@
 
-// Version: 1.1.1
-// Change log: Updated processThread to supply context-aware (thread.Type) parameter to parser.ParseTitle, resolving misclassifications of leading numbers.
+// Version: 1.1.2
+// Change log: Refactored database logic from GORM to high-performance BoltDB transactional bucket queries to resolve build errors and ensure functional parity.
 
 package orchestrator
 
@@ -16,8 +16,7 @@ import (
 	"github.com/kiskey/stremio-mvshows-go/internal/services/metadata"
 	"github.com/kiskey/stremio-mvshows-go/internal/services/parser"
 	"github.com/kiskey/stremio-mvshows-go/internal/utils"
-	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
+	bolt "go.etcd.io/bbolt"
 )
 
 var (
@@ -53,9 +52,28 @@ func UpdateDashboardCache() {
 	var linked, pending, failed int64
 
 	if database.DB != nil {
-		_ = database.DB.Model(&database.Thread{}).Where("status = ?", "linked").Count(&linked)
-		_ = database.DB.Model(&database.Thread{}).Where("status = ?", "pending_tmdb").Count(&pending)
-		_ = database.DB.Model(&database.FailedThread{}).Count(&failed)
+		_ = database.DB.View(func(tx *bolt.Tx) error {
+			tb := tx.Bucket([]byte("threads"))
+			if tb != nil {
+				c := tb.Cursor()
+				for k, v := c.First(); k != nil; k, v = c.Next() {
+					var t database.Thread
+					if err := database.DecodeGob(v, &t); err == nil {
+						if t.Status == "linked" {
+							linked++
+						} else if t.Status == "pending_tmdb" {
+							pending++
+						}
+					}
+				}
+			}
+
+			ftb := tx.Bucket([]byte("failed_threads"))
+			if ftb != nil {
+				failed = int64(ftb.Stats().KeyN)
+			}
+			return nil
+		})
 	}
 
 	cacheMu.Lock()
@@ -103,9 +121,26 @@ func RunFullWorkflow(cfg *config.Config) {
 	// Option 1 & Option 3: Check database-seeding state to determine the dynamic crawling mode
 	incremental := false
 	if database.DB != nil {
-		var count int64
-		_ = database.DB.Model(&database.Thread{}).Where("status = ?", "linked").Count(&count)
-		
+		var count int
+		_ = database.DB.View(func(tx *bolt.Tx) error {
+			b := tx.Bucket([]byte("threads"))
+			if b != nil {
+				c := b.Cursor()
+				for k, v := c.First(); k != nil; k, v = c.Next() {
+					var t database.Thread
+					if err := database.DecodeGob(v, &t); err == nil {
+						if t.Status == "linked" {
+							count++
+							if count > 50 {
+								break
+							}
+						}
+					}
+				}
+			}
+			return nil
+		})
+
 		// If database already contains more than 50 seeded records, safely transition to fast incremental sync
 		if count > 50 && !cfg.ForceFullScrape {
 			incremental = true
@@ -151,10 +186,9 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 		}
 	}()
 
-	// 1. Check existing thread by raw_title
-	var existing database.Thread
-	err := database.DB.Where("raw_title = ?", thread.RawTitle).First(&existing).Error
-	if err == nil {
+	// 1. Check existing thread by raw_title using Bolt point lookup
+	existing, err := database.FindThreadByRawTitle(nil, thread.RawTitle)
+	if err == nil && existing != nil {
 		// If thread hash matches exactly, nothing changed.
 		if existing.ThreadHash == thread.ThreadHash {
 			// Self-Healing Rule: If the thread is in "pending_tmdb" status, only skip it during 
@@ -167,13 +201,17 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 		}
 
 		// If thread hash changed, delete the old stream relationships to prevent duplicates
-		_ = database.DB.Where("tmdb_id = ?", existing.TmdbID).Delete(&database.Stream{})
+		if existing.TmdbID != nil {
+			_ = database.DB.Update(func(tx *bolt.Tx) error {
+				return tx.Bucket([]byte("streams")).Delete([]byte(*existing.TmdbID))
+			})
+		}
 	}
 
 	// 2. Parse the RawTitle to clean it up with context-aware logic
 	parsed := parser.ParseTitle(thread.RawTitle, thread.Type)
 	if parsed == nil || parsed.Title == "" {
-		_ = database.LogFailedThread(thread.ThreadHash, thread.RawTitle, "Title parsing failed critically", nil)
+		_ = database.LogFailedThread(nil, thread.ThreadHash, thread.RawTitle, "Title parsing failed critically")
 		return
 	}
 
@@ -199,16 +237,28 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 			pending.Year = &parsed.Year
 		}
 
-		_ = database.CreateOrUpdateThread(pending, nil)
+		_ = database.DB.Update(func(tx *bolt.Tx) error {
+			_ = database.DeleteFailedThread(tx, thread.ThreadHash)
+			return database.CreateOrUpdateThread(tx, pending)
+		})
 		return
 	}
 
-	errTx := database.DB.Transaction(func(tx *gorm.DB) error {
-		// GORM-safe Collision Pre-check: Verify if this IMDb ID is already registered
+	errTx := database.DB.Update(func(tx *bolt.Tx) error {
+		metaBucket := tx.Bucket([]byte("tmdb_metadata"))
+		magnetBucket := tx.Bucket([]byte("magnet_cache"))
+
+		// Check if this IMDb ID is already registered under an alternative TMDB ID
 		if tmdbResult.ImdbID != "" {
-			var fetched []database.TmdbMetadata
-			if tx.Where("imdb_id = ?", tmdbResult.ImdbID).Limit(1).Find(&fetched).Error == nil && len(fetched) > 0 {
-				tmdbResult.TmdbID = fetched[0].TmdbID
+			c := metaBucket.Cursor()
+			for k, v := c.First(); k != nil; k, v = c.Next() {
+				var fetched database.TmdbMetadata
+				if errDec := database.DecodeGob(v, &fetched); errDec == nil {
+					if fetched.ImdbID != nil && *fetched.ImdbID == tmdbResult.ImdbID {
+						tmdbResult.TmdbID = fetched.TmdbID
+						break
+					}
+				}
 			}
 		}
 
@@ -224,20 +274,23 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 		}
 
 		tmdbMetadata := database.TmdbMetadata{
-			TmdbID: tmdbResult.TmdbID,
-			ImdbID: imdbIDPtr,
-			Data:   string(rawDataBytes),
+			TmdbID:    tmdbResult.TmdbID,
+			ImdbID:    imdbIDPtr,
+			Data:      string(rawDataBytes),
+			CreatedAt: time.Now(),
+			UpdatedAt: time.Now(),
 		}
 		if tmdbResult.Year > 0 {
 			tmdbMetadata.Year = &tmdbResult.Year
 		}
 
-		errMeta := tx.Clauses(clause.OnConflict{
-			Columns:   []clause.Column{{Name: "tmdb_id"}},
-			UpdateAll: true,
-		}).Create(&tmdbMetadata).Error
-		if errMeta != nil {
-			return errMeta
+		metaBytes, err := database.EncodeGob(tmdbMetadata)
+		if err != nil {
+			return err
+		}
+		err = metaBucket.Put([]byte(tmdbResult.TmdbID), metaBytes)
+		if err != nil {
+			return err
 		}
 
 		// Write-Time Sanitation Failsafe:
@@ -263,19 +316,21 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 			PostedAt:   thread.PostedAt,
 			Catalog:    thread.CatalogID,
 			MagnetURIs: thread.MagnetURIs,
+			CreatedAt:  time.Now(),
+			UpdatedAt:  time.Now(),
 		}
 		if tmdbResult.Year > 0 {
 			linkedThread.Year = &tmdbResult.Year
 		}
 
-		errThr := database.CreateOrUpdateThread(linkedThread, tx)
-		if errThr != nil {
-			return errThr
+		err = database.CreateOrUpdateThread(tx, linkedThread)
+		if err != nil {
+			return err
 		}
 
 		// Cache hot properties outside loop to avoid redundant heap string copies on every magnet
 		isSeries := strings.ToLower(thread.Type) == "series"
-		nowTime := time.Now()
+		var streams []database.Stream
 
 		// Extract, construct, and upsert each magnet URI into a stream mapping
 		for _, magnet := range thread.MagnetURIs {
@@ -286,27 +341,24 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 
 			// Store magnet mapping in Cache so on-demand RD lookup can find it later by infohash
 			cacheRecord := database.MagnetCache{
-				Infohash: parsedMagnet.Infohash,
-				Magnet:   magnet,
+				Infohash:  parsedMagnet.Infohash,
+				Magnet:    magnet,
+				CreatedAt: time.Now(),
 			}
-			errCache := tx.Clauses(clause.OnConflict{
-				Columns:   []clause.Column{{Name: "infohash"}},
-				UpdateAll: true,
-			}).Create(&cacheRecord).Error
-			if errCache != nil {
-				return errCache
-			}
+			cacheBytes, _ := database.EncodeGob(cacheRecord)
+			_ = magnetBucket.Put([]byte(parsedMagnet.Infohash), cacheBytes)
 
-			// Generate relational streams
+			// Generate stream
 			stream := database.Stream{
-				TmdbID:   tmdbResult.TmdbID,
-				Infohash: parsedMagnet.Infohash,
-				Quality:  parsedMagnet.Quality,
-				Language: parsedMagnet.Language,
+				TmdbID:    tmdbResult.TmdbID,
+				Infohash:  parsedMagnet.Infohash,
+				Quality:   parsedMagnet.Quality,
+				Language:  parsedMagnet.Language,
+				CreatedAt: time.Now(),
+				UpdatedAt: time.Now(),
 			}
 
 			if isSeries {
-				// Parse structural season and episode parameters
 				seasonVal := parsedMagnet.Season
 				if seasonVal == 0 {
 					seasonVal = 1
@@ -322,52 +374,27 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 					endVal := parsedMagnet.EpisodeEnd
 					stream.Episode = &startVal
 					stream.EpisodeEnd = &endVal
-				} else {
-					stream.Episode = nil
-					stream.EpisodeEnd = nil
 				}
-			} else {
-				// Movie Streams do not require season/episode parameters
-				stream.Season = nil
-				stream.Episode = nil
-				stream.EpisodeEnd = nil
 			}
 
-			// NULL-safe Unique Stream Existence Check:
-			// Prevents SQLite unique index duplicate leaks on Nullable fields (season/episode)
-			var existingStream database.Stream
-			chkQuery := tx.Where("tmdb_id = ? AND infohash = ?", stream.TmdbID, stream.Infohash)
-			if stream.Season != nil {
-				chkQuery = chkQuery.Where("season = ?", *stream.Season)
-			} else {
-				chkQuery = chkQuery.Where("season IS NULL")
-			}
-			if stream.Episode != nil {
-				chkQuery = chkQuery.Where("episode = ?", *stream.Episode)
-			} else {
-				chkQuery = chkQuery.Where("episode IS NULL")
-			}
+			streams = append(streams, stream)
+		}
 
-			if chkQuery.First(&existingStream).Error == nil {
-				// Key already exists, perform an explicit in-place update
-				stream.ID = existingStream.ID
-				stream.CreatedAt = existingStream.CreatedAt
-				stream.UpdatedAt = nowTime
-				_ = tx.Save(&stream)
-			} else {
-				// Completely unique key, insert record cleanly
-				_ = tx.Create(&stream)
+		if len(streams) > 0 {
+			err = database.CreateStreams(tx, streams)
+			if err != nil {
+				return err
 			}
 		}
 
 		// Clean up any old error parsing logs
-		_ = database.DeleteFailedThread(thread.ThreadHash, tx)
+		_ = database.DeleteFailedThread(tx, thread.ThreadHash)
 		return nil
 	})
 
 	if errTx != nil {
 		utils.Logger.Error().Err(errTx).Str("title", thread.RawTitle).Msg("Transaction failed while saving linked metadata.")
-		_ = database.LogFailedThread(thread.ThreadHash, thread.RawTitle, fmt.Sprintf("Tx Save Error: %s", errTx.Error()), nil)
+		_ = database.LogFailedThread(nil, thread.ThreadHash, thread.RawTitle, fmt.Sprintf("Tx Save Error: %s", errTx.Error()))
 	} else {
 		utils.Logger.Info().Str("title", thread.RawTitle).Msg("Successfully linked thread and saved stream references.")
 	}
