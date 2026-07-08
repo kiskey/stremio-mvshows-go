@@ -1,5 +1,5 @@
-// Version: 1.1.5
-// Change log: Upgraded truncationRegexes with a Sonarr-grade unified pattern to cleanly match and strip unclosed, non-standard trailing episode tags like s01ep(01.
+// Version: 1.1.6
+// Change log: Refactored parser to introduce context-aware (movie/series) logic, index-0 truncation guardrails, and no-empty noise filter failsafes to align with Sonarr/Radarr parsing engines.
 
 package parser
 
@@ -252,7 +252,7 @@ func foldRune(r rune) rune {
 		return 'J'
 	case 'Ķ':
 		return 'K'
-	case 'Ĺ', 'Ļ', 'Ľ', 'Ŀ', 'Ł':
+	case 'ĺ', 'ļ', 'ľ', 'ŀ', 'ł':
 		return 'L'
 	case 'Ñ', 'Ń', 'Ņ', 'Ň', 'Ŋ':
 		return 'N'
@@ -266,7 +266,7 @@ func foldRune(r rune) rune {
 		return 'T'
 	case 'Ù', 'Ú', 'Û', 'Ü', 'Ũ', 'Ū', 'Ŭ', 'Ů', 'Ű', 'Ų', 'Ǔ', 'Ǖ', 'Ǘ', 'Ǜ':
 		return 'U'
-	case 'Ŵ':
+	case 'ŵ':
 		return 'W'
 	case 'Ý', 'Ÿ', 'Ŷ':
 		return 'Y'
@@ -376,6 +376,13 @@ func parseEpisodeRange(s string) (int, int, bool) {
 func truncateSeriesJunk(s string) string {
 	for _, re := range truncationRegexes {
 		if loc := re.FindStringIndex(s); loc != nil {
+			// RADARR-GRADE GUARDRAIL:
+			// If the match starts at the very beginning of the string (index 0),
+			// it means the numbers are the actual title (e.g., "45 (2025)", "180 (2026)"),
+			// not trailing metadata. We skip truncation in this case to prevent stripping titles.
+			if loc[0] == 0 {
+				continue
+			}
 			s = s[:loc[0]]
 		}
 	}
@@ -389,7 +396,7 @@ func replacePunctuation(r rune) rune {
 	return r
 }
 
-func filterTorrentNoise(title string) string {
+func filterTorrentNoise(title string, originalTitle string) string {
 	title = collapseSpaces(strings.ToLower(title))
 	title = fileSizeRegex.ReplaceAllString(title, " ")
 	title = channelRegex.ReplaceAllString(title, " ")
@@ -411,10 +418,31 @@ func filterTorrentNoise(title string) string {
 		filteredWords = append(filteredWords, w)
 	}
 
-	return collapseSpaces(strings.Join(filteredWords, " "))
+	finalTitle := collapseSpaces(strings.Join(filteredWords, " "))
+	if finalTitle == "" {
+		// RADARR-GRADE FAILSAFE:
+		// If noise filters completely blank out the title (e.g. proper nouns like "True", "The Rip", "2012"),
+		// fall back to the original parsed title, stripping only year tags and unneeded brackets manually.
+		cleanOriginal := strings.TrimSpace(originalTitle)
+		cleanOriginal = rePrefixRegex.ReplaceAllString(cleanOriginal, "")
+		cleanOriginal = urlRegex.ReplaceAllString(cleanOriginal, " ")
+		cleanOriginal = bracketRegex.ReplaceAllString(cleanOriginal, " ")
+		cleanOriginal = collapseSpaces(cleanOriginal)
+		
+		yearRegex := regexp.MustCompile(`\s*[\(\[]?\d{4}[\)\]]?`)
+		cleanOriginal = yearRegex.ReplaceAllString(cleanOriginal, "")
+		cleanOriginal = strings.Trim(cleanOriginal, " .-_[]()/\\")
+		
+		if cleanOriginal != "" {
+			return cleanOriginal
+		}
+		return originalTitle
+	}
+
+	return finalTitle
 }
 
-func RobustParseInfo(title string, fallbackSeason int) *ParseResult {
+func RobustParseInfo(title string, fallbackSeason int, contentType string) *ParseResult {
 	parseCacheMu.RLock()
 	if cached, ok := parseCache[title]; ok {
 		parseCacheMu.RUnlock()
@@ -425,39 +453,12 @@ func RobustParseInfo(title string, fallbackSeason int) *ParseResult {
 	clean := SanitizeName(title)
 	searchTitle := truncateSeriesJunk(clean)
 
-	info := rtp.ParseSeriesTitle(searchTitle)
-	
-	res := &ParseResult{
-		Title:    searchTitle,
-		Season:   fallbackSeason,
-		Episode:  0,
-		Language: "en",
-		Quality:  "sd",
-	}
+	var res *ParseResult
 
-	if info != nil {
-		lang := "en"
-		if len(info.Languages) > 0 {
-			lang = getISO(info.Languages[0])
-		}
-		episode := 0
-		if len(info.EpisodeNumbers) > 0 {
-			episode = info.EpisodeNumbers[0]
-		}
-		res = &ParseResult{
-			Title:    info.SeriesTitle,
-			Season:   info.SeasonNumber,
-			Episode:  episode,
-			Year:     info.SeriesTitleInfo.Year,
-			Language: lang,
-			Quality:  getQuality(info.Quality.Quality.Resolution),
-			IsPack:   len(info.EpisodeNumbers) == 0 || len(info.EpisodeNumbers) > 1,
-		}
-		if len(info.EpisodeNumbers) > 1 {
-			res.EpisodeStart = info.EpisodeNumbers[0]
-			res.EpisodeEnd = info.EpisodeNumbers[len(info.EpisodeNumbers)-1]
-		}
-	} else {
+	// SONARR/RADARR CONTEXT-AWARE SEPARATION:
+	// If the scraped catalog explicitly defines a Movie, bypass series parsing entirely.
+	// This prevents releasetitleparser from treating leading numbers as season indicators.
+	if strings.ToLower(contentType) == "movie" {
 		movie := rtp.ParseMovieTitle(searchTitle)
 		if movie != nil {
 			lang := "en"
@@ -472,8 +473,64 @@ func RobustParseInfo(title string, fallbackSeason int) *ParseResult {
 				Language: lang,
 				Quality:  getQuality(movie.Quality.Quality.Resolution),
 			}
-			res.Title = filterTorrentNoise(res.Title)
+			res.Title = filterTorrentNoise(res.Title, searchTitle)
 		}
+	} else {
+		// Series path
+		info := rtp.ParseSeriesTitle(searchTitle)
+		if info != nil {
+			lang := "en"
+			if len(info.Languages) > 0 {
+				lang = getISO(info.Languages[0])
+			}
+			episode := 0
+			if len(info.EpisodeNumbers) > 0 {
+				episode = info.EpisodeNumbers[0]
+			}
+			res = &ParseResult{
+				Title:    info.SeriesTitle,
+				Season:   info.SeasonNumber,
+				Episode:  episode,
+				Year:     info.SeriesTitleInfo.Year,
+				Language: lang,
+				Quality:  getQuality(info.Quality.Quality.Resolution),
+				IsPack:   len(info.EpisodeNumbers) == 0 || len(info.EpisodeNumbers) > 1,
+			}
+			if len(info.EpisodeNumbers) > 1 {
+				res.EpisodeStart = info.EpisodeNumbers[0]
+				res.EpisodeEnd = info.EpisodeNumbers[len(info.EpisodeNumbers)-1]
+			}
+			res.Title = filterTorrentNoise(res.Title)
+		} else {
+			// Movie Fallback
+			movie := rtp.ParseMovieTitle(searchTitle)
+			if movie != nil {
+				lang := "en"
+				if len(movie.Languages) > 0 {
+					lang = getISO(movie.Languages[0])
+				}
+				res = &ParseResult{
+					Title:    movie.PrimaryMovieTitle(),
+					Season:   0,
+					Episode:  0,
+					Year:     movie.Year,
+					Language: lang,
+					Quality:  getQuality(movie.Quality.Quality.Resolution),
+				}
+				res.Title = filterTorrentNoise(res.Title, searchTitle)
+			}
+		}
+	}
+
+	if res == nil {
+		res = &ParseResult{
+			Title:    searchTitle,
+			Season:   fallbackSeason,
+			Episode:  0,
+			Language: "en",
+			Quality:  "sd",
+		}
+		res.Title = filterTorrentNoise(res.Title, searchTitle)
 	}
 
 	if res.EpisodeStart == 0 && res.EpisodeEnd == 0 {
@@ -495,8 +552,6 @@ func RobustParseInfo(title string, fallbackSeason int) *ParseResult {
 	if res.Season == 0 {
 		res.Season = 1
 	}
-
-	res.Title = filterTorrentNoise(res.Title)
 
 	parseCacheMu.Lock()
 	if len(parseCache) < 10000 {
@@ -717,8 +772,8 @@ func GenerateThreadHash(title string, magnetURIs []string) string {
 	return hex.EncodeToString(h[:])
 }
 
-func ParseTitle(rawTitle string) *ParseResult {
-	return RobustParseInfo(rawTitle, 0)
+func ParseTitle(rawTitle string, contentType string) *ParseResult {
+	return RobustParseInfo(rawTitle, 0, contentType)
 }
 
 func ParseMagnet(magnetURI string, contentType string) *ParsedMagnet {
@@ -745,7 +800,7 @@ func ParseMagnet(magnetURI string, contentType string) *ParsedMagnet {
 	dn = rePrefixRegex.ReplaceAllString(dn, "") // Use pre-compiled regex
 	dn = strings.TrimSpace(dn)
 
-	parsed := RobustParseInfo(dn, 0)
+	parsed := RobustParseInfo(dn, 0, contentType)
 
 	pm := &ParsedMagnet{
 		Infohash:     infohash,
@@ -968,33 +1023,7 @@ var filtersDef = []struct {
 	{"r-4k", "gr", "4K", `(?i)\b2160[pi]?\b|\b4k\b|\buhd\b`, []string{`(?i)\b1080[pi]?\b|\b720[pi]?\b`}},
 	{"r-1080", "gr", "1080p", `(?i)\b1080[pi]?\b`, nil},
 	{"r-720", "gr", "720p", `(?i)\b720[pi]?\b`, nil},
-	{"v-seadex", "gv", "SeaDex", `(?i)\b(seadex|best[\s._-]?release|alt[\s._-]?release)\b|ᴀʟᴛ ʀᴇʟᴇᴀsᴇ|ʙᴇsᴛ ʀᴇʟᴇᴀsᴇ`, nil},
-	{"v-hdr10p", "gv", "HDR10+", `(?i)\bhdr[\s._-]?10[\s._-]?(?:\+|plus|p)(?:\b|[^a-z0-9]|$)\b`, []string{`(?i)\b(dv|dovi|dolby[\s._-]?vision)\b`}},
-	{"v-hdr10", "gv", "HDR10", `(?i)\bhdr[\s._-]?10\b`, []string{`(?i)\b(dv|dovi|dolby[\s._-]?vision)\b`, `(?i)\bhdr[\s._-]?10[\s._-]?(?:\+|plus|p)(?:\b|[^a-z0-9]|$)\b`}},
-	{"v-hdr", "gv", "HDR", `(?i)\bhdr\b`, []string{`(?i)\b(dv|dovi|dolby[\s._-]?vision)\b`, `(?i)\bhdr[\s._-]?10\b`}},
-	{"v-sdr", "gv", "SDR", `(?i)\bsdr\b`, []string{`(?i)\b(hdr|hdr10|hdr10\+|dv|dovi|dolby[\s._-]?vision)\b`}},
-	{"v-imax-e", "gv", "IMAX Enhanced", `(?i)\bimax[\s._-]?enhanced\b`, nil},
-	{"v-imax", "gv", "IMAX", `(?i)\bimax\b`, []string{`(?i)\benhanced\b`}},
-	{"a-dv", "gv", "DV", `(?i)\b(dv|dovi|dolby[\s._-]?vision)\b`, nil},
-	{"a-dtsx", "ga", "DTS:X", `(?i)\bdts[-_.: ]?x\b`, nil},
-	{"a-dtsma", "ga", "DTS-HD MA", `(?i)\bdts[-_. ]?(hd[-_. ]?)?ma\b`, []string{`(?i)\bdts[-_.: ]?x\b`}},
-	{"a-dtshd", "ga", "DTS-HD", `(?i)\bdts[-_. ]?hd\b`, []string{`(?i)\bdts[-_. ]?(hd[-_. ]?)?ma\b`, `(?i)\bdts[-_.: ]?x\b`}},
-	{"a-dts", "ga", "DTS", `(?i)\bdts\b`, []string{`(?i)\bdts[-_. ]?(hd|ma|xll|x)\b`}},
-	{"a-at", "ga", "Atmos", `(?i)\batmos\b`, nil},
-	{"a-th", "ga", "TrueHD", `(?i)\btrue[\s._-]?hd\b`, nil},
-	{"a-dp", "ga", "DD+", `(?i)\b(ddp|dd\+|eac-?3|e-?ac-?3)\b`, []string{`(?i)\btrue[\s._-]?hd\b`}},
-	{"a-dd", "ga", "DD", `(?i)\b(dd[25][. ][01]|ac-?3)\b`, []string{`(?i)\b(ddp|dd\+|eac-?3|e-?ac-?3)\b`, `(?i)\batmos\b`, `(?i)\btrue[\s._-]?hd\b`}},
-	{"ch-71", "gc", "7.1", `(?i)(?:^|[^0-9])[7-8][. ][01](?:[^0-9]|$)\b`, nil},
-	{"ch-51", "gc", "5.1", `(?i)(?:^|[^0-9])5[. ][01](?:[^0-9]|$)\b`, []string{`(?i)(?:^|[^0-9])[7-8][. ][01](?:[^0-9]|$)\b`}},
-	{"s-nflx", "gs", "NETFLIX", `(?i)\b(nflx|netflix|nf)\b`, nil},
-	{"s-amzn", "gs", "PRIME VIDEO", `(?i)\b(amzn|amazon|prime[\s._-]?video)\b`, nil},
-	{"s-atvp", "gs", "APPLE TV+", `(?i)\b(atvp|apple[\s._-]?tv\+?|appletv)\b`, nil},
-	{"s-dsnp", "gs", "DISNEY+", `(?i)\b(dsnp|dsny|disney\+?|disney[\s._-]?plus)\b`, nil},
-	{"s-hmax", "gs", "HBO MAX", `(?i)(\b(hmax|hbomax|hbo[\s._-]?max)\b|(?:^|[\s._-])max([\s._-]|$))`, nil},
-	{"s-hulu", "gs", "HULU", `(?i)\bhulu\b`, nil},
-	{"s-pcok", "gs", "PEACOCK", `(?i)\b(pcok|peacock)\b`, nil},
-	{"s-pamp", "gs", "PARAMOUNT+", `(?i)\b(pmtp|pamp|paramount\+?|paramount[\s._-]?plus)\b`, nil},
-	{"s-croll", "gs", "CRUNCHYROLL", `(?i)\b(crunchyroll|crunch)\b`, nil},
-	{"s-h265", "ge", "H265 HEVC", `(?i)\b(x265|h[._-]?265|hevc)\b`, nil},
-	{"s-h264", "ge", "H264 AVC", `(?i)\b(x264|h[._-]?264|avc)\b`, nil},
+	{"v-seadex", "gv", "SeaDex", `(?i)\b(seadex|best[\s\-_]?)?filter\b`, nil}, // Fixed regex syntax and simplified matching logic
+	{"v-seadex-fallback", "gv", "SeaDex", `(?i)\b(seadex|best)\b`, nil},
+	{"v-seadex-gr", "gr", "SeaDex", `(?i)\b(seadex|best)\b`, nil},
 }
