@@ -1,6 +1,6 @@
 
-// Version: 2.0.0
-// Change log: Removed direct GORM database query mappings inside CheckCached, replacing them with BoltDB transactional byte lookups.
+// Version: 2.0.1
+// Change log: Fixed undefined bolt namespace compiler error by explicitly aliasing go.etcd.io/bbolt import as bolt.
 
 package debrid
 
@@ -14,7 +14,7 @@ import (
 	"github.com/kiskey/stremio-mvshows-go/internal/config"
 	"github.com/kiskey/stremio-mvshows-go/internal/database"
 	"github.com/kiskey/stremio-mvshows-go/internal/utils"
-	"go.etcd.io/bbolt"
+	bolt "go.etcd.io/bbolt"
 )
 
 var (
