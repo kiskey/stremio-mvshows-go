@@ -1,12 +1,11 @@
 
-// Version: 2.0.4
-// Change log: Refactored linkOfficialHandler and autoMatchHandler transactional write blocks to cleanly compile dual-indexing metadata keys and register high-speed tmdb_thread_index records.
+// Version: 2.0.5
+// Change log: Removed unused "fmt" import to resolve compiler warnings, keeping dependencies lean and clean.
 
 package api
 
 import (
 	"context"
-	"fmt"
 	"net/http"
 	"os"
 	"strconv"
