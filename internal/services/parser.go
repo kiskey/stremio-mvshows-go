@@ -1,6 +1,6 @@
 
-// Version: 1.1.7
-// Change log: Integrated Year-Anchored Left-Parsing, Linear-Time Balanced Rune-Stack Bracket cleansing, Boundary-Sensitive punctuation preserving, and Regional Indian Audio mapping to reach parity with Sonarr/Radarr standards.
+// Version: 1.1.8
+// Change log: Fixed case-folding duplicate compile cases inside foldRune, restoringĹ, Ļ, Ľ, Ŀ, Ł and Ŵ unicode characters to their correct values to resolve compilation failures permanently.
 
 package parser
 
@@ -273,7 +273,7 @@ func foldRune(r rune) rune {
 		return 'J'
 	case 'Ķ':
 		return 'K'
-	case 'ĺ', 'ļ', 'ľ', 'ŀ', 'ł':
+	case 'Ĺ', 'Ļ', 'Ľ', 'Ŀ', 'Ł': // Fixed: unicode references map uppercase case sets correctly
 		return 'L'
 	case 'Ñ', 'Ń', 'Ņ', 'Ň', 'Ŋ':
 		return 'N'
@@ -287,7 +287,7 @@ func foldRune(r rune) rune {
 		return 'T'
 	case 'Ù', 'Ú', 'Û', 'Ü', 'Ũ', 'Ū', 'Ŭ', 'Ů', 'Ű', 'Ų', 'Ǔ', 'Ǖ', 'Ǘ', 'Ǜ':
 		return 'U'
-	case 'ŵ':
+	case 'Ŵ': // Fixed: casing typo on circumflex w mapped uppercase reference correctly
 		return 'W'
 	case 'Ý', 'Ÿ', 'Ŷ':
 		return 'Y'
