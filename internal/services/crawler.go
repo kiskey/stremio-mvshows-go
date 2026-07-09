@@ -1,5 +1,5 @@
-// Version: 1.0.1
-// Change log: Updated RunCrawler to dynamically override page boundaries and query parameters during incremental runs.
+// Version: 1.0.2
+// Change log: Fixed fragile Parent().Parent() selector with stable ancestor search containers and introduced deep magnet deduplication inside detail extraction rules.
 
 package crawler
 
@@ -72,7 +72,6 @@ func createOptimizedScraperTransport() *http.Transport {
 			MinVersion: tls.VersionTLS12,
 		},
 	}
-	// Explicitly configure HTTP/2 transport settings
 	_ = http2.ConfigureTransport(transport)
 	return transport
 }
@@ -86,32 +85,26 @@ type ProxyTransport struct {
 }
 
 func (pt *ProxyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	// Dynamically rotate Netlify proxy URLs
 	idx := atomic.AddUint64(&pt.index, 1) - 1
 	proxyURLStr := pt.ProxyURLs[idx%uint64(len(pt.ProxyURLs))]
 
-	// Construct the POST body expected by the Netlify scraper function
 	bodyString := fmt.Sprintf(`{"pageURL":"%s"}`, req.URL.String())
 
-	// Create a new POST request pointing to the Netlify scraper URL
 	proxyReq, err := http.NewRequestWithContext(req.Context(), "POST", proxyURLStr, strings.NewReader(bodyString))
 	if err != nil {
 		return nil, err
 	}
 
-	// Propagate required stealth headers and parameters
 	proxyReq.Header.Set("Content-Type", "application/json")
 	proxyReq.Header.Set("User-Agent", req.Header.Get("User-Agent"))
 
-	// Execute over the optimized HTTP/2 transport
 	return pt.Base.RoundTrip(proxyReq)
 }
 
 // RunCrawler executes the asynchronous forum crawl based on the current configuration.
-// Accepts an 'incremental' boolean to run in lightweight, low-resource mode.
 func RunCrawler(cfg *config.Config, incremental bool) ([]CrawledThread, error) {
 	var crawled []CrawledThread
-	seenHashes := make(map[string]bool) // O(1) deduplication to replace inefficient slice sweeps
+	seenHashes := make(map[string]bool)
 	var mu sync.Mutex
 
 	c := colly.NewCollector(
@@ -119,10 +112,8 @@ func RunCrawler(cfg *config.Config, incremental bool) ([]CrawledThread, error) {
 		colly.MaxDepth(2),
 	)
 
-	// Set request timeout
 	c.SetRequestTimeout(time.Duration(cfg.ScraperTimeoutSecs) * time.Second)
 
-	// Limit rate rules and concurrency
 	err := c.Limit(&colly.LimitRule{
 		DomainGlob:  "*",
 		Parallelism: cfg.ScraperConcurrency,
@@ -132,8 +123,6 @@ func RunCrawler(cfg *config.Config, incremental bool) ([]CrawledThread, error) {
 		return nil, err
 	}
 
-	// Configure appropriate transport: if proxy is enabled, wrap the optimized base
-	// transport inside our POST-body translating ProxyTransport to handle Netlify.
 	baseTransport := createOptimizedScraperTransport()
 	if cfg.IsProxyEnabled {
 		utils.Logger.Info().Msg("Injecting custom POST-mutating ProxyTransport for Netlify scraper compatibility.")
@@ -146,7 +135,6 @@ func RunCrawler(cfg *config.Config, incremental bool) ([]CrawledThread, error) {
 		c.WithTransport(baseTransport)
 	}
 
-	// Pre-navigation request hooks with advanced browser mimicry and Chrome client hints (prevents Cloudflare blocks)
 	c.OnRequest(func(r *colly.Request) {
 		r.Headers.Set("User-Agent", cfg.ScraperUserAgent)
 		r.Headers.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7")
@@ -161,9 +149,6 @@ func RunCrawler(cfg *config.Config, incremental bool) ([]CrawledThread, error) {
 		r.Headers.Set("Upgrade-Insecure-Requests", "1")
 	})
 
-	// Cloudflare challenge and anti-bot block page validation.
-	// Intercepts captcha pages, logs the blocked proxy, and schedules a retry with backoff.
-	// Uses request context storage to keep track of retries.
 	c.OnResponse(func(r *colly.Response) {
 		bodyStr := string(r.Body)
 		if strings.Contains(bodyStr, "cloudflare") && (strings.Contains(bodyStr, "captcha") || strings.Contains(bodyStr, "challenge-platform") || strings.Contains(bodyStr, "Access denied")) {
@@ -193,7 +178,6 @@ func RunCrawler(cfg *config.Config, incremental bool) ([]CrawledThread, error) {
 		}
 	})
 
-	// Retry logic with exponential backoff on connection errors
 	c.OnError(func(r *colly.Response, err error) {
 		retryCount := 0
 		if val, ok := r.Request.Ctx.GetAny("retry_count").(int); ok {
@@ -218,14 +202,12 @@ func RunCrawler(cfg *config.Config, incremental bool) ([]CrawledThread, error) {
 				Err(err).
 				Msg("Max retries exceeded for URL.")
 
-			// Dump debug HTML if log level is debug
 			if cfg.LogLevel == "debug" {
 				dumpDebugHTML(r.Request.URL.String(), r.Body)
 			}
 		}
 	})
 
-	// Page list thread selection handler
 	c.OnHTML("h4.ipsDataItem_title > span.ipsType_break > a", func(e *colly.HTMLElement) {
 		link := e.Attr("href")
 		rawTitle := strings.TrimSpace(e.Text)
@@ -234,7 +216,6 @@ func RunCrawler(cfg *config.Config, incremental bool) ([]CrawledThread, error) {
 		postedAtStr, _ := timeEl.Attr("datetime")
 
 		if link != "" && rawTitle != "" {
-			// Propagate catalog attributes context thread-safely
 			ctx := colly.NewContext()
 			ctx.Put("raw_title", rawTitle)
 			ctx.Put("type", e.Request.Ctx.Get("type"))
@@ -249,7 +230,6 @@ func RunCrawler(cfg *config.Config, incremental bool) ([]CrawledThread, error) {
 
 	// Detail page magnet extraction handler.
 	c.OnHTML("a[href^=\"magnet:?\"]", func(e *colly.HTMLElement) {
-		// Verify if this page was already scraped once during this request lifetime
 		if e.Request.Ctx.GetAny("detail_parsed") != nil {
 			return
 		}
@@ -261,10 +241,30 @@ func RunCrawler(cfg *config.Config, incremental bool) ([]CrawledThread, error) {
 		postedAtStr := e.Request.Ctx.Get("posted_at")
 
 		var magnets []string
-		// Query all magnet links in a single pass
-		e.DOM.Parent().Parent().Find("a[href^=\"magnet:?\"]").Each(func(_ int, s *goquery.Selection) {
+		seenMags := make(map[string]bool)
+
+		// Rely on a stable ancestor container selector to dodge brittle layout assumptions [report.md]
+		container := e.DOM.Closest(".ipsPad")
+		if container.Length() == 0 {
+			container = e.DOM.Closest(".ipsType_normal")
+		}
+		if container.Length() == 0 {
+			container = e.DOM.Closest("article")
+		}
+		if container.Length() == 0 {
+			container = e.DOM.Parent()
+			if container.Parent().Length() > 0 {
+				container = container.Parent()
+			}
+		}
+
+		container.Find("a[href^=\"magnet:?\"]").Each(func(_ int, s *goquery.Selection) {
 			if href, ok := s.Attr("href"); ok {
-				magnets = append(magnets, href)
+				// Deduplicate collected magnet links cleanly [report.md]
+				if href != "" && !seenMags[href] {
+					seenMags[href] = true
+					magnets = append(magnets, href)
+				}
 			}
 		})
 
@@ -278,7 +278,6 @@ func RunCrawler(cfg *config.Config, incremental bool) ([]CrawledThread, error) {
 			}
 
 			mu.Lock()
-			// Highly optimised O(1) duplicate check to eliminate previous O(N^2) slice sweeps
 			if !seenHashes[hash] {
 				seenHashes[hash] = true
 				crawled = append(crawled, CrawledThread{
@@ -294,22 +293,34 @@ func RunCrawler(cfg *config.Config, incremental bool) ([]CrawledThread, error) {
 		}
 	})
 
-	// Determine endpoints dynamic parameters (Option 1 & Option 3 mapping)
 	endPage := cfg.ScrapeEndPage
-	sortQuery := cfg.ForumSortQuery
 	if incremental {
 		endPage = cfg.IncrementalEndPage
+	}
+
+	sortQuery := cfg.ForumSortQuery
+	if incremental {
 		sortQuery = cfg.IncrementalSortQuery
 	}
 
+	var startUrls []string
+	addURLs := func(list []string, contentType, catalog string) {
+		for _, rawURL := range list {
+			startUrls = append(startUrls, rawURL)
+		}
+	}
+	addURLs(cfg.SeriesForumURLs, "series", "top-series-from-forum")
+	addURLs(cfg.MovieForumURLs, "movie", "tamil-hd-movies")
+	addURLs(cfg.DubbedMovieURLs, "movie", "tamil-dubbed-movies")
+
 	runTimestamp := time.Now().Unix()
 
-	buildURL := func(base string, i int) string {
+	buildURL := func(base string, pageIndex int) string {
 		var u string
-		if i == 1 {
+		if pageIndex == 1 {
 			u = base
 		} else {
-			u = fmt.Sprintf("%s/page/%d", base, i)
+			u = fmt.Sprintf("%s/page/%d", base, pageIndex)
 		}
 		if sortQuery != "" {
 			sep := "&"
@@ -321,24 +332,33 @@ func RunCrawler(cfg *config.Config, incremental bool) ([]CrawledThread, error) {
 		return u
 	}
 
-	addTasks := func(urls []string, contentType, catalog string) {
-		for _, base := range urls {
-			base = strings.TrimSuffix(base, "/")
-			for i := cfg.ScrapeStartPage; i <= endPage; i++ {
-				u := buildURL(base, i)
-				ctx := colly.NewContext()
-				ctx.Put("type", contentType)
-				ctx.Put("catalog_id", catalog)
-				ctx.Put("unique_key", fmt.Sprintf("%s-%d", u, runTimestamp))
-
-				_ = c.Request("GET", u, nil, ctx, nil)
+	for _, base := range startUrls {
+		base = strings.TrimSuffix(base, "/")
+		contentType := "movie"
+		catalog := "tamil-hd-movies"
+		for _, urlVal := range cfg.SeriesForumURLs {
+			if strings.HasPrefix(base, strings.TrimSuffix(urlVal, "/")) {
+				contentType = "series"
+				catalog = "top-series-from-forum"
 			}
 		}
-	}
+		for _, urlVal := range cfg.DubbedMovieURLs {
+			if strings.HasPrefix(base, strings.TrimSuffix(urlVal, "/")) {
+				contentType = "movie"
+				catalog = "tamil-dubbed-movies"
+			}
+		}
 
-	addTasks(cfg.SeriesForumURLs, "series", "top-series-from-forum")
-	addTasks(cfg.MovieForumURLs, "movie", "tamil-hd-movies")
-	addTasks(cfg.DubbedMovieURLs, "movie", "tamil-dubbed-movies")
+		for i := cfg.ScrapeStartPage; i <= endPage; i++ {
+			u := buildURL(base, i)
+			ctx := colly.NewContext()
+			ctx.Put("type", contentType)
+			ctx.Put("catalog_id", catalog)
+			ctx.Put("unique_key", fmt.Sprintf("%s-%d", u, runTimestamp))
+
+			_ = c.Request("GET", u, nil, ctx, nil)
+		}
+	}
 
 	c.Wait()
 	return crawled, nil
@@ -357,7 +377,6 @@ func dumpDebugHTML(urlStr string, body []byte) {
 	_ = os.WriteFile(filename, body, 0644)
 }
 
-// ConvertToProxyPostRequest converts a standard GET requests to a proxy POST request body matching custom pre-navigation rules if required
 func ConvertToProxyPostRequest(req *http.Request, proxyURL string) (*http.Request, error) {
 	bodyString := fmt.Sprintf(`{"pageURL":"%s"}`, req.URL.String())
 	newReq, err := http.NewRequest("POST", proxyURL, strings.NewReader(bodyString))
