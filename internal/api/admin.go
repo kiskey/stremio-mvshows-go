@@ -1,6 +1,5 @@
-
-// Version: 2.0.7
-// Change log: Corrected variable referencing typos inside cachePendingHandler background scope block, replacing "normalized\"" with "normalizedInfohash" to resolve syntax and compilation errors.
+// Version: 2.0.8
+// Change log: Fixed linkOfficialHandler and autoMatchHandler to defensively sanitize raw metadata out of CleanTitle values before saving.
 
 package api
 
@@ -264,9 +263,9 @@ func linkOfficialHandler(c *gin.Context) {
 
 		t.TmdbID = &tmdbResult.TmdbID
 		
-		// Write-Time Sanitation Failsafe:
+		// Write-Time Sanitation Failsafe: Ensures we scrub all trailing quality artifacts and resolution brackets
 		cleanTitle := tmdbResult.Title
-		if cleanTitle == "" {
+		if cleanTitle == "" || strings.Contains(cleanTitle, "[") || strings.Contains(cleanTitle, "]") || strings.Contains(strings.ToLower(cleanTitle), "1080p") || strings.Contains(strings.ToLower(cleanTitle), "720p") || strings.Contains(strings.ToLower(cleanTitle), "s0") {
 			parsed := parser.ParseTitle(t.RawTitle, t.Type)
 			if parsed != nil && parsed.Title != "" {
 				cleanTitle = parsed.Title
@@ -486,9 +485,9 @@ func autoMatchHandler(c *gin.Context) {
 
 			res.Thread.TmdbID = &res.Result.TmdbID
 			
-			// Write-Time Sanitation Failsafe:
+			// Write-Time Sanitation Failsafe: Ensures we scrub all trailing quality artifacts and resolution brackets
 			cleanTitle := res.Result.Title
-			if cleanTitle == "" {
+			if cleanTitle == "" || strings.Contains(cleanTitle, "[") || strings.Contains(cleanTitle, "]") || strings.Contains(strings.ToLower(cleanTitle), "1080p") || strings.Contains(strings.ToLower(cleanTitle), "720p") || strings.Contains(strings.ToLower(cleanTitle), "s0") {
 				parsed := parser.ParseTitle(res.Thread.RawTitle, res.Thread.Type)
 				if parsed != nil && parsed.Title != "" {
 					cleanTitle = parsed.Title
