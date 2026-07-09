@@ -1,6 +1,6 @@
 
-// Version: 1.1.4
-// Change log: Synced transaction schemas with Connection.go to maintain structural alignment. Removed GORM constraints, routing writes natively through database write targets.
+// Version: 1.1.5
+// Change log: Implemented an atomic transactional self-cleaning block inside processThread to locate and prune legacy thread hashes and catalog indexes during crawl updates, permanently preventing duplicate entries.
 
 package orchestrator
 
@@ -195,10 +195,23 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 			}
 		}
 
+		// Clean up database relational maps when overwriting thread records
 		if existing.TmdbID != nil {
 			_ = database.DB.Update(func(tx *bolt.Tx) error {
 				_ = tx.Bucket([]byte("streams")).Delete([]byte(*existing.TmdbID))
 				_ = tx.Bucket([]byte("tmdb_thread_index")).Delete([]byte(*existing.TmdbID))
+				
+				// Standardize deletion of old indexed paths
+				idxB := tx.Bucket([]byte("catalog_index"))
+				if existing.Catalog != "" {
+					oldPosted := time.Now()
+					if existing.PostedAt != nil {
+						oldPosted = *existing.PostedAt
+					}
+					oldInverse := 9999999999 - oldPosted.Unix()
+					oldIndexKey := fmt.Sprintf("cat:%s:%s:%010d:%s", existing.Catalog, existing.Type, oldInverse, existing.ThreadHash)
+					_ = idxB.Delete([]byte(oldIndexKey))
+				}
 				return nil
 			})
 		}
@@ -328,6 +341,7 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 				continue
 			}
 
+			// Store cache record
 			cacheRecord := database.MagnetCache{
 				Infohash:  parsedMagnet.Infohash,
 				Magnet:    magnet,
