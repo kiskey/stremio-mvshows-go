@@ -1,6 +1,5 @@
-
-// Version: 2.0.0
-// Change log: Converted database column maps into gob-compatible model structures. Added explicit Gob initialization block for strict type-safe streams deserialization.
+// Version: 2.0.1
+// Change log: Removed cyclical Threads references in TmdbMetadata to insulate GOB encoders from serialization panics, decoupled Thread.TmdbMetadata from payload outputs, and added SceneName/EpisodeTitle fields for future Sonarr/Radarr feature expansions.
 
 package database
 
@@ -38,21 +37,20 @@ type Thread struct {
 	LastSeen          time.Time      `json:"last_seen"`
 	CreatedAt         time.Time      `json:"created_at"`
 	UpdatedAt         time.Time      `json:"updated_at"`
-	TmdbMetadata      *TmdbMetadata  `json:"tmdb_metadata,omitempty"`
+	TmdbMetadata      *TmdbMetadata  `json:"-"` // Omit pointer during serializations to avoid cyclic encoding loops [report.md]
 }
 
 type TmdbMetadata struct {
 	TmdbID    string    `json:"tmdb_id"`
 	ImdbID    *string   `json:"imdb_id"`
 	Year      *int      `json:"year"`
-	Data      string    `json:"data"` // Always empty JSON "{}"
+	Data      string    `json:"data"` // Holds the verbatim JSON response from TMDB / Cinemeta
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
-	Threads   []Thread  `json:"threads,omitempty"`
 }
 
 type Stream struct {
-	ID         uint      `json:"id"`
+	ID         uint      `json:"id"` // Legacy ID maintained for SQLite sync parity [report.md]
 	TmdbID     string    `json:"tmdb_id"`
 	Season     *int      `json:"season"`
 	Episode    *int      `json:"episode"`
@@ -62,6 +60,9 @@ type Stream struct {
 	Language   string    `json:"language"`
 	CreatedAt  time.Time `json:"created_at"`
 	UpdatedAt  time.Time `json:"updated_at"`
+	// Parity placeholders for future Sonarr/Radarr indexer extensions [report.md]
+	SceneName    string `json:"scene_name,omitempty"`
+	EpisodeTitle string `json:"episode_title,omitempty"`
 }
 
 type FailedThread struct {
