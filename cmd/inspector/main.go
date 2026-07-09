@@ -1,5 +1,5 @@
-// Version: 2.2.0
-// Change log: Integrated stale debrid locks cleanup (>24h), expired parse failure pruning via customizable CLI flags, stream sequential autoincrement indexes, and automated torbox_id_map audits.
+// Version: 2.3.0
+// Change log: Overhauled collision pruning mechanics to perform direct point deletes on actual BoltDB database keys; fixed logical bug causing silent deletion failures and repetitive duplicate pruning warnings.
 
 package main
 
@@ -91,7 +91,10 @@ func main() {
 		for k, v := c.First(); k != nil; k, v = c.Next() {
 			var t database.Thread
 			if err := database.DecodeGob(v, &t); err == nil {
-				// Prevent collision misclassifications by checking magnet size constraints [report.md]
+				// Guardrail: Bind the loaded physical BoltDB key directly to the thread object
+				t.ThreadHash = string(k)
+
+				// Prevent collision misclassifications by checking magnet size constraints
 				if len(t.MagnetURIs) > 0 {
 					oldHash := oldGenerateThreadHash(t.RawTitle, t.MagnetURIs)
 					if string(k) == oldHash && oldHash != newGenerateThreadHash(t.RawTitle) {
@@ -152,8 +155,7 @@ func main() {
 		return tx.ForEach(func(name []byte, b *bolt.Bucket) error {
 			stats := b.Stats()
 			totalKeys += stats.KeyN
-			
-			// Calculate space actually occupied. LeafInuse natively includes inline child bucket bytes.
+
 			inuse := int64(stats.BranchInuse) + int64(stats.LeafInuse)
 			allocated := int64(stats.BranchAlloc) + int64(stats.LeafAlloc)
 
@@ -266,11 +268,13 @@ func main() {
 			})
 
 			keptThread := list[0]
-			oldKeptHash := oldGenerateThreadHash(keptThread.RawTitle, keptThread.MagnetURIs)
 
 			log.Printf("Processing & Compacting: %q\n", keptThread.RawTitle)
 
-			_ = tb.Delete([]byte(oldKeptHash))
+			// Clean up original key from threads if it differs from the target new invariant hash
+			if keptThread.ThreadHash != targetNewHash {
+				_ = tb.Delete([]byte(keptThread.ThreadHash))
+			}
 
 			prTitle := parser.ParseRelease(keptThread.RawTitle, keptThread.Type)
 			if prTitle.IsValid && prTitle.CleanTitle != "" {
@@ -308,11 +312,11 @@ func main() {
 			// Step B: Safely prune all redundant/older duplicates in this group
 			for i := 1; i < len(list); i++ {
 				trashThread := list[i]
-				oldTrashHash := oldGenerateThreadHash(trashThread.RawTitle, trashThread.MagnetURIs)
 
-				log.Printf("  [PRUNING DUPLICATE] Hash=%s (Last Updated: %v)\n", oldTrashHash, trashThread.UpdatedAt)
+				log.Printf("  [PRUNING DUPLICATE] Hash=%s (Last Updated: %v)\n", trashThread.ThreadHash, trashThread.UpdatedAt)
 
-				_ = tb.Delete([]byte(oldTrashHash))
+				// FIX: Execute direct point deletion on the exact database key loaded from the bucket
+				_ = tb.Delete([]byte(trashThread.ThreadHash))
 				_ = tb.Delete([]byte(targetNewHash + "_" + strconv.Itoa(i))) // Guardrail cleanup
 
 				// Clean up related indices and streams for the pruned item
@@ -325,7 +329,7 @@ func main() {
 				var indexKeysPrune [][]byte
 				idxCursor := idxB.Cursor()
 				for k, _ := idxCursor.First(); k != nil; k, _ = idxCursor.Next() {
-					if strings.HasSuffix(string(k), ":"+oldTrashHash) || strings.HasSuffix(string(k), ":"+trashThread.ThreadHash) {
+					if strings.HasSuffix(string(k), ":"+trashThread.ThreadHash) {
 						tempKey := make([]byte, len(k))
 						copy(tempKey, k)
 						indexKeysPrune = append(indexKeysPrune, tempKey)
@@ -441,7 +445,7 @@ func main() {
 			streamIDCounter := uint(0)
 			for _, s := range allRegenStreams {
 				streamIDCounter++
-				s.ID = streamIDCounter // Sequential sequential counter to align relational primary index [report.md]
+				s.ID = streamIDCounter // Sequential sequential counter to align relational primary index
 				byTMDB[s.TmdbID] = append(byTMDB[s.TmdbID], s)
 			}
 			for tmdbID, list := range byTMDB {
@@ -458,7 +462,7 @@ func main() {
 			}
 		}
 
-		// Compact and prune old failed_threads log records [report.md]
+		// Compact and prune old failed_threads log records
 		log.Printf("Compacting failed_threads bucket (pruning logs older than %d days)...\n", *pruneFailuresDays)
 		var failedKeysToPrune [][]byte
 		failedCursor := tx.Bucket([]byte("failed_threads")).Cursor()
@@ -478,7 +482,7 @@ func main() {
 			}
 		}
 
-		// Sweep and prune stale debrid_cache_locks (>24h) [report.md]
+		// Sweep and prune stale debrid_cache_locks (>24h)
 		log.Println("Auditing debrid_cache_locks bucket (pruning locks older than 24 hours)...")
 		var lockKeysToPrune [][]byte
 		lockCursor := tx.Bucket([]byte("debrid_cache_locks")).Cursor()
@@ -498,7 +502,7 @@ func main() {
 			}
 		}
 
-		// Sweep and prune orphaned torbox_id_map values [report.md]
+		// Sweep and prune orphaned torbox_id_map values
 		log.Println("Auditing torbox_id_map bucket...")
 		var torboxKeysToPrune [][]byte
 		torboxCursor := tx.Bucket([]byte("torbox_id_map")).Cursor()
@@ -549,8 +553,4 @@ func main() {
 	log.Println("==================================================")
 	log.Printf("► VERDICT: [SUCCESS] - COMPACTION LOG COMPLETED SUCCESFULLY.\n")
 	log.Println("==================================================")
-}
-
-func init() {
-	_ = time.Now // Prevent unused imports compile crash
 }
