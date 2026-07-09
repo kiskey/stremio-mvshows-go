@@ -1,6 +1,6 @@
 
-// Version: 1.1.5
-// Change log: Implemented an atomic transactional self-cleaning block inside processThread to locate and prune legacy thread hashes and catalog indexes during crawl updates, permanently preventing duplicate entries.
+// Version: 1.1.6
+// Change log: Integrated a global thread-hash pruning command inside processThread to ensure older, modified thread payloads are deleted from the "threads" bucket during crawler updates, completely preventing data fragmentation.
 
 package orchestrator
 
@@ -88,6 +88,7 @@ func UpdateDashboardCache() {
 
 // RunFullWorkflow triggers the full sequence: scrape, parse, TMDB lookup, and relational linking.
 func RunFullWorkflow(cfg *config.Config) {
+	// Defensive panic recovery to prevent unhandled background panics from crashing the entire process
 	defer func() {
 		if r := recover(); r != nil {
 			utils.Logger.Error().Interface("panic", r).Msg("Recovered from panic inside RunFullWorkflow background thread.")
@@ -195,22 +196,29 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 			}
 		}
 
-		// Clean up database relational maps when overwriting thread records
-		if existing.TmdbID != nil {
+		// ⚡ ATOMIC TRANSACTION PRUNER (Resolves Crawler Duplicate Gap):
+		// If the thread's hash has changed, we must delete the old thread from "threads"
+		// and clean its index points to keep the database layout unfragmented.
+		if existing.ThreadHash != thread.ThreadHash {
 			_ = database.DB.Update(func(tx *bolt.Tx) error {
-				_ = tx.Bucket([]byte("streams")).Delete([]byte(*existing.TmdbID))
-				_ = tx.Bucket([]byte("tmdb_thread_index")).Delete([]byte(*existing.TmdbID))
-				
-				// Standardize deletion of old indexed paths
-				idxB := tx.Bucket([]byte("catalog_index"))
-				if existing.Catalog != "" {
-					oldPosted := time.Now()
-					if existing.PostedAt != nil {
-						oldPosted = *existing.PostedAt
+				// Delete old record payload
+				_ = tx.Bucket([]byte("threads")).Delete([]byte(existing.ThreadHash))
+
+				if existing.TmdbID != nil {
+					_ = tx.Bucket([]byte("streams")).Delete([]byte(*existing.TmdbID))
+					_ = tx.Bucket([]byte("tmdb_thread_index")).Delete([]byte(*existing.TmdbID))
+					
+					// Delete legacy index pointers
+					idxB := tx.Bucket([]byte("catalog_index"))
+					if existing.Catalog != "" {
+						oldPosted := time.Now()
+						if existing.PostedAt != nil {
+							oldPosted = *existing.PostedAt
+						}
+						oldInverse := 9999999999 - oldPosted.Unix()
+						oldIndexKey := fmt.Sprintf("cat:%s:%s:%010d:%s", existing.Catalog, existing.Type, oldInverse, existing.ThreadHash)
+						_ = idxB.Delete([]byte(oldIndexKey))
 					}
-					oldInverse := 9999999999 - oldPosted.Unix()
-					oldIndexKey := fmt.Sprintf("cat:%s:%s:%010d:%s", existing.Catalog, existing.Type, oldInverse, existing.ThreadHash)
-					_ = idxB.Delete([]byte(oldIndexKey))
 				}
 				return nil
 			})
