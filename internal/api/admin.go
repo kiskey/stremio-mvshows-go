@@ -1,5 +1,5 @@
-// Version: 2.0.8
-// Change log: Fixed linkOfficialHandler and autoMatchHandler to defensively sanitize raw metadata out of CleanTitle values before saving.
+// Version: 2.1.0
+// Change log: Integrated title previews, corrected stream handler labels to display clean names instead of raw hashes, and added detailed autoMatchHandler logging parameters.
 
 package api
 
@@ -31,13 +31,14 @@ func RegisterAdminRoutes(r *gin.RouterGroup) {
 	r.GET("/pending/:threadId/streams", pendingStreamsHandler)
 	r.POST("/custom-meta", customMetaHandler)
 	r.POST("/link-official", linkOfficialHandler)
-	r.POST("/auto-match", autoMatchHandler) // New endpoint for manual auto-matching
+	r.POST("/auto-match", autoMatchHandler)
 	r.POST("/rd-cache-pending", cachePendingHandler)
 	r.POST("/rd-check", rdCheckHandler)
 	r.GET("/failures", failuresHandler)
 	r.POST("/retry-parse", retryParseHandler)
 	r.GET("/recent", recentHandler)
-	r.GET("/cinemeta-search", cinemetaSearchHandler) // Parallel Cinemeta search catalog resolver
+	r.GET("/cinemeta-search", cinemetaSearchHandler)
+	r.POST("/parse-preview", parsePreviewHandler) // New Parse Preview Route
 }
 
 func healthHandler(c *gin.Context) {
@@ -46,7 +47,6 @@ func healthHandler(c *gin.Context) {
 
 	cacheCheck := "database"
 	if p.IsEnabled() {
-		// If TorBox is configured, it supports instant API cache checks
 		if cfg.DebridService == "torbox" {
 			cacheCheck = "instant"
 		}
@@ -85,10 +85,7 @@ func triggerCrawlHandler(c *gin.Context) {
 		c.JSON(http.StatusConflict, gin.H{"error": "A crawling workflow is already in progress"})
 		return
 	}
-
-	// Trigger crawl asynchronously
 	go orchestrator.RunFullWorkflow(cfg)
-
 	c.JSON(http.StatusAccepted, gin.H{"message": "Manual crawl triggered successfully"})
 }
 
@@ -131,14 +128,24 @@ func pendingStreamsHandler(c *gin.Context) {
 			continue
 		}
 
+		// FIX: Use CleanTitle for label, fallback to parsed title (Problem 8)
+		displayLabel := t.CleanTitle
+		if displayLabel == "" {
+			parsed := parser.ParseTitle(t.RawTitle, t.Type)
+			if parsed != nil && parsed.Title != "" {
+				displayLabel = parsed.Title
+			} else {
+				displayLabel = t.RawTitle
+			}
+		}
+
 		items = append(items, streamItem{
-			Label:    parsedMagnet.Infohash,
+			Label:    displayLabel,
 			Infohash: parsedMagnet.Infohash,
 			Quality:  parsedMagnet.Quality,
 			Language: parsedMagnet.Language,
 		})
 
-		// Check lock status
 		if database.IsDebridCacheLocked(parsedMagnet.Infohash) {
 			locked = append(locked, parsedMagnet.Infohash)
 		}
@@ -181,7 +188,7 @@ func customMetaHandler(c *gin.Context) {
 func linkOfficialHandler(c *gin.Context) {
 	var body struct {
 		ThreadID   int    `json:"threadId"`
-		OfficialID string `json:"officialId"` // tt... or tv:123 or movie:123
+		OfficialID string `json:"officialId"`
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid payload parameters"})
@@ -200,14 +207,12 @@ func linkOfficialHandler(c *gin.Context) {
 	mediaType := t.Type
 	idOnly := body.OfficialID
 
-	// Standardize formats e.g. tv:123 or movie:123
 	if strings.Contains(idOnly, ":") {
 		parts := strings.Split(idOnly, ":")
 		mediaType = parts[0]
 		idOnly = parts[1]
 	}
 
-	// This now triggers Cinemeta-First logic inside metadata.go if the ID begins with "tt"
 	tmdbResult, errTmdb := tmdbClient.GetByID(idOnly, mediaType)
 	if errTmdb != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Failed to resolve official ID on Cinemeta/TMDB: " + errTmdb.Error()})
@@ -218,7 +223,6 @@ func linkOfficialHandler(c *gin.Context) {
 		metaBucket := tx.Bucket([]byte("tmdb_metadata"))
 		magnetBucket := tx.Bucket([]byte("magnet_cache"))
 
-		// Check if this IMDb ID is already registered under an alternative TMDB ID
 		c := metaBucket.Cursor()
 		for k, v := c.First(); k != nil; k, v = c.Next() {
 			var metadataRecord database.TmdbMetadata
@@ -230,7 +234,6 @@ func linkOfficialHandler(c *gin.Context) {
 			}
 		}
 
-		// Save tmdbMetadata
 		rawDataBytes := []byte("{}")
 		
 		var imdbIDPtr *string
@@ -256,14 +259,12 @@ func linkOfficialHandler(c *gin.Context) {
 		}
 		_ = metaBucket.Put([]byte(tmdbResult.TmdbID), metaBytes)
 		
-		// ⚡ DUAL-INDEX POINT-LOOKUP WRITES:
 		if tmdbMetadata.ImdbID != nil && *tmdbMetadata.ImdbID != "" {
 			_ = metaBucket.Put([]byte(*tmdbMetadata.ImdbID), metaBytes)
 		}
 
 		t.TmdbID = &tmdbResult.TmdbID
 		
-		// Write-Time Sanitation Failsafe: Ensures we scrub all trailing quality artifacts and resolution brackets
 		cleanTitle := tmdbResult.Title
 		if cleanTitle == "" || strings.Contains(cleanTitle, "[") || strings.Contains(cleanTitle, "]") || strings.Contains(strings.ToLower(cleanTitle), "1080p") || strings.Contains(strings.ToLower(cleanTitle), "720p") || strings.Contains(strings.ToLower(cleanTitle), "s0") {
 			parsed := parser.ParseTitle(t.RawTitle, t.Type)
@@ -280,13 +281,11 @@ func linkOfficialHandler(c *gin.Context) {
 			t.Year = &tmdbResult.Year
 		}
 
-		// Save updated thread. Standardizing via helper compiles index-keys and thread pointers automatically!
 		err = database.CreateOrUpdateThread(tx, t)
 		if err != nil {
 			return err
 		}
 
-		// Create associated streams
 		var newStreams []database.Stream
 		for _, magnet := range t.MagnetURIs {
 			parsedMagnet := parser.ParseMagnet(magnet, t.Type)
@@ -294,7 +293,6 @@ func linkOfficialHandler(c *gin.Context) {
 				continue
 			}
 
-			// Store cache record
 			cacheRecord := database.MagnetCache{
 				Infohash:  parsedMagnet.Infohash,
 				Magnet:    magnet,
@@ -350,7 +348,6 @@ func linkOfficialHandler(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "Thread manually linked to official metadata successfully!"})
 }
 
-// autoMatchHandler handles manual trigger of auto-matching on selected thread IDs using clean title parsing.
 func autoMatchHandler(c *gin.Context) {
 	var body struct {
 		ThreadIDs []int `json:"threadIds"`
@@ -401,7 +398,6 @@ func autoMatchHandler(c *gin.Context) {
 				return
 			}
 
-			// Clean the title using our newly optimized parser logic
 			parsed := parser.ParseTitle(t.RawTitle, t.Type)
 			if parsed == nil || parsed.Title == "" {
 				mu.Lock()
@@ -410,7 +406,15 @@ func autoMatchHandler(c *gin.Context) {
 				return
 			}
 
-			tmdbResult, errTmdb := tmdbClient.Search(parsed.Title, parsed.Year, t.Type)
+			// FIX: Detail logged title attributes including raw and clean titles (Problem 9)
+			utils.Logger.Info().
+				Int("index", index+1).
+				Str("raw_title", t.RawTitle).
+				Str("clean_title", parsed.Title).
+				Int("year", parsed.Year).
+				Msg("Processing thread for auto-match")
+
+			tmdbResult, errTmdb := tmdbClient.SearchWithAliases(parsed.Title, parsed.Year, t.Type)
 			if errTmdb != nil {
 				utils.Logger.Warn().
 					Int("index", index+1).
@@ -435,13 +439,11 @@ func autoMatchHandler(c *gin.Context) {
 
 	utils.Logger.Info().Int("matched_queued", len(results)).Msg("Network search completed. Commencing serialized database writes...")
 
-	// Serialize database writes one-by-one to completely prevent database locks
 	for idx, res := range results {
 		errTx := database.DB.Update(func(tx *bolt.Tx) error {
 			metaBucket := tx.Bucket([]byte("tmdb_metadata"))
 			magnetBucket := tx.Bucket([]byte("magnet_cache"))
 
-			// GORM-safe Collision Pre-check: Verify if this IMDb ID is already registered under an alternative TMDB ID
 			c := metaBucket.Cursor()
 			for k, v := c.First(); k != nil; k, v = c.Next() {
 				var fetched database.TmdbMetadata
@@ -478,14 +480,12 @@ func autoMatchHandler(c *gin.Context) {
 			}
 			_ = metaBucket.Put([]byte(res.Result.TmdbID), metaBytes)
 
-			// ⚡ DUAL-INDEX POINT-LOOKUP WRITES:
 			if tmdbMetadata.ImdbID != nil && *tmdbMetadata.ImdbID != "" {
 				_ = metaBucket.Put([]byte(*tmdbMetadata.ImdbID), metaBytes)
 			}
 
 			res.Thread.TmdbID = &res.Result.TmdbID
 			
-			// Write-Time Sanitation Failsafe: Ensures we scrub all trailing quality artifacts and resolution brackets
 			cleanTitle := res.Result.Title
 			if cleanTitle == "" || strings.Contains(cleanTitle, "[") || strings.Contains(cleanTitle, "]") || strings.Contains(strings.ToLower(cleanTitle), "1080p") || strings.Contains(strings.ToLower(cleanTitle), "720p") || strings.Contains(strings.ToLower(cleanTitle), "s0") {
 				parsed := parser.ParseTitle(res.Thread.RawTitle, res.Thread.Type)
@@ -501,7 +501,6 @@ func autoMatchHandler(c *gin.Context) {
 				res.Thread.Year = &res.Result.Year
 			}
 
-			// Standardizing thread write automatically registers both catalog indexes and tmdb_thread_index!
 			err = database.CreateOrUpdateThread(tx, &res.Thread)
 			if err != nil {
 				return err
@@ -565,6 +564,7 @@ func autoMatchHandler(c *gin.Context) {
 			utils.Logger.Info().
 				Int("index", idx+1).
 				Str("raw_title", res.Thread.RawTitle).
+				Str("clean_title", res.Thread.CleanTitle). // FIX: Log clean title
 				Str("matched_as", res.Result.Title).
 				Str("imdb_id", res.Result.ImdbID).
 				Msg("Successfully linked thread and saved stream references.")
@@ -613,6 +613,40 @@ func cinemetaSearchHandler(c *gin.Context) {
 	c.JSON(http.StatusOK, items)
 }
 
+func parsePreviewHandler(c *gin.Context) {
+	var body struct {
+		Title       string `json:"title"`
+		ContentType string `json:"contentType"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid preview payload parameters"})
+		return
+	}
+
+	parsed := parser.ParseRelease(body.Title, body.ContentType)
+
+	c.JSON(http.StatusOK, gin.H{
+		"rawTitle":        parsed.ReleaseTitle,
+		"cleanTitle":      parsed.CleanTitle,
+		"year":            parsed.Year,
+		"season":          parsed.SeasonNumber,
+		"episodes":        parsed.EpisodeNumbers,
+		"isSeasonPack":    parsed.IsSeasonPack,
+		"quality":         parsed.Quality.FullString,
+		"source":          parsed.Source,
+		"resolution":      parsed.Resolution,
+		"languages":       parsed.Languages,
+		"releaseGroup":    parsed.ReleaseGroup,
+		"edition":         parsed.Edition.EditionString,
+		"specialTags":     parsed.SpecialTags,
+		"videoCodec":      parsed.VideoCodec,
+		"audioCodec":      parsed.AudioCodec,
+		"audioChannels":   parsed.AudioChannels,
+		"isValid":         parsed.IsValid,
+		"validationError": parsed.ValidationError,
+	})
+}
+
 func cachePendingHandler(c *gin.Context) {
 	var body struct {
 		ThreadID int    `json:"threadId"`
@@ -623,7 +657,6 @@ func cachePendingHandler(c *gin.Context) {
 		return
 	}
 
-	// Normalize lookup string to lowercase to align with on-disk Bbolt structures
 	normalizedInfohash := strings.ToLower(body.Infohash)
 
 	if database.IsDebridCacheLocked(normalizedInfohash) {
@@ -633,7 +666,6 @@ func cachePendingHandler(c *gin.Context) {
 
 	_ = database.CreateDebridCacheLock(normalizedInfohash)
 
-	// Retrieve original magnet from local cache database
 	var cache database.MagnetCache
 	errCache := database.DB.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte("magnet_cache"))
@@ -651,7 +683,7 @@ func cachePendingHandler(c *gin.Context) {
 	cfg := config.Load()
 	p := debrid.GetProvider(cfg)
 	if !p.IsEnabled() {
-		writeJSON(c, http.StatusBadRequest, gin.H{"error": "Debrid provider is currently disabled"})
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Debrid provider is currently disabled"})
 		return
 	}
 
@@ -752,7 +784,6 @@ func recentHandler(c *gin.Context) {
 
 	offset := (page - 1) * limit
 
-	// Fetch database-paginated rows directly from BoltDB View transactions
 	linked, _ := database.GetRecentLinkedThreadsPaginated(offset, limit)
 	failures, _ := database.GetFailedThreadsPaginated(offset, limit)
 
