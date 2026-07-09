@@ -1,6 +1,6 @@
 
-// Version: 2.0.3
-// Change log: Added a resilient panic-recovery wrapper inside DecodeGob to handle future schema model changes without crashes. Configured CreateOrUpdateThread to automatically locate and prune outdated catalog index records on modifications to prevent ghost duplicates.
+// Version: 2.0.4
+// Change log: Implemented database-side offset and limit pagination for GetRecentLinkedThreads and GetFailedThreads to support high-speed admin log list loading. Normalized lock and debrid check lookups using lowercase string conversions.
 
 package database
 
@@ -141,7 +141,7 @@ func CreateOrUpdateThread(tx *bolt.Tx, data *Thread) error {
 			return err
 		}
 
-		// 3. Write new, chronological pre-sorted catalog index key (Resolves Risk 3)
+		// 3. Write new, sorted Catalog Index Key (Resolves Risk 3)
 		if data.Status == "linked" && data.Catalog != "" {
 			postedTime := time.Now()
 			if data.PostedAt != nil {
@@ -209,7 +209,8 @@ func GetPendingThreads() ([]Thread, error) {
 	return list, err
 }
 
-func GetRecentLinkedThreads() ([]Thread, error) {
+// GetRecentLinkedThreadsPaginated supports high-speed page-slicing inside Bbolt View transactions.
+func GetRecentLinkedThreadsPaginated(offset, limit int) ([]Thread, error) {
 	var list []Thread
 	err := DB.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte("threads"))
@@ -227,10 +228,15 @@ func GetRecentLinkedThreads() ([]Thread, error) {
 	sort.Slice(list, func(i, j int) bool {
 		return list[i].UpdatedAt.After(list[j].UpdatedAt)
 	})
-	if len(list) > 15 {
-		list = list[:15]
+
+	if offset >= len(list) {
+		return []Thread{}, nil
 	}
-	return list, err
+	end := offset + limit
+	if end > len(list) {
+		end = len(list)
+	}
+	return list[offset:end], err
 }
 
 // ── Stream CRUD Operations ──
@@ -390,7 +396,8 @@ func LogFailedThread(tx *bolt.Tx, hash, rawTitle, reason string) error {
 	})
 }
 
-func GetFailedThreads() ([]FailedThread, error) {
+// GetFailedThreadsPaginated compiles failing entries sequentially inside slice offsets
+func GetFailedThreadsPaginated(offset, limit int) ([]FailedThread, error) {
 	var list []FailedThread
 	err := runView(nil, func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte("failed_threads"))
@@ -406,7 +413,14 @@ func GetFailedThreads() ([]FailedThread, error) {
 	sort.Slice(list, func(i, j int) bool {
 		return list[i].LastAttempt.After(list[j].LastAttempt)
 	})
-	return list, err
+	if offset >= len(list) {
+		return []FailedThread{}, nil
+	}
+	end := offset + limit
+	if end > len(list) {
+		end = len(list)
+	}
+	return list[offset:end], err
 }
 
 func DeleteFailedThread(tx *bolt.Tx, hash string) error {
@@ -422,7 +436,8 @@ func IsDebridCacheLocked(hash string) bool {
 	locked := false
 	_ = DB.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte("debrid_cache_locks"))
-		if b.Get([]byte(hash)) != nil {
+		// Force lowercase comparison to prevent key lookup mismatch
+		if b.Get([]byte(strings.ToLower(hash))) != nil {
 			locked = true
 		}
 		return nil
@@ -433,18 +448,18 @@ func IsDebridCacheLocked(hash string) bool {
 func CreateDebridCacheLock(hash string) error {
 	return DB.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte("debrid_cache_locks"))
-		lock := DebridCacheLock{Infohash: hash, CreatedAt: time.Now()}
+		lock := DebridCacheLock{Infohash: strings.ToLower(hash), CreatedAt: time.Now()}
 		lockBytes, err := EncodeGob(lock)
 		if err != nil {
 			return err
 		}
-		return b.Put([]byte(hash), lockBytes)
+		return b.Put([]byte(strings.ToLower(hash)), lockBytes)
 	})
 }
 
 func DeleteDebridCacheLock(hash string) error {
 	return DB.Update(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte("debrid_cache_locks"))
-		return b.Delete([]byte(hash))
+		return b.Delete([]byte(strings.ToLower(hash)))
 	})
 }
