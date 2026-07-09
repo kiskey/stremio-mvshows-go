@@ -1,5 +1,5 @@
-// Version: 1.4.3
-// Change log: Corrected undefined matchingPunctRe compilation error in NormalizeTitleForMatching by routing the string replacements through matchingBracketsRe, matchingSpacesPunctRe, and matchingSuffixPunctRe [report.md].
+// Version: 1.4.4
+// Change log: Overhauled matchingSpacesPunctRe string format with double-quoted, double-escaped strings to completely eliminate unescaped backtick lexical errors and Go compiler tokenization mismatches [report.md].
 
 package metadata
 
@@ -77,10 +77,10 @@ type TMDBClient struct {
 	apiKey string
 }
 
-// Pure Go RE2-compliant regular expressions resolving lookaround compilation failures safely [report.md]
+// Pre-compiled pure RE2-compliant punctuation patterns using double-escaped format to ensure clean lexing on all Go targets [report.md]
 var (
 	matchingBracketsRe    = regexp.MustCompile(`[()\[\]{}]`)
-	matchingSpacesPunctRe = regexp.MustCompile(`\s+[,<>\/\\;:'"|` + "`" + `~!?@$%^*\_\-=]\s+`)
+	matchingSpacesPunctRe = regexp.MustCompile("\\s+[,<>\\/\\\\;:'\"|`~!?@$%^*\\_\\-=]\\s+")
 	matchingSuffixPunctRe = regexp.MustCompile(`[':\?,]([sm]\s|\s|$)`)
 )
 
@@ -485,7 +485,6 @@ func NormalizeTitleForMatching(title string) string {
 	s := title
 	s = strings.ReplaceAll(s, "&", "and")
 
-	// Pre-compiled pure RE2 arrays cleanly handle bracket exclusions and spacing splits
 	s = matchingBracketsRe.ReplaceAllString(s, " ")
 	s = matchingSpacesPunctRe.ReplaceAllString(s, " ")
 	s = matchingSuffixPunctRe.ReplaceAllString(s, "$1")
