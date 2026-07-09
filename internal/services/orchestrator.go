@@ -1,6 +1,5 @@
-
-// Version: 1.1.6
-// Change log: Integrated a global thread-hash pruning command inside processThread to ensure older, modified thread payloads are deleted from the "threads" bucket during crawler updates, completely preventing data fragmentation.
+// Version: 1.1.7
+// Change log: Fixed processThread to defensively sanitize raw metadata out of CleanTitle values before saving linked threads.
 
 package orchestrator
 
@@ -309,7 +308,8 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 		}
 
 		cleanTitle := tmdbResult.Title
-		if cleanTitle == "" {
+		// Dynamic Sanitation Safeguard: Ensure clean title is defensively formatted and free of raw patterns
+		if cleanTitle == "" || strings.Contains(cleanTitle, "[") || strings.Contains(cleanTitle, "]") || strings.Contains(strings.ToLower(cleanTitle), "1080p") || strings.Contains(strings.ToLower(cleanTitle), "720p") || strings.Contains(strings.ToLower(cleanTitle), "s0") {
 			parsed := parser.ParseTitle(thread.RawTitle, thread.Type)
 			if parsed != nil && parsed.Title != "" {
 				cleanTitle = parsed.Title
