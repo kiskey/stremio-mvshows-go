@@ -1,5 +1,5 @@
-// Version: 1.5.0
-// Change log: Redesigned the parsing package using distinct, isolated objects (TitleExtractor, MetadataParser, QualityParser, ReleaseGroupParser, EditionParser, Validator, Normalizer) following Sonarr v4/Radarr v5 architecture.
+// Version: 1.6.0
+// Change log: Overhauled compilation gaps (implemented missing helper functions, filtersDef registry, ReleaseGroupParser, parserJunkWords/stopWords), added robust daily episode (YYYY-MM-DD) and absolute numbering anime checks for Sonarr/Radarr v4/v5 parity.
 
 package parser
 
@@ -195,10 +195,90 @@ var truncationRegexes = []*regexp.Regexp{
 var CompiledFilters []BadgeFilter
 var compileOnce sync.Once
 
+// Centralized badge filter declarations supporting CompileFilters registry execution safely
+var filtersDef = []struct {
+	ID        string
+	GroupID   string
+	Name      string
+	Positive  string
+	Negatives []string
+}{
+	{ID: "hdr", GroupID: "quality", Name: "HDR", Positive: `(?i)\bhdr\b`, Negatives: []string{}},
+	{ID: "dv", GroupID: "quality", Name: "DV", Positive: `(?i)\b(?:dv|dolby[-_]?vision)\b`, Negatives: []string{}},
+	{ID: "1080p", GroupID: "quality", Name: "1080p", Positive: `(?i)\b1080p\b`, Negatives: []string{}},
+	{ID: "720p", GroupID: "quality", Name: "720p", Positive: `(?i)\b720p\b`, Negatives: []string{}},
+	{ID: "2160p", GroupID: "quality", Name: "2160p", Positive: `(?i)\b(?:2160p|4k)\b`, Negatives: []string{}},
+}
+
+// Torrent parser junk and stop words mapping to insulate titles from destructive dictionary strips
+var parserJunkWords = map[string]bool{
+	"proper": true, "repack": true, "extended": true, "unrated": true, "remastered": true,
+	"x264": true, "x265": true, "hevc": true, "avc": true, "aac": true, "ac3": true, "dts": true,
+	"720p": true, "1080p": true, "2160p": true, "480p": true, "4k": true, "uhd": true,
+	"webdl": true, "webrip": true, "bluray": true, "hdtv": true, "dvdrip": true,
+	"gb": true, "mb": true, "kb": true, "esub": true, "sub": true, "subs": true,
+}
+
+var parserStopWords = map[string]bool{
+	"the": true, "a": true, "an": true, "and": true, "or": true, "but": true, "of": true, "for": true, "with": true, "by": true, "at": true, "to": true, "in": true, "on": true,
+}
+
 var (
 	parseCache   = make(map[string]*ParseResult)
 	parseCacheMu sync.RWMutex
 )
+
+// extractInfohash parses the magnet link and outputs a lowercase 40-character infohash [report.md]
+func extractInfohash(magnet string) string {
+	m := infohashRegex.FindStringSubmatch(magnet)
+	if len(m) > 1 {
+		return strings.ToLower(m[1])
+	}
+	if u, err := url.Parse(magnet); err == nil {
+		xt := u.Query().Get("xt")
+		if strings.HasPrefix(xt, "urn:btih:") {
+			return strings.ToLower(strings.TrimPrefix(xt, "urn:btih:"))
+		}
+	}
+	return ""
+}
+
+// ExtractMagnetDisplayName extracts the Display Name from magnet query parameters [report.md]
+func ExtractMagnetDisplayName(magnet string) string {
+	if u, err := url.Parse(magnet); err == nil {
+		return u.Query().Get("dn")
+	}
+	return ""
+}
+
+// FormatBadges extracts high-fidelity descriptors from magnet display names [report.md]
+func FormatBadges(title string) string {
+	pr := ParseRelease(title, "movie")
+	var badges []string
+	if pr.Quality.FullString != "Unknown" {
+		badges = append(badges, pr.Quality.FullString)
+	} else if pr.Resolution != "" {
+		badges = append(badges, pr.Resolution)
+	} else {
+		badges = append(badges, "SD")
+	}
+	if len(pr.Languages) > 0 {
+		badges = append(badges, formatLanguage(pr.Languages[0]))
+	}
+	if pr.ReleaseGroup != "" {
+		badges = append(badges, pr.ReleaseGroup)
+	}
+	return strings.Join(badges, " | ")
+}
+
+// ExtractFileSize extracts sizing strings from folder indicators dynamically [report.md]
+func ExtractFileSize(title string) string {
+	m := sizeCaptureRegex.FindString(title)
+	if m != "" {
+		return strings.ToUpper(m)
+	}
+	return ""
+}
 
 // StripTrackersFromMagnet strips redundant trackers and outputs standardized magnets.
 func StripTrackersFromMagnet(magnet string) string {
@@ -593,7 +673,6 @@ type TitleExtraction struct {
 func (te *TitleExtractor) Extract(rawTitle string, contentType string) (*TitleExtraction, error) {
 	working := stripAllPrefixes(rawTitle)
 	
-	// Problem 2: Extract Year BEFORE bracket cleaning
 	titlePart, year := extractTitleAndYear(working)
 
 	yearPos := -1
@@ -604,7 +683,6 @@ func (te *TitleExtractor) Extract(rawTitle string, contentType string) (*TitleEx
 		}
 	}
 	
-	// Problem 3: Context-aware title boundary parsing
 	boundary := findTitleBoundary(working, yearPos)
 
 	cleanTitleText := working
@@ -617,7 +695,6 @@ func (te *TitleExtractor) Extract(rawTitle string, contentType string) (*TitleEx
 	cleanTitleText = strings.TrimSpace(cleanTitleText)
 	cleanTitleText = cleanBalancedBrackets(cleanTitleText)
 
-	// Problem 4: cleanTitleOnly instead of destructive lowercase dictionaries
 	cleanTitle := cleanTitleOnly(cleanTitleText)
 
 	remainder := ""
@@ -707,6 +784,32 @@ func (mp *MetadataParser) Parse(remainder string, contentType string) *MetadataR
 	if len(episodes) == 0 {
 		singleEpRegex := regexp.MustCompile(`(?i)\b(?:e|ep|episode)[\s\-_]*(\d+)\b`)
 		if match := singleEpRegex.FindStringSubmatch(remainder); len(match) > 1 {
+			if epVal, err := strconv.Atoi(match[1]); err == nil {
+				episodes = append(episodes, epVal)
+				episodeStart = epVal
+				episodeEnd = epVal
+			}
+		}
+	}
+
+	// Dynamic daily episode pattern matching (Sonarr parity)
+	dailyRegex := regexp.MustCompile(`\b(19|20)\d{2}\s*[\.-]?\s*(0[1-9]|1[0-2])\s*[\.-]?\s*(0[1-9]|[12]\d|3[01])\b`)
+	if match := dailyRegex.FindStringSubmatch(remainder); len(match) > 0 {
+		isSeasonPack = false
+		if yearVal, err := strconv.Atoi(match[1]); err == nil {
+			season = yearVal
+		}
+		if monthVal, err := strconv.Atoi(match[2]); err == nil {
+			episodes = append(episodes, monthVal)
+			episodeStart = monthVal
+			episodeEnd = monthVal
+		}
+	}
+
+	// Absolute numbering anime episode matching (Radarr/Sonarr absolute indexing parity)
+	animeRegex := regexp.MustCompile(`\s+([0-9]{3,4})\s+`)
+	if len(episodes) == 0 {
+		if match := animeRegex.FindStringSubmatch(remainder); len(match) > 1 {
 			if epVal, err := strconv.Atoi(match[1]); err == nil {
 				episodes = append(episodes, epVal)
 				episodeStart = epVal
@@ -887,7 +990,6 @@ func RobustParseInfo(title string, fallbackSeason int, contentType string) *Pars
 	}
 	parseCacheMu.RUnlock()
 
-	// ⚡ PRIMARY PARSER ENGINE: Custom Forum Title Rule-based Parser (Radarr/Sonarr full parity)
 	if resCustom := parseForumTitle(title, contentType); resCustom != nil {
 		resCustom.Title = cleanTitleOnly(resCustom.Title)
 		
@@ -1377,16 +1479,14 @@ func cleanTitleOnly(title string) string {
 	return capitalizeTitle(s)
 }
 
-func moveArticleToFront(s string) string {
-	articles := []string{", The", ", A", ", An", ", Le", ", La", ", Les", ", L'"}
-	for _, article := range articles {
-		if strings.HasSuffix(strings.ToLower(s), strings.ToLower(article)) {
-			base := strings.TrimSpace(s[:len(s)-len(article)])
-			art := strings.TrimPrefix(article, ", ")
-			return art + " " + base
-		}
-	}
-	return s
+type ReleaseGroupParser struct{}
+
+func NewReleaseGroupParser() *ReleaseGroupParser {
+	return &ReleaseGroupParser{}
+}
+
+func (rgp *ReleaseGroupParser) ParseReleaseGroup(title string) string {
+	return parseReleaseGroup(title)
 }
 
 func parseReleaseGroup(title string) string {
@@ -1400,23 +1500,6 @@ func parseReleaseGroup(title string) string {
 		return m[1]
 	}
 	return ""
-}
-
-func isMetadataWord(s string) bool {
-	metadataWords := []string{
-		"proper", "repack", "extended", "unrated", "remastered",
-		"x264", "x265", "hevc", "avc", "aac", "ac3", "dts",
-		"720p", "1080p", "2160p", "480p", "4k", "uhd",
-		"webdl", "webrip", "bluray", "hdtv", "dvdrip",
-		"gb", "mb", "kb", "esub", "sub", "subs",
-	}
-	s = strings.ToLower(s)
-	for _, w := range metadataWords {
-		if s == w {
-			return true
-		}
-	}
-	return false
 }
 
 type QualityParser struct{}
@@ -1641,28 +1724,6 @@ func (v *Validator) ValidateParsedRelease(pr *ParsedRelease) bool {
 	return true
 }
 
-func isAllNumbers(s string) bool {
-	for _, r := range s {
-		if !unicode.IsDigit(r) && !unicode.IsSpace(r) {
-			return false
-		}
-	}
-	return true
-}
-
-func isAllUppercase(s string) bool {
-	hasLetter := false
-	for _, r := range s {
-		if unicode.IsLetter(r) {
-			hasLetter = true
-			if unicode.IsLower(r) {
-				return false
-			}
-		}
-	}
-	return hasLetter
-}
-
 func ParseRelease(rawTitle string, contentType string) *ParsedRelease {
 	extractor := NewTitleExtractor()
 	metaParser := NewMetadataParser()
@@ -1751,8 +1812,4 @@ func parseAudioChannels(s string) string {
 		return "2.0"
 	}
 	return ""
-}
-
-func init() {
-	_ = url.QueryEscape
 }
