@@ -1,6 +1,6 @@
 
-// Version: 2.0.7
-// Change log: Removed the invalid InlineAlloc field from the BucketStats in-use bytes equation, relying on LeafInuse which natively includes inlined bucket bytes as per official Bbolt specifications.
+// Version: 2.0.8
+// Change log: Integrated a transactional Self-Healing Index Rebuilder inside the repair sequence. This automatically compiles the missing tmdb_thread_index and dual-key metadata pointer maps, immediately resolving empty stream listings.
 
 package main
 
@@ -186,8 +186,28 @@ func main() {
 		log.Printf("  - Total Storage Efficiency:     %.1f%%\n", (float64(totalInuseBytes)/float64(diskSize))*100)
 	}
 
+	// Determine if any indices need re-compiling to activate self-healing paths
+	var missingThreadIdxKeys bool
+	_ = db.View(func(tx *bolt.Tx) error {
+		tb := tx.Bucket([]byte("threads"))
+		threadIdxB := tx.Bucket([]byte("tmdb_thread_index"))
+		c := tb.Cursor()
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			var t database.Thread
+			if errDec := database.DecodeGob(v, &t); errDec == nil {
+				if t.Status == "linked" && t.TmdbID != nil {
+					if threadIdxB.Get([]byte(*t.TmdbID)) == nil {
+						missingThreadIdxKeys = true
+						break
+					}
+				}
+			}
+		}
+		return nil
+	})
+
 	// 4. Maintenance / Repair Transition Phase
-	if !*repair && legacyHashCount == 0 && len(duplicateTitles) == 0 && len(orphanedIndexKeys) == 0 {
+	if !*repair && legacyHashCount == 0 && len(duplicateTitles) == 0 && len(orphanedIndexKeys) == 0 && !missingThreadIdxKeys {
 		log.Println("==================================================")
 		log.Println("► VERDICT: [CLEAN] - No structural anomalies found in database.")
 		log.Println("==================================================")
@@ -197,7 +217,8 @@ func main() {
 	if !*repair {
 		log.Println("==================================================")
 		log.Println("► VERDICT: Audited in Dry-Run mode. No writes occurred.")
-		log.Println("To apply transitions, fix index drifts, and prune duplicates, run with: --repair")
+		log.Printf("  - High-Speed Lookups Missing Indexes: %v\n", missingThreadIdxKeys)
+		log.Println("To apply transitions, compile missing indices, and prune duplicates, run with: --repair")
 		log.Println("==================================================")
 		return
 	}
@@ -211,10 +232,31 @@ func main() {
 		idxB := tx.Bucket([]byte("catalog_index"))
 		threadIdxB := tx.Bucket([]byte("tmdb_thread_index"))
 		streamsB := tx.Bucket([]byte("streams"))
+		metaB := tx.Bucket([]byte("tmdb_metadata"))
+
+		// ⚡ SELF-HEALING MULTI-KEY INDEX REBUILDER (Bpasses old sqlite-migrator deficits)
+		log.Println("Re-indexing Metadata bucket into high-speed Dual-Key layout...")
+		var metadataToRewrite []database.TmdbMetadata
+		metaCursor := metaB.Cursor()
+		for k, v := metaCursor.First(); k != nil; k, v = metaCursor.Next() {
+			var m database.TmdbMetadata
+			if errDec := database.DecodeGob(v, &m); errDec == nil {
+				if string(k) == m.TmdbID { // Collect original TMDB primary keys
+					metadataToRewrite = append(metadataToRewrite, m)
+				}
+			}
+		}
+
+		for _, m := range metadataToRewrite {
+			bytesData, _ := database.EncodeGob(m)
+			_ = metaB.Put([]byte(m.TmdbID), bytesData)
+			if m.ImdbID != nil && *m.ImdbID != "" {
+				_ = metaB.Put([]byte(*m.ImdbID), bytesData) // Write O(1) direct IMDb point-lookup index key
+			}
+		}
 
 		// Iterate through every mapped title group, migrating and resolving collisions
 		for targetNewHash, list := range duplicatesMap {
-			// Sort so index 0 is the newest (UpdatedAt DESC)
 			sort.Slice(list, func(i, j int) bool {
 				return list[i].UpdatedAt.After(list[j].UpdatedAt)
 			})
@@ -224,7 +266,6 @@ func main() {
 
 			// Step A: Keep the newest thread, migrating its key to the invariant title format
 			log.Printf("Processing: %q\n", keptThread.RawTitle)
-			log.Printf("  [KEEPING] NewHash=%s (Last Updated: %v)\n", targetNewHash, keptThread.UpdatedAt)
 
 			// Delete older reference if it was stored under the legacy hash key
 			_ = tb.Delete([]byte(oldKeptHash))
@@ -284,6 +325,18 @@ func main() {
 			}
 		}
 
+		// Rebuild all remaining thread indexes inside tmdb_thread_index natively
+		log.Println("Populating high-speed Thread index pointers bucket...")
+		threadCursor := tb.Cursor()
+		for k, v := threadCursor.First(); k != nil; k, v = threadCursor.Next() {
+			var t database.Thread
+			if errDec := database.DecodeGob(v, &t); errDec == nil {
+				if t.Status == "linked" && t.TmdbID != nil {
+					_ = threadIdxB.Put([]byte(*t.TmdbID), k)
+				}
+			}
+		}
+
 		// Prune orphaned catalog index keys collected during audit phase
 		if len(orphanedIndexKeys) > 0 {
 			log.Printf("Pruning %d orphaned keys from catalog_index...\n", len(orphanedIndexKeys))
@@ -299,7 +352,7 @@ func main() {
 		log.Fatalf("Transition transaction failed: %v\n", err)
 	}
 
-	log.Println("Database repair and hash migration transaction committed successfully!")
+	log.Println("Database repair, high-speed index compiling, and hash migration transaction committed successfully!")
 
 	// 5. Shrink the Database on disk via compaction
 	log.Println("Shrinking database file size via sequential compaction...")
@@ -322,7 +375,7 @@ func main() {
 	}
 
 	log.Println("==================================================")
-	log.Println("► VERDICT: [SUCCESS] - Database converted, defragmented, and compacted.")
+	log.Println("► VERDICT: [SUCCESS] - Indexes compiled, database defragmented, and compacted.")
 	log.Println("==================================================")
 }
 
