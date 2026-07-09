@@ -1,5 +1,5 @@
-// Version: 1.3.0
-// Change log: Updated calculateScore to utilize NormalizeTitleForMatching, and added SearchWithAliases helper to perform TMDB queries on variant titles safely.
+// Version: 1.4.0
+// Change log: Standardized TmdbID key formats as raw numeric string identifiers to prevent duplicate caches, extracted punctRe compile out of hot loops to save allocations, and enforced requested type matching in search executions.
 
 package metadata
 
@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -76,6 +77,9 @@ type TMDBClient struct {
 	client *http.Client
 	apiKey string
 }
+
+// Extracted compiled regex pattern to package level to avoid heap allocations on hot matches [report.md]
+var matchingPunctRe = regexp.MustCompile(`(?i)(?<=\s)(,|<|>|/|\\|;|:|'|"|\||\`|~|!|\?|@|\$|%|\^|\*|_|=){1}(?=\s)|('|:|\?|,)(?=(?:(?:s|m)\s)|\s|$)|([()\[\]{}])`)
 
 func createOptimizedTMDBHTTPClient(timeout time.Duration) *http.Client {
 	transport := &http.Transport{
@@ -306,56 +310,17 @@ func (t *TMDBClient) Search(title string, year int, contentType string) (*TmdbRe
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	type searchRes struct {
-		cand  *tmdbSearchResult
-		score float64
-		mType string
-		err   error
+	// Enforce strict requested type matching on execution paths to avoid catalog category leaks [report.md]
+	cand, score, err := t.executeSearch(ctx, cleanTitle, year, contentType)
+	if err != nil || cand == nil || score < 40.0 {
+		return nil, fmt.Errorf("no metadata match met similarity threshold on requested content type: %s", contentType)
 	}
 
-	resChan := make(chan searchRes, 2)
+	candID := fmt.Sprintf("%.0f", cand.ID)
 
-	altType := "movie"
-	if strings.ToLower(contentType) == "movie" {
-		altType = "series"
-	}
-
-	go func() {
-		cand, score, err := t.executeSearch(ctx, cleanTitle, year, contentType)
-		resChan <- searchRes{cand, score, contentType, err}
-	}()
-	go func() {
-		cand, score, err := t.executeSearch(ctx, cleanTitle, year, altType)
-		resChan <- searchRes{cand, score, altType, err}
-	}()
-
-	var bestCand *tmdbSearchResult
-	bestScore := -1.0
-	var bestType string
-
-	for i := 0; i < 2; i++ {
-		res := <-resChan
-		if res.err == nil && res.cand != nil && res.score >= 40.0 {
-			if res.score > bestScore {
-				bestScore = res.score
-				bestCand = res.cand
-				bestType = res.mType
-				if res.mType == contentType && res.score > 80.0 {
-					break
-				}
-			}
-		}
-	}
-
-	if bestCand == nil || bestScore < 40.0 {
-		return nil, fmt.Errorf("no metadata match met similarity threshold on any content type")
-	}
-
-	candID := fmt.Sprintf("%.0f", bestCand.ID)
-
-	tmdbRaw, errTmdb := t.GetByID(candID, bestType)
+	tmdbRaw, errTmdb := t.GetByID(candID, contentType)
 	if errTmdb == nil && tmdbRaw.ImdbID != "" {
-		cinemetaResult, errCinemeta := t.GetByImdbIDFromCinemeta(tmdbRaw.ImdbID, bestType)
+		cinemetaResult, errCinemeta := t.GetByImdbIDFromCinemeta(tmdbRaw.ImdbID, contentType)
 		if errCinemeta == nil {
 			return cinemetaResult, nil
 		}
@@ -501,7 +466,7 @@ func (t *TMDBClient) GetByID(id string, contentType string) (*TmdbResult, error)
 	}
 
 	return &TmdbResult{
-		TmdbID:      fmt.Sprintf("%s:%s", mediaType, id),
+		TmdbID:      id, // Standardized key layout using the raw numeric ID string [report.md]
 		ImdbID:      imdbID,
 		Title:       title,
 		Year:        year,
@@ -520,8 +485,8 @@ func NormalizeTitleForMatching(title string) string {
 	s := title
 	s = strings.ReplaceAll(s, "&", "and")
 
-	punctRe := regexp.MustCompile(`(?i)(?<=\s)(,|<|>|/|\\|;|:|'|"|\||\`|~|!|\?|@|\$|%|\^|\*|_|=){1}(?=\s)|('|:|\?|,)(?=(?:(?:s|m)\s)|\s|$)|([()\[\]{}])`)
-	s = punctRe.ReplaceAllString(s, " ")
+	// References compiled matcher punctRegex cleanly [report.md]
+	s = matchingPunctRe.ReplaceAllString(s, " ")
 
 	s = strings.Join(strings.Fields(s), " ")
 	s = strings.ToLower(s)
