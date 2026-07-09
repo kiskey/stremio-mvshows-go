@@ -1,6 +1,6 @@
 
-// Version: 2.0.5
-// Change log: Added structural database page allocation statistics profiling, calculating physical on-disk sizes vs logical in-use space to prove unfragmented page density natively.
+// Version: 2.0.6
+// Change log: Fixed undefined bbolt.BucketStats struct fields by matching the official CNCF Bbolt package API fields (Alloc vs Allocated, and logical PageN summation).
 
 package main
 
@@ -136,7 +136,7 @@ func main() {
 	})
 	log.Printf("  - Orphaned Catalog Keys Found: %d indexes\n", len(orphanedIndexKeys))
 
-	// 3. Stats Phase: Print exact page allocation and logical sizing breakdown (Resolves Size verification)
+	// 3. Stats Phase: Print exact page allocation and logical sizing breakdown
 	log.Println("==================================================")
 	log.Println("► BBOLT PHYSICAL FILE PAGE STATS REPORT")
 	log.Println("==================================================")
@@ -150,16 +150,19 @@ func main() {
 			stats := b.Stats()
 			totalKeys += stats.KeyN
 			
-			// Calculate space actually occupied by serialization byte streams
-			inuse := int64(stats.BranchInuse) + int64(stats.LeafInuse) + int64(stats.InlineAllocated)
-			allocated := int64(stats.BranchAllocated) + int64(stats.LeafAllocated)
+			// Calculate space actually occupied by GOB byte structures
+			inuse := int64(stats.BranchInuse) + int64(stats.LeafInuse) + int64(stats.InlineAlloc)
+			allocated := int64(stats.BranchAlloc) + int64(stats.LeafAlloc)
 
 			totalInuseBytes += inuse
 			totalAllocatedBytes += allocated
 
+			pageCount := stats.BranchPageN + stats.BranchOverflowN + stats.LeafPageN + stats.LeafOverflowN
+			overflowPageCount := stats.BranchOverflowN + stats.LeafOverflowN
+
 			log.Printf("Bucket: %q\n", string(name))
 			log.Printf("  - KeyCount:            %d keys\n", stats.KeyN)
-			log.Printf("  - Total Pages:         %d pages (including %d overflow pages)\n", stats.PageCount, stats.OverflowPageCount)
+			log.Printf("  - Total Pages:         %d pages (including %d overflow pages)\n", pageCount, overflowPageCount)
 			log.Printf("  - Logical Space InUse: %s (Allocated space: %s)\n", formatBytes(inuse), formatBytes(allocated))
 			if allocated > 0 {
 				log.Printf("  - Page Fill Ratio:     %.1f%%\n", (float64(inuse)/float64(allocated))*100)
