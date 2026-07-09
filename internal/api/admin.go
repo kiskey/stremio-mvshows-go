@@ -1,6 +1,6 @@
 
-// Version: 2.0.5
-// Change log: Removed unused "fmt" import to resolve compiler warnings, keeping dependencies lean and clean.
+// Version: 2.0.6
+// Change log: Refactored recentHandler to read page and limit query parameters, supporting database-level slice limits. Normalized cache lock hashes using lowercase parsing on inbound parameters.
 
 package api
 
@@ -624,18 +624,21 @@ func cachePendingHandler(c *gin.Context) {
 		return
 	}
 
-	if database.IsDebridCacheLocked(body.Infohash) {
+	// Normalize lookup string to lowercase to align with on-disk Bbolt structures
+	normalizedInfohash := strings.ToLower(body.Infohash)
+
+	if database.IsDebridCacheLocked(normalizedInfohash) {
 		c.JSON(http.StatusConflict, gin.H{"message": "Cache operation already initiated / locked for this infohash."})
 		return
 	}
 
-	_ = database.CreateDebridCacheLock(body.Infohash)
+	_ = database.CreateDebridCacheLock(normalizedInfohash)
 
 	// Retrieve original magnet from local cache database
 	var cache database.MagnetCache
 	errCache := database.DB.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte("magnet_cache"))
-		data := b.Get([]byte(body.Infohash))
+		data := b.Get([]byte(normalizedInfohash))
 		if data == nil {
 			return bolt.ErrBucketNotFound
 		}
@@ -649,7 +652,7 @@ func cachePendingHandler(c *gin.Context) {
 	cfg := config.Load()
 	p := debrid.GetProvider(cfg)
 	if !p.IsEnabled() {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Debrid provider is currently disabled"})
+		writeJSON(c, http.StatusBadRequest, gin.H{"error": "Debrid provider is currently disabled"})
 		return
 	}
 
@@ -658,19 +661,19 @@ func cachePendingHandler(c *gin.Context) {
 			if r := recover(); r != nil {
 				utils.Logger.Error().
 					Interface("panic", r).
-					Str("infohash", body.Infohash).
+					Str("infohash", normalizedInfohash).
 					Msg("Unhandled panic rescued inside asynchronous cachePendingHandler worker goroutine.")
-				_ = database.DeleteDebridCacheLock(body.Infohash)
+				_ = database.DeleteDebridCacheLock(normalizedInfohash)
 			}
 		}()
 
-		utils.Logger.Info().Str("infohash", body.Infohash).Msg("Asynchronously caching pending magnet in debrid...")
+		utils.Logger.Info().Str("infohash", normalizedInfohash).Msg("Asynchronously caching pending magnet in debrid...")
 		_, errAdd := p.AddAndSelect(context.Background(), cache.Magnet)
 		if errAdd != nil {
-			utils.Logger.Error().Err(errAdd).Str("infohash", body.Infohash).Msg("Asynchronous debrid cache-add failed.")
-			_ = database.DeleteDebridCacheLock(body.Infohash)
+			utils.Logger.Error().Err(errAdd).Str("infohash", normalized").Msg("Asynchronous debrid cache-add failed.")
+			_ = database.DeleteDebridCacheLock(normalized)
 		} else {
-			utils.Logger.Info().Str("infohash", body.Infohash).Msg("Magnet submitted to debrid successfully.")
+			utils.Logger.Info().Str("infohash", normalized).Msg("Magnet submitted to debrid successfully.")
 		}
 	}()
 
@@ -736,8 +739,23 @@ func retryParseHandler(c *gin.Context) {
 }
 
 func recentHandler(c *gin.Context) {
-	linked, _ := database.GetRecentLinkedThreads()
-	failures, _ := database.GetFailedThreads()
+	pageStr := c.DefaultQuery("page", "1")
+	limitStr := c.DefaultQuery("limit", "15")
+
+	page, errP := strconv.Atoi(pageStr)
+	limit, errL := strconv.Atoi(limitStr)
+	if errP != nil || page < 1 {
+		page = 1
+	}
+	if errL != nil || limit < 1 {
+		limit = 15
+	}
+
+	offset := (page - 1) * limit
+
+	// Fetch database-paginated rows directly from BoltDB View transactions
+	linked, _ := database.GetRecentLinkedThreadsPaginated(offset, limit)
+	failures, _ := database.GetFailedThreadsPaginated(offset, limit)
 
 	type activity struct {
 		Title     string `json:"title"`
