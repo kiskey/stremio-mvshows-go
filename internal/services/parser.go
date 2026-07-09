@@ -580,6 +580,18 @@ func CompareNatural(a, b string) bool {
 	return len(runesA) < len(runesB)
 }
 
+func capitalizeTitle(s string) string {
+	words := strings.Fields(s)
+	for i, w := range words {
+		if len(w) > 0 {
+			runes := []rune(w)
+			runes[0] = unicode.ToUpper(runes[0])
+			words[i] = string(runes)
+		}
+	}
+	return strings.Join(words, " ")
+}
+
 func filterTorrentNoise(title string, originalTitle string) string {
 	title = collapseSpaces(strings.ToLower(title))
 	title = fileSizeRegex.ReplaceAllString(title, " ")
@@ -616,12 +628,163 @@ func filterTorrentNoise(title string, originalTitle string) string {
 		cleanOriginal = strings.Trim(cleanOriginal, " .-_[]()/\\")
 		
 		if cleanOriginal != "" {
-			return cleanOriginal
+			return capitalizeTitle(cleanOriginal)
 		}
-		return originalTitle
+		return capitalizeTitle(originalTitle)
 	}
 
-	return finalTitle
+	return capitalizeTitle(finalTitle)
+}
+
+func parseForumTitle(title string, contentType string) *ParseResult {
+	// Clean balanced brackets first to avoid noise inside brackets affecting title extraction
+	temp := cleanBalancedBrackets(title)
+	if temp == "" {
+		temp = title
+	}
+
+	// 1. Identify Year Anchor
+	var year int
+	var titlePart string
+	var afterPart string
+
+	// Look for year in parentheses (YYYY) or brackets [YYYY]
+	yearRegex := regexp.MustCompile(`[\(\[]((?:19|20)\d{2})[\)\]]`)
+	yearLocs := yearRegex.FindAllStringSubmatchIndex(temp, -1)
+	if len(yearLocs) > 0 {
+		loc := yearLocs[0]
+		yearStr := temp[loc[2]:loc[3]]
+		if yr, err := strconv.Atoi(yearStr); err == nil && yr >= 1900 && yr <= 2030 {
+			year = yr
+			titlePart = strings.TrimSpace(temp[:loc[0]])
+			afterPart = strings.TrimSpace(temp[loc[1]:])
+		}
+	} else {
+		// Try plain year YYYY as fallback if not in brackets/parentheses
+		plainYearRegex := regexp.MustCompile(`\b((?:19|20)\d{2})\b`)
+		plainLocs := plainYearRegex.FindAllStringSubmatchIndex(temp, -1)
+		for i := len(plainLocs) - 1; i >= 0; i-- {
+			loc := plainLocs[i]
+			yearStr := temp[loc[2]:loc[3]]
+			if yr, err := strconv.Atoi(yearStr); err == nil && yr >= 1900 && yr <= 2030 {
+				year = yr
+				titlePart = strings.TrimSpace(temp[:loc[0]])
+				afterPart = strings.TrimSpace(temp[loc[1]:])
+				break
+			}
+		}
+	}
+
+	// If no year found, we treat the entire string as titlePart and check for season indicators
+	if titlePart == "" {
+		titlePart = temp
+	}
+
+	// Clean the titlePart beautifully
+	titlePart = SanitizeName(titlePart)
+	titlePart = strings.Trim(titlePart, " .-_[]()/\\")
+
+	// 2. Parse Season and Episodes from afterPart or titlePart
+	searchStr := afterPart
+	if searchStr == "" {
+		searchStr = title
+	}
+
+	season := 1
+	var episode, episodeStart, episodeEnd int
+	var isPack bool
+
+	// Regex for Season: e.g. S01, S1, Season 1, Season01, Series 1
+	seasonRegex := regexp.MustCompile(`(?i)\b(?:s|season|series)[\s\-_]*(\d+)\b`)
+	if match := seasonRegex.FindStringSubmatch(searchStr); len(match) > 1 {
+		if sVal, err := strconv.Atoi(match[1]); err == nil && sVal > 0 {
+			season = sVal
+		}
+	}
+
+	// Regex for Episode Range: e.g. EP(01-08), E(01-25), EP(01 - 08), E01-08, Ep 01 to 08
+	epRangeRegex := regexp.MustCompile(`(?i)(?:s\d+)?\s*(?:ep?|episode)[\s\-_]*[\(\[]?\s*(\d+)\s*(?:-|to)\s*(\d+)\s*[\)\]]?`)
+	if match := epRangeRegex.FindStringSubmatch(searchStr); len(match) > 2 {
+		if start, err1 := strconv.Atoi(match[1]); err1 == nil {
+			if end, err2 := strconv.Atoi(match[2]); err2 == nil && start <= end {
+				episodeStart = start
+				episodeEnd = end
+				episode = start
+				isPack = true
+			}
+		}
+	}
+
+	// If no range found, look for single episode: e.g. E01, EP01, Ep 1, Episode 1
+	if episode == 0 {
+		singleEpRegex := regexp.MustCompile(`(?i)\b(?:e|ep|episode)[\s\-_]*(\d+)\b`)
+		if match := singleEpRegex.FindStringSubmatch(searchStr); len(match) > 1 {
+			if epVal, err := strconv.Atoi(match[1]); err == nil {
+				episode = epVal
+				episodeStart = epVal
+				episodeEnd = epVal
+			}
+		}
+	}
+
+	// If still no episode found, check if it's a complete season pack (no single episode / range)
+	if episode == 0 {
+		isPack = true
+		searchLower := strings.ToLower(searchStr)
+		if strings.Contains(searchLower, "complete") || strings.Contains(searchLower, "season pack") || strings.Contains(searchLower, "full season") || strings.Contains(searchLower, "all episodes") {
+			// It is a complete season pack
+		}
+	}
+
+	// Language Detection
+	lang := "en"
+	detectedLang := detectRegionalLanguage(title)
+	if detectedLang != "" {
+		lang = detectedLang
+	}
+
+	// Quality Detection (Resolution, e.g. 1080p, 720p, 2160p, 4k)
+	quality := "sd"
+	qualityRegex := regexp.MustCompile(`(?i)\b(2160p|1080p|720p|480p|360p|4k|uhd)\b`)
+	if match := qualityRegex.FindStringSubmatch(title); len(match) > 1 {
+		qStr := strings.ToLower(match[1])
+		if qStr == "4k" || qStr == "uhd" || qStr == "2160p" {
+			quality = "4K"
+		} else if qStr == "1080p" {
+			quality = "1080p"
+		} else if qStr == "720p" {
+			quality = "720p"
+		} else if qStr == "480p" {
+			quality = "480p"
+		} else if qStr == "360p" {
+			quality = "360p"
+		}
+	}
+
+	// Movie overrides
+	if strings.ToLower(contentType) == "movie" {
+		season = 0
+		episode = 0
+		episodeStart = 0
+		episodeEnd = 0
+		isPack = false
+	}
+
+	if titlePart == "" {
+		return nil
+	}
+
+	return &ParseResult{
+		Title:        titlePart,
+		Season:       season,
+		Episode:      episode,
+		Year:         year,
+		Language:     lang,
+		Quality:      quality,
+		IsPack:       isPack,
+		EpisodeStart: episodeStart,
+		EpisodeEnd:   episodeEnd,
+	}
 }
 
 func RobustParseInfo(title string, fallbackSeason int, contentType string) *ParseResult {
@@ -631,6 +794,18 @@ func RobustParseInfo(title string, fallbackSeason int, contentType string) *Pars
 		return cached
 	}
 	parseCacheMu.RUnlock()
+
+	// ⚡ PRIMARY PARSER ENGINE: Custom Forum Title Rule-based Parser (Radarr/Sonarr full parity)
+	if resCustom := parseForumTitle(title, contentType); resCustom != nil {
+		resCustom.Title = filterTorrentNoise(resCustom.Title, title)
+		
+		parseCacheMu.Lock()
+		if len(parseCache) < 10000 {
+			parseCache[title] = resCustom
+		}
+		parseCacheMu.Unlock()
+		return resCustom
+	}
 
 	// Step 1: Pre-process balanced brackets to strip complex metadata blocks recursively
 	balancedClean := cleanBalancedBrackets(title)
