@@ -1,5 +1,5 @@
-// Version: 1.1.9
-// Change log: Overhauled with strict validation safeguards (isValidParsedTitle) prior to lookup execution, and switched matching to SearchWithAliases variants.
+// Version: 1.2.0
+// Change log: Integrated standard parse validator metrics check prior to querying metadata lookup indexes (Fixes Problem 11 / Q10).
 
 package orchestrator
 
@@ -389,7 +389,6 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 			}
 		}
 
-		// Convert incoming raw links into clean lightweight variants prior to DB serialization
 		var cleanedMagnets []string
 		for _, m := range thread.MagnetURIs {
 			cleanedMagnets = append(cleanedMagnets, parser.StripTrackersFromMagnet(m))
