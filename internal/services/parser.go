@@ -1,5 +1,5 @@
-// Version: 1.6.2
-// Change log: Fixed parameter swap order when calling extractTitleAndYear, solved isAllNumbers/isAllUppercase scoping, and added a self-contained formatLanguage helper to prevent dependency mismatches [report.md].
+// Version: 1.6.3
+// Change log: Fixed runtime panic during SQLite migration by replacing standard library unsupported Perl lookarounds `(?=` with capturing groups in `stripAllPrefixes` [report.md].
 
 package parser
 
@@ -378,6 +378,8 @@ func getQuality(res int) string {
 		return "720p"
 	case 480:
 		return "480p"
+	case 576p:
+		return "576p"
 	case 360:
 		return "360p"
 	default:
@@ -1005,7 +1007,6 @@ func RobustParseInfo(title string, fallbackSeason int, contentType string) *Pars
 		balancedClean = title
 	}
 
-	// Corrected parameters order swap mapping string output and int output safely [report.md]
 	leftTitleCandidate, extractedYear := extractTitleAndYear(balancedClean)
 	detectedLang := detectRegionalLanguage(title)
 	clean := SanitizeName(leftTitleCandidate)
@@ -1408,16 +1409,19 @@ func ParseMagnet(magnetURI string, contentType string) *ParsedMagnet {
 }
 
 func stripAllPrefixes(s string) string {
-	patterns := []string{
-		`^\s*\[[\w.-]+\]\s*[-:]?\s*`,
-		`^\s*(?:www\.)?[a-zA-Z0-9-]+(?:\.[a-zA-Z]{2,})+\s*[-:]\s*`,
-		`^\s*(?:TamilMV|TamilBlasters|1TamilMV|TamilRockers|Isaimini|TamilGun|TamilYogi)\s*(?:\.\w+)?\s*[-:]\s*`,
-		`^\s*[^-]{2,50}\s+[-:]\s+(?=[A-Z])`,
-	}
-	for _, p := range patterns {
-		re := regexp.MustCompile(`(?i)` + p)
-		s = re.ReplaceAllString(s, "")
-	}
+	re1 := regexp.MustCompile(`(?i)^\s*\[[\w.-]+\]\s*[-:]?\s*`)
+	s = re1.ReplaceAllString(s, "")
+
+	re2 := regexp.MustCompile(`(?i)^\s*(?:www\.)?[a-zA-Z0-9-]+(?:\.[a-zA-Z]{2,})+\s*[-:]\s*`)
+	s = re2.ReplaceAllString(s, "")
+
+	re3 := regexp.MustCompile(`(?i)^\s*(?:TamilMV|TamilBlasters|1TamilMV|TamilRockers|Isaimini|TamilGun|TamilYogi)\s*(?:\.\w+)?\s*[-:]\s*`)
+	s = re3.ReplaceAllString(s, "")
+
+	// RE2 compatible prefix parser with capturing groups instead of Perl lookaheads [report.md]
+	re4 := regexp.MustCompile(`(?i)^\s*[^-]{2,50}\s+[-:]\s+([A-Z])`)
+	s = re4.ReplaceAllString(s, "$1")
+
 	return strings.TrimSpace(s)
 }
 
