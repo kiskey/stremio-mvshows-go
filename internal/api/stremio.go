@@ -1,6 +1,5 @@
-
-// Version: 2.1.0
-// Change log: Corrected streamHandler's final JSON output layer, wrapping stream slices inside the standard, Stremio protocol-compliant StremioStreamResponse struct.
+// Version: 2.1.1
+// Change log: Integrated defensive dynamic cleanup in catalog, meta, and stream handlers to dynamically scrub raw metadata-heavy clean titles when serving.
 
 package api
 
@@ -412,10 +411,13 @@ func catalogHandler(c *gin.Context) {
 		seenIDs[metaID] = true
 
 		title := t.CleanTitle
-		if title == "" {
+		// Dynamic Sanitation Safeguard: if clean title contains raw indicators or is blank, parse & clean it live
+		if title == "" || strings.Contains(title, "[") || strings.Contains(title, "]") || strings.Contains(strings.ToLower(title), "1080p") || strings.Contains(strings.ToLower(title), "720p") || strings.Contains(strings.ToLower(title), "s0") {
 			parsed := parser.ParseTitle(t.RawTitle, t.Type)
 			if parsed != nil && parsed.Title != "" {
 				title = parsed.Title
+			} else if t.CleanTitle != "" {
+				title = t.CleanTitle
 			} else {
 				title = t.RawTitle
 			}
@@ -508,6 +510,13 @@ func metaHandler(c *gin.Context) {
 		displayName := "Unknown"
 		if len(meta.Threads) > 0 {
 			displayName = meta.Threads[0].CleanTitle
+			// Dynamic Sanitation Safeguard for Live Meta resolver
+			if displayName == "" || strings.Contains(displayName, "[") || strings.Contains(displayName, "]") || strings.Contains(strings.ToLower(displayName), "1080p") || strings.Contains(strings.ToLower(displayName), "720p") || strings.Contains(strings.ToLower(displayName), "s0") {
+				parsed := parser.ParseTitle(meta.Threads[0].RawTitle, meta.Threads[0].Type)
+				if parsed != nil && parsed.Title != "" {
+					displayName = parsed.Title
+				}
+			}
 		}
 
 		mediaType := "movie"
@@ -826,6 +835,13 @@ func streamHandler(c *gin.Context) {
 	tmdbTitle := ""
 	if len(meta.Threads) > 0 {
 		tmdbTitle = meta.Threads[0].CleanTitle
+		// Dynamic Sanitation Safeguard for streams layout clean names
+		if tmdbTitle == "" || strings.Contains(tmdbTitle, "[") || strings.Contains(tmdbTitle, "]") || strings.Contains(strings.ToLower(tmdbTitle), "1080p") || strings.Contains(strings.ToLower(tmdbTitle), "720p") || strings.Contains(strings.ToLower(tmdbTitle), "s0") {
+			parsed := parser.ParseTitle(meta.Threads[0].RawTitle, meta.Threads[0].Type)
+			if parsed != nil && parsed.Title != "" {
+				tmdbTitle = parsed.Title
+			}
+		}
 	}
 	if tmdbTitle == "" {
 		var tmdbData tmdbLightData
