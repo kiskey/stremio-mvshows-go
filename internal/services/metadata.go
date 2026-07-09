@@ -1,5 +1,5 @@
-// Version: 1.4.0
-// Change log: Standardized TmdbID key formats as raw numeric string identifiers to prevent duplicate caches, extracted punctRe compile out of hot loops to save allocations, and enforced requested type matching in search executions.
+// Version: 1.4.1
+// Change log: Corrected unescaped backtick lexical syntax errors and replaced Perl lookarounds with pure Go RE2-compliant regular expressions to prevent compiler and runtime panics [report.md].
 
 package metadata
 
@@ -78,8 +78,12 @@ type TMDBClient struct {
 	apiKey string
 }
 
-// Extracted compiled regex pattern to package level to avoid heap allocations on hot matches [report.md]
-var matchingPunctRe = regexp.MustCompile(`(?i)(?<=\s)(,|<|>|/|\\|;|:|'|"|\||\`|~|!|\?|@|\$|%|\^|\*|_|=){1}(?=\s)|('|:|\?|,)(?=(?:(?:s|m)\s)|\s|$)|([()\[\]{}])`)
+// Pure Go RE2-compliant regular expressions resolving unescaped backtick syntax errors and Perl lookaround compilation failures [report.md]
+var (
+	matchingBracketsRe    = regexp.MustCompile(`[()\[\]{}]`)
+	matchingSpacesPunctRe = regexp.MustCompile(`\s+[,<>\/\\;:'"|` + "`" + `~!?@$%^*\_\-=]\s+`)
+	matchingSuffixPunctRe = regexp.MustCompile(`[':\?,]([sm]\s|\s|$)`)
+)
 
 func createOptimizedTMDBHTTPClient(timeout time.Duration) *http.Client {
 	transport := &http.Transport{
@@ -310,7 +314,6 @@ func (t *TMDBClient) Search(title string, year int, contentType string) (*TmdbRe
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Enforce strict requested type matching on execution paths to avoid catalog category leaks [report.md]
 	cand, score, err := t.executeSearch(ctx, cleanTitle, year, contentType)
 	if err != nil || cand == nil || score < 40.0 {
 		return nil, fmt.Errorf("no metadata match met similarity threshold on requested content type: %s", contentType)
@@ -372,7 +375,7 @@ func (t *TMDBClient) executeSearch(ctx context.Context, title string, year int, 
 		return nil, 0, fmt.Errorf("no results found on TMDB")
 	}
 
-	var bestCand *tmdbSearchResult
+	var bestCamp *tmdbSearchResult
 	bestScore := -1.0
 
 	for i := range data.Results {
@@ -393,11 +396,11 @@ func (t *TMDBClient) executeSearch(ctx context.Context, title string, year int, 
 		score := calculateScore(title, year, candTitle, candYear)
 		if score > bestScore {
 			bestScore = score
-			bestCand = cand
+			bestCamp = cand
 		}
 	}
 
-	return bestCand, bestScore, nil
+	return bestCamp, bestScore, nil
 }
 
 func (t *TMDBClient) GetByID(id string, contentType string) (*TmdbResult, error) {
@@ -466,7 +469,7 @@ func (t *TMDBClient) GetByID(id string, contentType string) (*TmdbResult, error)
 	}
 
 	return &TmdbResult{
-		TmdbID:      id, // Standardized key layout using the raw numeric ID string [report.md]
+		TmdbID:      id,
 		ImdbID:      imdbID,
 		Title:       title,
 		Year:        year,
@@ -476,8 +479,7 @@ func (t *TMDBClient) GetByID(id string, contentType string) (*TmdbResult, error)
 	}, nil
 }
 
-// ---- Sonarr Matching Scoring Engine ----
-
+// NormalizeTitleForMatching normalizes raw strings for match evaluation using compiled package patterns [report.md]
 func NormalizeTitleForMatching(title string) string {
 	if title == "" {
 		return ""
@@ -485,8 +487,9 @@ func NormalizeTitleForMatching(title string) string {
 	s := title
 	s = strings.ReplaceAll(s, "&", "and")
 
-	// References compiled matcher punctRegex cleanly [report.md]
-	s = matchingPunctRe.ReplaceAllString(s, " ")
+	s = matchingBracketsRe.ReplaceAllString(s, " ")
+	s = matchingSpacesPunctRe.ReplaceAllString(s, " ")
+	s = matchingSuffixPunctRe.ReplaceAllString(s, "$1")
 
 	s = strings.Join(strings.Fields(s), " ")
 	s = strings.ToLower(s)
