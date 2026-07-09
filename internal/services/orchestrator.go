@@ -1,4 +1,4 @@
-// Version: 1.1.8
+// Version: 1.1.9
 // Change log: Overhauled with strict validation safeguards (isValidParsedTitle) prior to lookup execution, and switched matching to SearchWithAliases variants.
 
 package orchestrator
@@ -154,7 +154,6 @@ func RunFullWorkflow(cfg *config.Config) {
 	utils.Logger.Info().Int("total_scraped", len(scraped)).Msg("Workflow thread processing complete.")
 }
 
-// Problem 11 Validation Safeguard Check
 func isValidParsedTitle(parsed *parser.ParseResult) bool {
 	if parsed == nil {
 		return false
@@ -172,7 +171,6 @@ func isValidParsedTitle(parsed *parser.ParseResult) bool {
 		return false
 	}
 
-	// Filter metadata heavy junk ratios
 	words := strings.Fields(strings.ToLower(parsed.Title))
 	metadataCount := 0
 	for _, w := range words {
@@ -257,7 +255,7 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 	if hasExisting {
 		if existing.ThreadHash == thread.ThreadHash {
 			if existing.Status == "pending_tmdb" && !incremental {
-				// Retry allowed
+				// Retry
 			} else {
 				return
 			}
@@ -266,6 +264,7 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 		if existing.ThreadHash != thread.ThreadHash {
 			_ = database.DB.Update(func(tx *bolt.Tx) error {
 				_ = tx.Bucket([]byte("threads")).Delete([]byte(existing.ThreadHash))
+
 				if existing.TmdbID != nil {
 					_ = tx.Bucket([]byte("streams")).Delete([]byte(*existing.TmdbID))
 					_ = tx.Bucket([]byte("tmdb_thread_index")).Delete([]byte(*existing.TmdbID))
@@ -292,7 +291,6 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 		return
 	}
 
-	// Problem 11: strict parse validation prior to execution
 	if !isValidParsedTitle(parsed) {
 		_ = database.LogFailedThread(nil, thread.ThreadHash, thread.RawTitle,
 			fmt.Sprintf("Parsed title invalid: %s", parsed.Title))
@@ -305,7 +303,6 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 		Int("year", parsed.Year).
 		Msg("Title parsed successfully")
 
-	// Call alias-variants TMDB query
 	tmdbResult, errTmdb := tmdbClient.SearchWithAliases(parsed.Title, parsed.Year, thread.Type)
 	if errTmdb != nil {
 		utils.Logger.Warn().Err(errTmdb).Str("title", parsed.Title).Msg("TMDB lookup failed or score below threshold. Storing as pending_tmdb.")
@@ -392,6 +389,12 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 			}
 		}
 
+		// Convert incoming raw links into clean lightweight variants prior to DB serialization
+		var cleanedMagnets []string
+		for _, m := range thread.MagnetURIs {
+			cleanedMagnets = append(cleanedMagnets, parser.StripTrackersFromMagnet(m))
+		}
+
 		linkedThread := &database.Thread{
 			ThreadHash: thread.ThreadHash,
 			RawTitle:   thread.RawTitle,
@@ -401,7 +404,7 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 			Type:       thread.Type,
 			PostedAt:   thread.PostedAt,
 			Catalog:    thread.CatalogID,
-			MagnetURIs: thread.MagnetURIs,
+			MagnetURIs: cleanedMagnets,
 			CreatedAt:  time.Now(),
 			UpdatedAt:  time.Now(),
 		}
@@ -417,7 +420,7 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 		isSeries := strings.ToLower(thread.Type) == "series"
 		var streams []database.Stream
 
-		for _, magnet := range thread.MagnetURIs {
+		for _, magnet := range cleanedMagnets {
 			parsedMagnet := parser.ParseMagnet(magnet, thread.Type)
 			if parsedMagnet == nil {
 				continue
