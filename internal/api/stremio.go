@@ -1,5 +1,5 @@
-// Version: 2.1.2
-// Change log: Integrated rich stream meta card representations mapping Release Groups, special editions, and audio indicators cleanly (Problem 10).
+// Version: 2.1.3
+// Change log: Fully resolved undefined compile helpers (getDebridCachedLink, getDownloadLinkForFile) with fallback unrestrict mappings for Real-Debrid and Torbox to guarantee clean builds.
 
 package api
 
@@ -832,7 +832,6 @@ func streamHandler(c *gin.Context) {
 			dn = val
 		}
 
-		// Problem 10: Rich meta-fields parser call inside hot-path mapping
 		pr := parser.ParseRelease(dn, mediaType)
 
 		if pr.ReleaseGroup != "" {
@@ -1322,4 +1321,121 @@ func rdAddHandler(c *gin.Context) {
 	})
 
 	c.Redirect(http.StatusFound, finalLink)
+}
+
+func getDebridCachedLink(ctx context.Context, dt *database.DebridTorrent, season, episode int, isMovie bool) (string, error) {
+	cfg := config.Load()
+	p := debrid.GetProvider(cfg)
+	if !p.IsEnabled() {
+		return "", fmt.Errorf("debrid not enabled")
+	}
+
+	if isMovie {
+		var selectedFiles []database.TorrentFile
+		for _, f := range dt.Files {
+			if f.Selected == 1 {
+				selectedFiles = append(selectedFiles, f)
+			}
+		}
+		if len(selectedFiles) > 0 {
+			var fileToPlay *database.TorrentFile
+			var videoFiles []database.TorrentFile
+			for _, f := range selectedFiles {
+				pathLower := strings.ToLower(f.Path)
+				if strings.HasSuffix(pathLower, ".mkv") ||
+					strings.HasSuffix(pathLower, ".mp4") ||
+					strings.HasSuffix(pathLower, ".avi") ||
+					strings.HasSuffix(pathLower, ".mov") {
+					videoFiles = append(videoFiles, f)
+				}
+			}
+			if len(videoFiles) > 0 {
+				largest := &videoFiles[0]
+				for i := 1; i < len(videoFiles); i++ {
+					if videoFiles[i].Bytes > largest.Bytes {
+						largest = &videoFiles[i]
+					}
+				}
+				fileToPlay = largest
+			} else {
+				largest := &selectedFiles[0]
+				for i := 1; i < len(selectedFiles); i++ {
+					if selectedFiles[i].Bytes > largest.Bytes {
+						largest = &selectedFiles[i]
+					}
+				}
+				fileToPlay = largest
+			}
+
+			linkIdx := -1
+			for idx, f := range dt.Files {
+				if f.ID == fileToPlay.ID {
+					linkIdx = idx
+					break
+				}
+			}
+			if linkIdx >= 0 && linkIdx < len(dt.Links) {
+				unres, err := p.UnrestrictLink(ctx, dt.Links[linkIdx])
+				if err == nil {
+					return unres.Download, nil
+				}
+			}
+		}
+	} else {
+		candidates := make([]parser.CandidateFile, len(dt.Files))
+		for idx, f := range dt.Files {
+			candidates[idx] = parser.CandidateFile{
+				ID:   f.ID,
+				Path: f.Path,
+				Size: f.Bytes,
+			}
+		}
+
+		best, found := parser.FindBestSeriesFile(candidates, season, episode, season)
+		if found {
+			linkIdx := -1
+			for idx, f := range dt.Files {
+				if f.ID == best.ID {
+					linkIdx = idx
+					break
+				}
+			}
+			if linkIdx >= 0 && linkIdx < len(dt.Links) {
+				unres, err := p.UnrestrictLink(ctx, dt.Links[linkIdx])
+				if err == nil {
+					return unres.Download, nil
+				}
+			}
+		}
+	}
+	return "", fmt.Errorf("cached link not found or unable to unrestrict")
+}
+
+func getDownloadLinkForFile(ctx context.Context, p debrid.Provider, info *debrid.TorrentInfo, fileID int) (string, error) {
+	cfg := config.Load()
+	if cfg.DebridService == "torbox" {
+		link := fmt.Sprintf("tb:%s:%d", info.ID, fileID)
+		unres, err := p.UnrestrictLink(ctx, link)
+		if err == nil {
+			return unres.Download, nil
+		}
+		return "", err
+	}
+
+	linkIdx := -1
+	for idx, f := range info.Files {
+		if f.ID == fileID {
+			linkIdx = idx
+			break
+		}
+	}
+	if linkIdx >= 0 && linkIdx < len(info.Links) {
+		unres, err := p.UnrestrictLink(ctx, info.Links[linkIdx])
+		if err == nil {
+			return unres.Download, nil
+		}
+		return "", err
+	}
+
+	return "", fmt.Errorf("link index not found or unrestricting failed")
 }
