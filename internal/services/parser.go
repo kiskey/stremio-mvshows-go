@@ -1,6 +1,5 @@
-
-// Version: 1.1.9
-// Change log: Added a high-performance unicode-safe natural alphanumeric sorting algorithm CompareNatural and refactored FindBestSeriesFile to sort numerical episode ranges chronologically matching Sonarr/Radarr standards.
+// Version: 1.2.0
+// Change log: Fixed RobustParseInfo to parse full sanitized string for rtp, and ParseMagnet to parse magnet display names robustly, preventing missing stream indices.
 
 package parser
 
@@ -649,13 +648,16 @@ func RobustParseInfo(title string, fallbackSeason int, contentType string) *Pars
 	clean := SanitizeName(leftTitleCandidate)
 	searchTitle := truncateSeriesJunk(clean)
 
+	// Clean the full string recursively for parser matching (prevents dropping post-year metadata like Season packs)
+	fullClean := SanitizeName(balancedClean)
+
 	var res *ParseResult
 
 	// SONARR/RADARR CONTEXT-AWARE SEPARATION:
 	// If the scraped catalog explicitly defines a Movie, bypass series parsing entirely.
 	// This prevents releasetitleparser from treating leading numbers as season indicators.
 	if strings.ToLower(contentType) == "movie" {
-		movie := rtp.ParseMovieTitle(searchTitle)
+		movie := rtp.ParseMovieTitle(fullClean)
 		if movie != nil {
 			lang := "en"
 			if len(movie.Languages) > 0 {
@@ -676,7 +678,7 @@ func RobustParseInfo(title string, fallbackSeason int, contentType string) *Pars
 		}
 	} else {
 		// Series path
-		info := rtp.ParseSeriesTitle(searchTitle)
+		info := rtp.ParseSeriesTitle(fullClean)
 		if info != nil {
 			lang := "en"
 			if len(info.Languages) > 0 {
@@ -705,7 +707,7 @@ func RobustParseInfo(title string, fallbackSeason int, contentType string) *Pars
 			res.Title = filterTorrentNoise(res.Title, searchTitle)
 		} else {
 			// Movie Fallback
-			movie := rtp.ParseMovieTitle(searchTitle)
+			movie := rtp.ParseMovieTitle(fullClean)
 			if movie != nil {
 				lang := "en"
 				if len(movie.Languages) > 0 {
@@ -1004,11 +1006,9 @@ func ParseMagnet(magnetURI string, contentType string) *ParsedMagnet {
 		return nil
 	}
 
-	u, err := url.Parse(magnetURI)
-	if err != nil {
-		return nil
-	}
-	dn := u.Query().Get("dn")
+	// Robustly extract dn parameter without falling back to nil on url.Parse strict failures
+	dn := ExtractMagnetDisplayName(magnetURI)
+
 	if dn == "" {
 		return &ParsedMagnet{
 			Type:     "SINGLE_EPISODE",
@@ -1018,7 +1018,6 @@ func ParseMagnet(magnetURI string, contentType string) *ParsedMagnet {
 		}
 	}
 
-	dn, _ = url.QueryUnescape(dn)
 	dn = rePrefixRegex.ReplaceAllString(dn, "") // Use pre-compiled regex
 	dn = strings.TrimSpace(dn)
 
