@@ -1,6 +1,6 @@
 
-// Version: 2.0.2
-// Change log: Merged the invariant title-based hash transition engine directly into the inspector's --repair transaction, enabling single-command schema upgrades, duplicate pruning, and disk compaction.
+// Version: 2.0.3
+// Change log: Added missing "strconv" import to support Itoa conversions inside the redundant duplicate clean-up loops, resolving compiler warnings.
 
 package main
 
@@ -12,6 +12,7 @@ import (
 	"log"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -248,8 +249,4 @@ func main() {
 	log.Println("==================================================")
 	log.Println("► VERDICT: [SUCCESS] - Database converted, defragmented, and compacted.")
 	log.Println("==================================================")
-}
-
-func init() {
-	_ = time.Now // Prevent unused imports compile crash
 }
