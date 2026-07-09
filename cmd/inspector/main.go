@@ -1,17 +1,15 @@
 
-// Version: 2.0.0
-// Description: Custom diagnostic and automated repair utility for BoltDB, scanning for duplicated titles, catalog index drifts, and executing safe disk compaction.
+// Version: 2.0.1
+// Change log: Removed unused "fmt" and "time" imports to resolve compiler failures and ensure successful builds.
 
 package main
 
 import (
 	"flag"
-	"fmt"
 	"log"
 	"os"
 	"sort"
 	"strings"
-	"time"
 
 	"github.com/kiskey/stremio-mvshows-go/internal/database"
 	bolt "go.etcd.io/bbolt"
