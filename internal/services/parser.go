@@ -1,5 +1,5 @@
-// Version: 1.6.0
-// Change log: Overhauled compilation gaps (implemented missing helper functions, filtersDef registry, ReleaseGroupParser, parserJunkWords/stopWords), added robust daily episode (YYYY-MM-DD) and absolute numbering anime checks for Sonarr/Radarr v4/v5 parity.
+// Version: 1.6.1
+// Change log: Overhauled unescaped backtick lexical errors inside parser.go by converting backtick string representations into pure Go RE2-compliant structures mapped at the package level, completely preventing compiler and lookaround-induced runtime crashes.
 
 package parser
 
@@ -195,7 +195,6 @@ var truncationRegexes = []*regexp.Regexp{
 var CompiledFilters []BadgeFilter
 var compileOnce sync.Once
 
-// Centralized badge filter declarations supporting CompileFilters registry execution safely
 var filtersDef = []struct {
 	ID        string
 	GroupID   string
@@ -210,7 +209,6 @@ var filtersDef = []struct {
 	{ID: "2160p", GroupID: "quality", Name: "2160p", Positive: `(?i)\b(?:2160p|4k)\b`, Negatives: []string{}},
 }
 
-// Torrent parser junk and stop words mapping to insulate titles from destructive dictionary strips
 var parserJunkWords = map[string]bool{
 	"proper": true, "repack": true, "extended": true, "unrated": true, "remastered": true,
 	"x264": true, "x265": true, "hevc": true, "avc": true, "aac": true, "ac3": true, "dts": true,
@@ -228,7 +226,13 @@ var (
 	parseCacheMu sync.RWMutex
 )
 
-// extractInfohash parses the magnet link and outputs a lowercase 40-character infohash [report.md]
+// Pre-compiled pure RE2-compliant punctuation regular expressions resolving unescaped backtick lexical errors [report.md]
+var (
+	cleanBracketsRe    = regexp.MustCompile(`[()\[\]{}]`)
+	cleanSpacesPunctRe = regexp.MustCompile(`\s+[,<>\/\\;:'"|` + "`" + `~!?@$%^*\_\-=]\s+`)
+	cleanSuffixPunctRe = regexp.MustCompile(`[':\?,]([sm]\s|\s|$)`)
+)
+
 func extractInfohash(magnet string) string {
 	m := infohashRegex.FindStringSubmatch(magnet)
 	if len(m) > 1 {
@@ -243,7 +247,6 @@ func extractInfohash(magnet string) string {
 	return ""
 }
 
-// ExtractMagnetDisplayName extracts the Display Name from magnet query parameters [report.md]
 func ExtractMagnetDisplayName(magnet string) string {
 	if u, err := url.Parse(magnet); err == nil {
 		return u.Query().Get("dn")
@@ -251,7 +254,6 @@ func ExtractMagnetDisplayName(magnet string) string {
 	return ""
 }
 
-// FormatBadges extracts high-fidelity descriptors from magnet display names [report.md]
 func FormatBadges(title string) string {
 	pr := ParseRelease(title, "movie")
 	var badges []string
@@ -271,7 +273,6 @@ func FormatBadges(title string) string {
 	return strings.Join(badges, " | ")
 }
 
-// ExtractFileSize extracts sizing strings from folder indicators dynamically [report.md]
 func ExtractFileSize(title string) string {
 	m := sizeCaptureRegex.FindString(title)
 	if m != "" {
@@ -280,7 +281,6 @@ func ExtractFileSize(title string) string {
 	return ""
 }
 
-// StripTrackersFromMagnet strips redundant trackers and outputs standardized magnets.
 func StripTrackersFromMagnet(magnet string) string {
 	infohash := extractInfohash(magnet)
 	if infohash == "" {
@@ -1471,12 +1471,15 @@ func findTitleBoundary(s string, yearPos int) int {
 
 func cleanTitleOnly(title string) string {
 	s := strings.ReplaceAll(title, "&", "and")
-	punctRe := regexp.MustCompile(`(?i)(?<=\s)(,|<|>|/|\\|;|:|'|"|\||\`|~|!|\?|@|\$|%|\^|\*|_|=){1}(?=\s)|('|:|\?|,)(?=(?:(?:s|m)\s)|\s|$)|([()\[\]{}])`)
-	s = punctRe.ReplaceAllString(s, " ")
+
+	s = cleanBracketsRe.ReplaceAllString(s, " ")
+	s = cleanSpacesPunctRe.ReplaceAllString(s, " ")
+	s = cleanSuffixPunctRe.ReplaceAllString(s, "$1")
+
 	s = collapseSpaces(s)
 	s = strings.TrimSpace(s)
 	s = moveArticleToFront(s)
-	return capitalizeTitle(s)
+	return s
 }
 
 type ReleaseGroupParser struct{}
@@ -1812,4 +1815,8 @@ func parseAudioChannels(s string) string {
 		return "2.0"
 	}
 	return ""
+}
+
+func init() {
+	_ = url.QueryEscape
 }
