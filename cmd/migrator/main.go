@@ -1,5 +1,5 @@
 // Version: 2.1.0
-// Change log: Updated migrator GORM routines to call parser.ParseRelease for consistent clean titles and parser.StripTrackersFromMagnet to prune redundant tracker parameters during offline conversions.
+// Change log: Overhauled GORM migration procedures to clean up SQLite titles and strip trackers from magnet caches dynamically on insertion (Problems 4, 11).
 
 package main
 
@@ -199,7 +199,7 @@ func main() {
 			threadIdxBucket := tx.Bucket([]byte("tmdb_thread_index"))
 
 			for _, st := range sqliteThreads {
-				// Title cleanup failsafe
+				// Re-parse SQLite raw titles to ensure they are migrated cleanly
 				prTitle := parser.ParseRelease(st.RawTitle, st.Type)
 				cleanTitle := st.CleanTitle
 				if prTitle.IsValid && prTitle.CleanTitle != "" {
