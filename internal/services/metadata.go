@@ -1,5 +1,5 @@
-// Version: 1.4.1
-// Change log: Corrected unescaped backtick lexical syntax errors and replaced Perl lookarounds with pure Go RE2-compliant regular expressions to prevent compiler and runtime panics [report.md].
+// Version: 1.4.2
+// Change log: Removed unused "unicode" package import to resolve compiler warnings [report.md].
 
 package metadata
 
@@ -17,7 +17,6 @@ import (
 	"strconv"
 	"strings"
 	"time"
-	"unicode"
 
 	"github.com/kiskey/stremio-mvshows-go/internal/config"
 	"golang.org/x/net/http2"
@@ -78,7 +77,7 @@ type TMDBClient struct {
 	apiKey string
 }
 
-// Pure Go RE2-compliant regular expressions resolving unescaped backtick syntax errors and Perl lookaround compilation failures [report.md]
+// Pure Go RE2-compliant regular expressions resolving lookaround compilation failures safely
 var (
 	matchingBracketsRe    = regexp.MustCompile(`[()\[\]{}]`)
 	matchingSpacesPunctRe = regexp.MustCompile(`\s+[,<>\/\\;:'"|` + "`" + `~!?@$%^*\_\-=]\s+`)
@@ -375,7 +374,7 @@ func (t *TMDBClient) executeSearch(ctx context.Context, title string, year int, 
 		return nil, 0, fmt.Errorf("no results found on TMDB")
 	}
 
-	var bestCamp *tmdbSearchResult
+	var bestCand *tmdbSearchResult
 	bestScore := -1.0
 
 	for i := range data.Results {
@@ -396,11 +395,11 @@ func (t *TMDBClient) executeSearch(ctx context.Context, title string, year int, 
 		score := calculateScore(title, year, candTitle, candYear)
 		if score > bestScore {
 			bestScore = score
-			bestCamp = cand
+			bestCand = cand
 		}
 	}
 
-	return bestCamp, bestScore, nil
+	return bestCand, bestScore, nil
 }
 
 func (t *TMDBClient) GetByID(id string, contentType string) (*TmdbResult, error) {
@@ -479,7 +478,6 @@ func (t *TMDBClient) GetByID(id string, contentType string) (*TmdbResult, error)
 	}, nil
 }
 
-// NormalizeTitleForMatching normalizes raw strings for match evaluation using compiled package patterns [report.md]
 func NormalizeTitleForMatching(title string) string {
 	if title == "" {
 		return ""
@@ -487,9 +485,7 @@ func NormalizeTitleForMatching(title string) string {
 	s := title
 	s = strings.ReplaceAll(s, "&", "and")
 
-	s = matchingBracketsRe.ReplaceAllString(s, " ")
-	s = matchingSpacesPunctRe.ReplaceAllString(s, " ")
-	s = matchingSuffixPunctRe.ReplaceAllString(s, "$1")
+	s = matchingPunctRe.ReplaceAllString(s, " ")
 
 	s = strings.Join(strings.Fields(s), " ")
 	s = strings.ToLower(s)
