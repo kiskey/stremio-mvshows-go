@@ -1,5 +1,5 @@
-// Version: 1.6.3
-// Change log: Fixed runtime panic during SQLite migration by replacing standard library unsupported Perl lookarounds `(?=` with capturing groups in `stripAllPrefixes` [report.md].
+// Version: 1.6.4
+// Change log: Overhauled cleanSpacesPunctRe package definition to use double-quoted double-escaped format, resolving Go lexer quote conflicts permanently [report.md].
 
 package parser
 
@@ -226,10 +226,10 @@ var (
 	parseCacheMu sync.RWMutex
 )
 
-// Pre-compiled pure RE2-compliant punctuation regular expressions [report.md]
+// Pre-compiled pure RE2-compliant punctuation patterns using double-escaped format to ensure clean lexing on all Go targets [report.md]
 var (
 	cleanBracketsRe    = regexp.MustCompile(`[()\[\]{}]`)
-	cleanSpacesPunctRe = regexp.MustCompile(`\s+[,<>\/\\;:'"|` + "`" + `~!?@$%^*\_\-=]\s+`)
+	cleanSpacesPunctRe = regexp.MustCompile("\\s+[,<>\\/\\\\;:'\"|`~!?@$%^*\\_\\-=]\\s+")
 	cleanSuffixPunctRe = regexp.MustCompile(`[':\?,]([sm]\s|\s|$)`)
 )
 
@@ -1418,7 +1418,6 @@ func stripAllPrefixes(s string) string {
 	re3 := regexp.MustCompile(`(?i)^\s*(?:TamilMV|TamilBlasters|1TamilMV|TamilRockers|Isaimini|TamilGun|TamilYogi)\s*(?:\.\w+)?\s*[-:]\s*`)
 	s = re3.ReplaceAllString(s, "")
 
-	// RE2 compatible prefix parser with capturing groups instead of Perl lookaheads [report.md]
 	re4 := regexp.MustCompile(`(?i)^\s*[^-]{2,50}\s+[-:]\s+([A-Z])`)
 	s = re4.ReplaceAllString(s, "$1")
 
