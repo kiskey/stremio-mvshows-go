@@ -1,6 +1,5 @@
-
-// Version: 2.0.8
-// Change log: Integrated a transactional Self-Healing Index Rebuilder inside the repair sequence. This automatically compiles the missing tmdb_thread_index and dual-key metadata pointer maps, immediately resolving empty stream listings.
+// Version: 2.3.0
+// Change log: Overhauled collision pruning mechanics to perform direct point deletes on actual BoltDB database keys; fixed logical bug causing silent deletion failures and repetitive duplicate pruning warnings.
 
 package main
 
@@ -17,6 +16,7 @@ import (
 	"time"
 
 	"github.com/kiskey/stremio-mvshows-go/internal/database"
+	"github.com/kiskey/stremio-mvshows-go/internal/services/parser"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -61,7 +61,8 @@ func formatBytes(bytes int64) string {
 
 func main() {
 	dbPath := flag.String("db", "/data/stremio_addon.db.bolt", "Path to the active Bbolt database")
-	repair := flag.Bool("repair", false, "Execute automatic hash migration, duplicate pruning, and index repair")
+	repair := flag.Bool("repair", false, "Execute automatic hash migration, duplicate pruning, stream regenerator, and index repair")
+	pruneFailuresDays := flag.Int("prune-failures-older-than", 7, "Prune failed threads older than N days")
 	flag.Parse()
 
 	log.Println("==================================================")
@@ -90,10 +91,15 @@ func main() {
 		for k, v := c.First(); k != nil; k, v = c.Next() {
 			var t database.Thread
 			if err := database.DecodeGob(v, &t); err == nil {
-				// Detect if the key matches the old hashing algorithm
-				oldHash := oldGenerateThreadHash(t.RawTitle, t.MagnetURIs)
-				if string(k) == oldHash {
-					legacyHashCount++
+				// Guardrail: Bind the loaded physical BoltDB key directly to the thread object
+				t.ThreadHash = string(k)
+
+				// Prevent collision misclassifications by checking magnet size constraints
+				if len(t.MagnetURIs) > 0 {
+					oldHash := oldGenerateThreadHash(t.RawTitle, t.MagnetURIs)
+					if string(k) == oldHash && oldHash != newGenerateThreadHash(t.RawTitle) {
+						legacyHashCount++
+					}
 				}
 
 				// Group by the new invariant key to predict duplicate collisions post-migration
@@ -149,8 +155,7 @@ func main() {
 		return tx.ForEach(func(name []byte, b *bolt.Bucket) error {
 			stats := b.Stats()
 			totalKeys += stats.KeyN
-			
-			// Calculate space actually occupied. LeafInuse natively includes inline child bucket bytes.
+
 			inuse := int64(stats.BranchInuse) + int64(stats.LeafInuse)
 			allocated := int64(stats.BranchAlloc) + int64(stats.LeafAlloc)
 
@@ -218,7 +223,7 @@ func main() {
 		log.Println("==================================================")
 		log.Println("► VERDICT: Audited in Dry-Run mode. No writes occurred.")
 		log.Printf("  - High-Speed Lookups Missing Indexes: %v\n", missingThreadIdxKeys)
-		log.Println("To apply transitions, compile missing indices, and prune duplicates, run with: --repair")
+		log.Println("To apply transitions, compile missing indices, optimize magnets, and prune duplicates, run with: --repair")
 		log.Println("==================================================")
 		return
 	}
@@ -233,8 +238,9 @@ func main() {
 		threadIdxB := tx.Bucket([]byte("tmdb_thread_index"))
 		streamsB := tx.Bucket([]byte("streams"))
 		metaB := tx.Bucket([]byte("tmdb_metadata"))
+		magnetB := tx.Bucket([]byte("magnet_cache"))
 
-		// ⚡ SELF-HEALING MULTI-KEY INDEX REBUILDER (Bpasses old sqlite-migrator deficits)
+		// Re-indexing Metadata bucket into high-speed Dual-Key layout
 		log.Println("Re-indexing Metadata bucket into high-speed Dual-Key layout...")
 		var metadataToRewrite []database.TmdbMetadata
 		metaCursor := metaB.Cursor()
@@ -262,22 +268,34 @@ func main() {
 			})
 
 			keptThread := list[0]
-			oldKeptHash := oldGenerateThreadHash(keptThread.RawTitle, keptThread.MagnetURIs)
 
-			// Step A: Keep the newest thread, migrating its key to the invariant title format
-			log.Printf("Processing: %q\n", keptThread.RawTitle)
+			log.Printf("Processing & Compacting: %q\n", keptThread.RawTitle)
 
-			// Delete older reference if it was stored under the legacy hash key
-			_ = tb.Delete([]byte(oldKeptHash))
+			// Clean up original key from threads if it differs from the target new invariant hash
+			if keptThread.ThreadHash != targetNewHash {
+				_ = tb.Delete([]byte(keptThread.ThreadHash))
+			}
+
+			prTitle := parser.ParseRelease(keptThread.RawTitle, keptThread.Type)
+			if prTitle.IsValid && prTitle.CleanTitle != "" {
+				keptThread.CleanTitle = prTitle.CleanTitle
+			}
+
+			// Compact Thread magnets by stripping redundant trackers
+			var cleanMags []string
+			for _, m := range keptThread.MagnetURIs {
+				cleanMags = append(cleanMags, parser.StripTrackersFromMagnet(m))
+			}
+			keptThread.MagnetURIs = cleanMags
 
 			// Write thread under the new, deterministic invariant key
 			keptThread.ThreadHash = targetNewHash
 			bytesData, _ := database.EncodeGob(keptThread)
 			_ = tb.Put([]byte(targetNewHash), bytesData)
 
-			// Write updated pre-sorted catalog index key containing type and the new hash (Resolves Risk 3)
+			// Write updated pre-sorted catalog index key containing type and the new hash
 			if keptThread.Status == "linked" && keptThread.Catalog != "" {
-				postedTime := time.Now()
+				postedTime := time.Unix(0, 0)
 				if keptThread.PostedAt != nil {
 					postedTime = *keptThread.PostedAt
 				}
@@ -294,11 +312,11 @@ func main() {
 			// Step B: Safely prune all redundant/older duplicates in this group
 			for i := 1; i < len(list); i++ {
 				trashThread := list[i]
-				oldTrashHash := oldGenerateThreadHash(trashThread.RawTitle, trashThread.MagnetURIs)
 
-				log.Printf("  [PRUNING DUPLICATE] Hash=%s (Last Updated: %v)\n", oldTrashHash, trashThread.UpdatedAt)
+				log.Printf("  [PRUNING DUPLICATE] Hash=%s (Last Updated: %v)\n", trashThread.ThreadHash, trashThread.UpdatedAt)
 
-				_ = tb.Delete([]byte(oldTrashHash))
+				// FIX: Execute direct point deletion on the exact database key loaded from the bucket
+				_ = tb.Delete([]byte(trashThread.ThreadHash))
 				_ = tb.Delete([]byte(targetNewHash + "_" + strconv.Itoa(i))) // Guardrail cleanup
 
 				// Clean up related indices and streams for the pruned item
@@ -307,18 +325,17 @@ func main() {
 					_ = threadIdxB.Delete([]byte(*trashThread.TmdbID))
 				}
 
-				// Purge old catalog index structures for the deleted duplicate safely (Resolves Risk 1)
+				// Purge old catalog index structures for the deleted duplicate safely
 				var indexKeysPrune [][]byte
 				idxCursor := idxB.Cursor()
 				for k, _ := idxCursor.First(); k != nil; k, _ = idxCursor.Next() {
-					if strings.HasSuffix(string(k), ":"+oldTrashHash) || strings.HasSuffix(string(k), ":"+trashThread.ThreadHash) {
+					if strings.HasSuffix(string(k), ":"+trashThread.ThreadHash) {
 						tempKey := make([]byte, len(k))
 						copy(tempKey, k)
 						indexKeysPrune = append(indexKeysPrune, tempKey)
 					}
 				}
 
-				// Execute deletes safely outside the cursor loop iteration
 				for _, k := range indexKeysPrune {
 					_ = idxB.Delete(k)
 				}
@@ -337,11 +354,170 @@ func main() {
 			}
 		}
 
+		// Compaction Step: Iterate and sweep tracker bloat from magnet_cache bucket
+		log.Println("Compacting magnet_cache bucket (removing redundant trackers)...")
+		var magnetCacheToRewrite []database.MagnetCache
+		magnetCursor := magnetB.Cursor()
+		for k, v := magnetCursor.First(); k != nil; k, v = magnetCursor.Next() {
+			var mc database.MagnetCache
+			if errDec := database.DecodeGob(v, &mc); errDec == nil {
+				mc.Magnet = parser.StripTrackersFromMagnet(mc.Magnet)
+				magnetCacheToRewrite = append(magnetCacheToRewrite, mc)
+			}
+		}
+		for _, mc := range magnetCacheToRewrite {
+			bytesData, _ := database.EncodeGob(mc)
+			_ = magnetB.Put([]byte(mc.Infohash), bytesData)
+		}
+
+		// Regenerate and correct all stream indices from raw magnets
+		log.Println("Regenerating and correcting all stream indices from raw magnets...")
+		var streamKeysToDelete [][]byte
+		streamsCursor := streamsB.Cursor()
+		for k, _ := streamsCursor.First(); k != nil; k, _ = streamsCursor.Next() {
+			tempKey := make([]byte, len(k))
+			copy(tempKey, k)
+			streamKeysToDelete = append(streamKeysToDelete, tempKey)
+		}
+		for _, k := range streamKeysToDelete {
+			_ = streamsB.Delete(k)
+		}
+
+		var allRegenStreams []database.Stream
+		threadCursorForStreams := tb.Cursor()
+		for k, v := threadCursorForStreams.First(); k != nil; k, v = threadCursorForStreams.Next() {
+			var t database.Thread
+			if errDec := database.DecodeGob(v, &t); errDec == nil {
+				if t.Status == "linked" && t.TmdbID != nil {
+					isSeries := strings.ToLower(t.Type) == "series"
+					for _, magnet := range t.MagnetURIs {
+						parsedMagnet := parser.ParseMagnet(magnet, t.Type)
+						if parsedMagnet == nil {
+							continue
+						}
+
+						cleanMagnet := parser.StripTrackersFromMagnet(magnet)
+						cacheRecord := database.MagnetCache{
+							Infohash:  parsedMagnet.Infohash,
+							Magnet:    cleanMagnet,
+							CreatedAt: time.Now(),
+						}
+						cacheBytes, _ := database.EncodeGob(cacheRecord)
+						_ = magnetB.Put([]byte(parsedMagnet.Infohash), cacheBytes)
+
+						stream := database.Stream{
+							TmdbID:    *t.TmdbID,
+							Infohash:  parsedMagnet.Infohash,
+							Quality:   parsedMagnet.Quality,
+							Language:  parsedMagnet.Language,
+							CreatedAt: time.Now(),
+							UpdatedAt: time.Now(),
+						}
+
+						if isSeries {
+							seasonVal := parsedMagnet.Season
+							if seasonVal == 0 {
+								seasonVal = 1
+							}
+							stream.Season = &seasonVal
+
+							if parsedMagnet.Type == "SINGLE_EPISODE" {
+								epVal := parsedMagnet.Episode
+								stream.Episode = &epVal
+								stream.EpisodeEnd = &epVal
+							} else if parsedMagnet.Type == "EPISODE_PACK" {
+								startVal := parsedMagnet.EpisodeStart
+								endVal := parsedMagnet.EpisodeEnd
+								stream.Episode = &startVal
+								stream.EpisodeEnd = &endVal
+							}
+						}
+
+						allRegenStreams = append(allRegenStreams, stream)
+					}
+				}
+			}
+		}
+
+		if len(allRegenStreams) > 0 {
+			log.Printf("Successfully generated %d repaired stream pointers. Writing to Bbolt streams bucket...\n", len(allRegenStreams))
+			byTMDB := make(map[string][]database.Stream)
+			streamIDCounter := uint(0)
+			for _, s := range allRegenStreams {
+				streamIDCounter++
+				s.ID = streamIDCounter // Sequential sequential counter to align relational primary index
+				byTMDB[s.TmdbID] = append(byTMDB[s.TmdbID], s)
+			}
+			for tmdbID, list := range byTMDB {
+				bytesData, _ := database.EncodeGob(list)
+				_ = streamsB.Put([]byte(tmdbID), bytesData)
+			}
+		}
+
 		// Prune orphaned catalog index keys collected during audit phase
 		if len(orphanedIndexKeys) > 0 {
 			log.Printf("Pruning %d orphaned keys from catalog_index...\n", len(orphanedIndexKeys))
 			for _, k := range orphanedIndexKeys {
 				_ = idxB.Delete(k)
+			}
+		}
+
+		// Compact and prune old failed_threads log records
+		log.Printf("Compacting failed_threads bucket (pruning logs older than %d days)...\n", *pruneFailuresDays)
+		var failedKeysToPrune [][]byte
+		failedCursor := tx.Bucket([]byte("failed_threads")).Cursor()
+		cutoffFailed := time.Now().AddDate(0, 0, -*pruneFailuresDays)
+		for k, v := failedCursor.First(); k != nil; k, v = failedCursor.Next() {
+			var ft database.FailedThread
+			if errDec := database.DecodeGob(v, &ft); errDec == nil {
+				if ft.LastAttempt.Before(cutoffFailed) {
+					failedKeysToPrune = append(failedKeysToPrune, k)
+				}
+			}
+		}
+		if len(failedKeysToPrune) > 0 {
+			log.Printf("Pruning %d expired failed thread log lines...\n", len(failedKeysToPrune))
+			for _, k := range failedKeysToPrune {
+				_ = tx.Bucket([]byte("failed_threads")).Delete(k)
+			}
+		}
+
+		// Sweep and prune stale debrid_cache_locks (>24h)
+		log.Println("Auditing debrid_cache_locks bucket (pruning locks older than 24 hours)...")
+		var lockKeysToPrune [][]byte
+		lockCursor := tx.Bucket([]byte("debrid_cache_locks")).Cursor()
+		cutoffLock := time.Now().Add(-24 * time.Hour)
+		for k, v := lockCursor.First(); k != nil; k, v = lockCursor.Next() {
+			var l database.DebridCacheLock
+			if errDec := database.DecodeGob(v, &l); errDec == nil {
+				if l.CreatedAt.Before(cutoffLock) {
+					lockKeysToPrune = append(lockKeysToPrune, k)
+				}
+			}
+		}
+		if len(lockKeysToPrune) > 0 {
+			log.Printf("Pruning %d stale debrid cache locks...\n", len(lockKeysToPrune))
+			for _, k := range lockKeysToPrune {
+				_ = tx.Bucket([]byte("debrid_cache_locks")).Delete(k)
+			}
+		}
+
+		// Sweep and prune orphaned torbox_id_map values
+		log.Println("Auditing torbox_id_map bucket...")
+		var torboxKeysToPrune [][]byte
+		torboxCursor := tx.Bucket([]byte("torbox_id_map")).Cursor()
+		for k, v := torboxCursor.First(); k != nil; k, v = torboxCursor.Next() {
+			var m database.TorboxIdMap
+			if errDec := database.DecodeGob(v, &m); errDec == nil {
+				if tx.Bucket([]byte("magnet_cache")).Get([]byte(m.Hash)) == nil {
+					torboxKeysToPrune = append(torboxKeysToPrune, k)
+				}
+			}
+		}
+		if len(torboxKeysToPrune) > 0 {
+			log.Printf("Pruning %d orphaned keys from torbox_id_map...\n", len(torboxKeysToPrune))
+			for _, k := range torboxKeysToPrune {
+				_ = tx.Bucket([]byte("torbox_id_map")).Delete(k)
 			}
 		}
 
@@ -352,7 +528,7 @@ func main() {
 		log.Fatalf("Transition transaction failed: %v\n", err)
 	}
 
-	log.Println("Database repair, high-speed index compiling, and hash migration transaction committed successfully!")
+	log.Println("Database repair, stream regeneration, index compiling, and hash migration committed successfully!")
 
 	// 5. Shrink the Database on disk via compaction
 	log.Println("Shrinking database file size via sequential compaction...")
@@ -375,10 +551,6 @@ func main() {
 	}
 
 	log.Println("==================================================")
-	log.Println("► VERDICT: [SUCCESS] - Indexes compiled, database defragmented, and compacted.")
+	log.Printf("► VERDICT: [SUCCESS] - COMPACTION LOG COMPLETED SUCCESFULLY.\n")
 	log.Println("==================================================")
-}
-
-func init() {
-	_ = time.Now // Prevent unused imports compile crash
 }

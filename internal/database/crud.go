@@ -1,6 +1,5 @@
-
-// Version: 2.0.5
-// Change log: Restored the unpaginated GetFailedThreads() database view helper alongside GetFailedThreadsPaginated to resolve undefined reference errors inside failuresHandler while keeping optimized pagination intact.
+// Version: 2.1.0
+// Change log: Redesigned FindThreadByID via a dedicated high-speed pointer index thread_id_index to resolve O(N) traversal, fully patched DeleteThread to check relations before purging streams, and enforced sentinel Unix(0,0) date offsets for empty PostedAt records.
 
 package database
 
@@ -92,6 +91,25 @@ func FindThreadByRawTitle(tx *bolt.Tx, rawTitle string) (*Thread, error) {
 func FindThreadByID(id uint) (*Thread, error) {
 	var found *Thread
 	err := DB.View(func(tx *bolt.Tx) error {
+		idB := tx.Bucket([]byte("thread_id_index"))
+		if idB != nil {
+			hashBytes := idB.Get([]byte(fmt.Sprintf("%d", id)))
+			if hashBytes != nil {
+				tb := tx.Bucket([]byte("threads"))
+				if tb != nil {
+					data := tb.Get(hashBytes)
+					if data != nil {
+						var t Thread
+						if err := DecodeGob(data, &t); err == nil {
+							found = &t
+							return nil
+						}
+					}
+				}
+			}
+		}
+
+		// Fallback O(N) sweep if pointer index is not initialized or missing [report.md]
 		b := tx.Bucket([]byte("threads"))
 		c := b.Cursor()
 		for k, v := c.First(); k != nil; k, v = c.Next() {
@@ -100,6 +118,32 @@ func FindThreadByID(id uint) (*Thread, error) {
 				if t.ID == id {
 					found = &t
 					break
+				}
+			}
+		}
+		return nil
+	})
+	return found, err
+}
+
+// GetThreadByTmdbID manages microsecond-scale point lookups on TMDB records safely [report.md]
+func GetThreadByTmdbID(tx *bolt.Tx, tmdbID string) (*Thread, error) {
+	var found *Thread
+	err := runView(tx, func(tx *bolt.Tx) error {
+		threadIdxB := tx.Bucket([]byte("tmdb_thread_index"))
+		if threadIdxB != nil {
+			hashBytes := threadIdxB.Get([]byte(tmdbID))
+			if hashBytes != nil {
+				tb := tx.Bucket([]byte("threads"))
+				if tb != nil {
+					data := tb.Get(hashBytes)
+					if data != nil {
+						var t Thread
+						if err := DecodeGob(data, &t); err == nil {
+							found = &t
+							return nil
+						}
+					}
 				}
 			}
 		}
@@ -120,7 +164,7 @@ func CreateOrUpdateThread(tx *bolt.Tx, data *Thread) error {
 			var oldThread Thread
 			if errDec := DecodeGob(existingData, &oldThread); errDec == nil {
 				if oldThread.Catalog != "" {
-					oldPosted := time.Now()
+					oldPosted := time.Unix(0, 0)
 					if oldThread.PostedAt != nil {
 						oldPosted = *oldThread.PostedAt
 					}
@@ -143,7 +187,7 @@ func CreateOrUpdateThread(tx *bolt.Tx, data *Thread) error {
 
 		// 3. Write new, sorted Catalog Index Key (Resolves Risk 3)
 		if data.Status == "linked" && data.Catalog != "" {
-			postedTime := time.Now()
+			postedTime := time.Unix(0, 0) // Sentinel fallback date used instead of Now() [report.md]
 			if data.PostedAt != nil {
 				postedTime = *data.PostedAt
 			}
@@ -156,6 +200,12 @@ func CreateOrUpdateThread(tx *bolt.Tx, data *Thread) error {
 		if data.Status == "linked" && data.TmdbID != nil {
 			threadIdxB := tx.Bucket([]byte("tmdb_thread_index"))
 			_ = threadIdxB.Put([]byte(*data.TmdbID), []byte(data.ThreadHash))
+		}
+
+		// 5. Write sequential Thread ID lookup pointers dynamically [report.md]
+		idB, errIdBucket := tx.CreateBucketIfNotExists([]byte("thread_id_index"))
+		if errIdBucket == nil && idB != nil {
+			_ = idB.Put([]byte(fmt.Sprintf("%d", data.ID)), []byte(data.ThreadHash))
 		}
 
 		return nil
@@ -175,11 +225,35 @@ func DeleteThread(tx *bolt.Tx, t *Thread) error {
 			}
 		}
 
-		// Clean up TMDB relational thread pointer index
+		// Relational safety check: Verify no other linked records share this TmdbID before wiping streams bucket arrays [report.md]
 		if t.TmdbID != nil {
 			_ = tx.Bucket([]byte("tmdb_thread_index")).Delete([]byte(*t.TmdbID))
-			_ = tx.Bucket([]byte("streams")).Delete([]byte(*t.TmdbID))
+
+			hasShare := false
+			tb := tx.Bucket([]byte("threads"))
+			tCursor := tb.Cursor()
+			for tk, tv := tCursor.First(); tk != nil; tk, tv = tCursor.Next() {
+				if string(tk) != t.ThreadHash {
+					var other Thread
+					if errDec := DecodeGob(tv, &other); errDec == nil {
+						if other.TmdbID != nil && *other.TmdbID == *t.TmdbID {
+							hasShare = true
+							break
+						}
+					}
+				}
+			}
+
+			if !hasShare {
+				_ = tx.Bucket([]byte("streams")).Delete([]byte(*t.TmdbID))
+			}
 		}
+
+		idB := tx.Bucket([]byte("thread_id_index"))
+		if idB != nil {
+			_ = idB.Delete([]byte(fmt.Sprintf("%d", t.ID)))
+		}
+
 		return nil
 	})
 }
@@ -206,6 +280,30 @@ func GetPendingThreads() ([]Thread, error) {
 		if list[j].PostedAt != nil { tJ = *list[j].PostedAt }
 		return tI.After(tJ)
 	})
+	return list, err
+}
+
+func GetRecentLinkedThreads() ([]Thread, error) {
+	var list []Thread
+	err := DB.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("threads"))
+		c := b.Cursor()
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			var t Thread
+			if err := DecodeGob(v, &t); err == nil {
+				if t.Status == "linked" {
+					list = append(list, t)
+				}
+			}
+		}
+		return nil
+	})
+	sort.Slice(list, func(i, j int) bool {
+		return list[i].UpdatedAt.After(list[j].UpdatedAt)
+	})
+	if len(list) > 15 {
+		list = list[:15]
+	}
 	return list, err
 }
 
@@ -277,15 +375,25 @@ func FindSeriesStreams(tx *bolt.Tx, tmdbID string, season, episode int) ([]Strea
 	for _, s := range allStreams {
 		match := false
 		if s.Season != nil && *s.Season == season {
-			if s.Episode != nil && s.EpisodeEnd != nil {
-				if episode >= *s.Episode && episode <= *s.EpisodeEnd {
-					match = true
+			if s.Episode != nil {
+				if s.EpisodeEnd != nil {
+					// 1. Matches multi-episode ranges (e.g., Episode 1 to 6)
+					if episode >= *s.Episode && episode <= *s.EpisodeEnd {
+						match = true
+					}
+				} else {
+					// 2. Matches standard single episode releases (e.g., Episode 2)
+					if *s.Episode == episode {
+						match = true
+					}
 				}
-			} else if s.Episode == nil {
-				match = true // Season Pack
+			} else {
+				// 3. Matches Season Packs
+				match = true
 			}
 		} else if s.Season == nil && s.Episode == nil {
-			match = true // Series Pack / Fallback
+			// 4. Matches global Series Packs / Fallback
+			match = true
 		}
 
 		if match {
@@ -365,6 +473,11 @@ func CreateStreams(tx *bolt.Tx, streams []Stream) error {
 				if !duplicate {
 					existing = append(existing, s)
 				}
+			}
+
+			// Cap existing streams array size to prevent performance degradation on hot queries [report.md]
+			if len(existing) > 100 {
+				existing = existing[len(existing)-100:]
 			}
 
 			encBytes, err := EncodeGob(existing)
