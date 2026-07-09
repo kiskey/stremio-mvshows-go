@@ -1,6 +1,5 @@
-
-// Version: 2.0.5
-// Change log: Aligned GOB serialization schemas with connection indices. Thread catalog keys are packed chronologically with type boundaries, and metadata is mapped under dual lookup keys.
+// Version: 2.1.0
+// Change log: Updated migrator GORM routines to call parser.ParseRelease for consistent clean titles and parser.StripTrackersFromMagnet to prune redundant tracker parameters during offline conversions.
 
 package main
 
@@ -15,11 +14,10 @@ import (
 
 	"github.com/glebarez/sqlite"
 	"github.com/kiskey/stremio-mvshows-go/internal/database"
+	"github.com/kiskey/stremio-mvshows-go/internal/services/parser"
 	bolt "go.etcd.io/bbolt"
 	"gorm.io/gorm"
 )
-
-// ── Legacy SQL Scanners/Valuers Isolated Locally inside CLI ──
 
 type JSONStringArray []string
 
@@ -71,8 +69,6 @@ func (j JSONFileList) Value() (driver.Value, error) {
 	bytes, err := json.Marshal(j)
 	return string(bytes), err
 }
-
-// ── GORM-Compatible Relational Table Models ──
 
 type SqliteThread struct {
 	ID                uint            `gorm:"column:id;primaryKey"`
@@ -181,13 +177,11 @@ func main() {
 		log.Fatalf("Critical: Source SQLite file does not exist at %s\n", *sqlitePath)
 	}
 
-	// 1. Connect GORM to standard SQLite
 	sqlDB, err := gorm.Open(sqlite.Open(*sqlitePath), &gorm.Config{})
 	if err != nil {
 		log.Fatalf("Failed to open standard SQLite database: %v\n", err)
 	}
 
-	// 2. Ensure target Bbolt file layout is fresh and write-initialized
 	_ = os.Remove(*boltPath)
 	boltDB, err := database.Init(*boltPath)
 	if err != nil {
@@ -195,9 +189,6 @@ func main() {
 	}
 	defer boltDB.Close()
 
-	// ── Sequential Table Extractor and Writer Transactions ──
-
-	// A. Process threads and generate fast-catalog indexes
 	log.Println("Migrating threads and compiling index caches...")
 	var sqliteThreads []SqliteThread
 	if err := sqlDB.Find(&sqliteThreads).Error; err == nil {
@@ -208,18 +199,31 @@ func main() {
 			threadIdxBucket := tx.Bucket([]byte("tmdb_thread_index"))
 
 			for _, st := range sqliteThreads {
+				// Title cleanup failsafe
+				prTitle := parser.ParseRelease(st.RawTitle, st.Type)
+				cleanTitle := st.CleanTitle
+				if prTitle.IsValid && prTitle.CleanTitle != "" {
+					cleanTitle = prTitle.CleanTitle
+				}
+
+				// Compact magnets during offline conversion
+				var cleanMags []string
+				for _, m := range st.MagnetURIs {
+					cleanMags = append(cleanMags, parser.StripTrackersFromMagnet(m))
+				}
+
 				thread := database.Thread{
 					ID:                st.ID,
 					ThreadHash:        st.ThreadHash,
 					RawTitle:          st.RawTitle,
-					CleanTitle:        st.CleanTitle,
+					CleanTitle:        cleanTitle,
 					Year:              st.Year,
 					TmdbID:            st.TmdbID,
 					Status:            st.Status,
 					Type:              st.Type,
 					PostedAt:          st.PostedAt,
 					Catalog:           st.Catalog,
-					MagnetURIs:        []string(st.MagnetURIs),
+					MagnetURIs:        cleanMags,
 					CustomPoster:      st.CustomPoster,
 					CustomDescription: st.CustomDescription,
 					LastSeen:          st.LastSeen,
@@ -229,7 +233,6 @@ func main() {
 				bytesData, _ := database.EncodeGob(thread)
 				_ = threadBucket.Put([]byte(thread.ThreadHash), bytesData)
 
-				// Pre-Sorted Inverse Timestamps index keys containing TYPE for O(1) paging skips
 				if thread.Status == "linked" && thread.Catalog != "" {
 					postedTime := time.Now()
 					if thread.PostedAt != nil {
@@ -240,7 +243,6 @@ func main() {
 					_ = indexBucket.Put([]byte(indexKey), []byte(thread.ThreadHash))
 				}
 
-				// Populate TMDB-to-Thread relational pointer indexes directly
 				if thread.Status == "linked" && thread.TmdbID != nil {
 					_ = threadIdxBucket.Put([]byte(*thread.TmdbID), []byte(thread.ThreadHash))
 				}
@@ -252,7 +254,6 @@ func main() {
 		}
 	}
 
-	// B. Process tmdb_metadata
 	log.Println("Migrating TMDB links metadata mapping registry...")
 	var sqliteMeta []SqliteTmdbMetadata
 	if err := sqlDB.Find(&sqliteMeta).Error; err == nil {
@@ -264,14 +265,13 @@ func main() {
 					TmdbID:    sm.TmdbID,
 					ImdbID:    sm.ImdbID,
 					Year:      sm.Year,
-					Data:      "{}", // Zero-Stale layout compression
+					Data:      "{}",
 					CreatedAt: sm.CreatedAt,
 					UpdatedAt: sm.UpdatedAt,
 				}
 				bytesData, _ := database.EncodeGob(meta)
 				_ = metaBucket.Put([]byte(meta.TmdbID), bytesData)
 
-				// Pre-populate high-speed dual key indexing for immediate O(1) finds
 				if meta.ImdbID != nil && *meta.ImdbID != "" {
 					_ = metaBucket.Put([]byte(*meta.ImdbID), bytesData)
 				}
@@ -283,7 +283,6 @@ func main() {
 		}
 	}
 
-	// C. Process streams
 	log.Println("Migrating streams pointers arrays...")
 	var sqliteStreams []SqliteStream
 	if err := sqlDB.Find(&sqliteStreams).Error; err == nil {
@@ -319,7 +318,6 @@ func main() {
 		}
 	}
 
-	// D. Process failed_threads
 	log.Println("Migrating parsing failures records...")
 	var sqliteFailed []SqliteFailedThread
 	if err := sqlDB.Find(&sqliteFailed).Error; err == nil {
@@ -342,7 +340,6 @@ func main() {
 		}
 	}
 
-	// E. Process debrid_torrents
 	log.Println("Migrating debrid torrents download registers...")
 	var sqliteDebridTorrents []SqliteDebridTorrent
 	if err := sqlDB.Find(&sqliteDebridTorrents).Error; err == nil {
@@ -379,7 +376,6 @@ func main() {
 		}
 	}
 
-	// F. Process locks
 	log.Println("Migrating debrid cache locks...")
 	var sqliteLocks []SqliteDebridCacheLock
 	if err := sqlDB.Find(&sqliteLocks).Error; err == nil {
@@ -394,14 +390,14 @@ func main() {
 		})
 	}
 
-	// G. Process magnet_cache
 	log.Println("Migrating infohash magnet lookup caches...")
 	var sqliteMagnets []SqliteMagnetCache
 	if err := sqlDB.Find(&sqliteMagnets).Error; err == nil {
 		_ = boltDB.Update(func(tx *bolt.Tx) error {
 			b := tx.Bucket([]byte("magnet_cache"))
 			for _, mc := range sqliteMagnets {
-				r := database.MagnetCache{Infohash: mc.Infohash, Magnet: mc.Magnet, CreatedAt: mc.CreatedAt}
+				cleanMagnet := parser.StripTrackersFromMagnet(mc.Magnet)
+				r := database.MagnetCache{Infohash: mc.Infohash, Magnet: cleanMagnet, CreatedAt: mc.CreatedAt}
 				bytesData, _ := database.EncodeGob(r)
 				_ = b.Put([]byte(mc.Infohash), bytesData)
 			}
@@ -409,7 +405,6 @@ func main() {
 		})
 	}
 
-	// H. Process torbox_id_map
 	log.Println("Migrating Torbox provider ID registers...")
 	var sqliteTorboxMap []SqliteTorboxIdMap
 	if err := sqlDB.Find(&sqliteTorboxMap).Error; err == nil {
@@ -424,7 +419,6 @@ func main() {
 		})
 	}
 
-	// ── Post-Load Verification Diagnostics ──
 	log.Println("==================================================")
 	log.Println("► DIAGNOSTIC INTEGRITY VERIFICATION REPORT")
 	
