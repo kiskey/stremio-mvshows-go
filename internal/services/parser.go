@@ -1,5 +1,5 @@
-// Version: 1.6.8
-// Change log: Restored missing package-level global regex variables under their original names to fix undefined compiler errors; preserved microsecond-level parser execution.
+// Version: 1.6.9
+// Change log: Unified and restored parseCache caching variables alongside extractInfohash and ExtractMagnetDisplayName helper functions to resolve undefined compiler errors; verified compilation status.
 
 package parser
 
@@ -111,6 +111,10 @@ type EditionInfo struct {
 // ── Complete Package-Level Pre-compiled Regular Expressions (Zero Alloc Hot Loop) ──
 
 var (
+	// Foundational caching mechanism
+	parseCache   = make(map[string]*ParseResult)
+	parseCacheMu sync.RWMutex
+
 	// Anchor elements and foundational parsing regexes
 	epPatternRegex    = regexp.MustCompile(`(?i)(S\d+)?[\s\-_]*\bEP[\s\-_]*[\(\[]?\s*(\d+)\s*[\)\]]?\b`)
 	urlRegex          = regexp.MustCompile(`\b(https?://\S+|www\.\S+\.\w+|[\w.-]+@[\w.-]+)\b`)
@@ -339,6 +343,64 @@ var parserJunkWords = map[string]bool{
 
 var parserStopWords = map[string]bool{
 	"the": true, "a": true, "an": true, "and": true, "or": true, "but": true, "of": true, "for": true, "with": true, "by": true, "at": true, "to": true, "in": true, "on": true,
+}
+
+type PatternLibrary struct {
+	PrefixPatterns     []*regexp.Regexp
+	YearInParens       *regexp.Regexp
+	YearStandalone     *regexp.Regexp
+	MetadataIndicators []*regexp.Regexp
+	ResolutionPattern  *regexp.Regexp
+	SourcePatterns     map[string]*regexp.Regexp
+	ModifierPatterns   map[string]*regexp.Regexp
+	SeasonPattern      *regexp.Regexp
+	EpisodePattern     *regexp.Regexp
+	AbsolutePattern    *regexp.Regexp
+	DatePattern        *regexp.Regexp
+	TrailingGroup      *regexp.Regexp
+	LeadingGroup       *regexp.Regexp
+	ParenGroup         *regexp.Regexp
+	EditionPatterns    map[string]*regexp.Regexp
+	SpecialTagPatterns map[string]*regexp.Regexp
+}
+
+func NewPatternLibrary() *PatternLibrary {
+	pl := &PatternLibrary{
+		SourcePatterns:     make(map[string]*regexp.Regexp),
+		ModifierPatterns:   make(map[string]*regexp.Regexp),
+		EditionPatterns:    make(map[string]*regexp.Regexp),
+		SpecialTagPatterns: make(map[string]*regexp.Regexp),
+	}
+
+	pl.PrefixPatterns = []*regexp.Regexp{prefixRe1, prefixRe2, prefixRe3, prefixRe4}
+	pl.YearInParens = wrappedYearRegex
+	pl.YearStandalone = plainYearRegex
+	pl.MetadataIndicators = compiledBoundaryPatterns
+
+	return pl
+}
+
+// ── Structural Parsing Core Methods ──
+
+func extractInfohash(magnet string) string {
+	m := infohashRegex.FindStringSubmatch(magnet)
+	if len(m) > 1 {
+		return strings.ToLower(m[1])
+	}
+	if u, err := url.Parse(magnet); err == nil {
+		xt := u.Query().Get("xt")
+		if strings.HasPrefix(xt, "urn:btih:") {
+			return strings.ToLower(strings.TrimPrefix(xt, "urn:btih:"))
+		}
+	}
+	return ""
+}
+
+func ExtractMagnetDisplayName(magnet string) string {
+	if u, err := url.Parse(magnet); err == nil {
+		return u.Query().Get("dn")
+	}
+	return ""
 }
 
 func FormatBadges(title string) string {
@@ -1019,8 +1081,8 @@ func parseForumTitle(title string, contentType string) *ParseResult {
 	}
 
 	quality := "sd"
-	if m := forumQualityRe.FindStringSubmatch(title); len(m) > 1 {
-		qStr := strings.ToLower(m[1])
+	if match := forumQualityRe.FindStringSubmatch(title); len(match) > 1 {
+		qStr := strings.ToLower(match[1])
 		if qStr == "4k" || qStr == "uhd" || qStr == "2160p" {
 			quality = "4K"
 		} else if qStr == "1080p" {
@@ -1739,7 +1801,7 @@ func (ep *EditionParser) ParseSpecialTags(title string) []string {
 	tags := []string{}
 	lower := " " + strings.ToLower(title) + " "
 	for tag, pattern := range specialTagPatterns {
-		if regexp.MustCompile(pattern).MatchString(lower) {
+		if pattern.MatchString(lower) {
 			tags = append(tags, tag)
 		}
 	}
