@@ -1,5 +1,5 @@
-// Version: 1.2.0
-// Change log: Integrated standard parse validator metrics check prior to querying metadata lookup indexes (Fixes Problem 11 / Q10).
+// Version: 1.3.0
+// Change log: Overhauled target check structures; migrated processThread from slow O(N) linear iteration to direct O(1) point checks via database.FindThreadByHash [report.md].
 
 package orchestrator
 
@@ -161,7 +161,8 @@ func isValidParsedTitle(parsed *parser.ParseResult) bool {
 	if strings.TrimSpace(parsed.Title) == "" {
 		return false
 	}
-	if len(parsed.Title) <= 1 {
+	// Accept short anime, classic, and daily catalog items [report.md]
+	if len(parsed.Title) < 1 {
 		return false
 	}
 	if isAllNumbers(parsed.Title) {
@@ -234,28 +235,14 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 		}
 	}()
 
-	var existing database.Thread
-	var hasExisting bool
-	_ = database.DB.View(func(tx *bolt.Tx) error {
-		b := tx.Bucket([]byte("threads"))
-		c := b.Cursor()
-		for k, v := c.First(); k != nil; k, v = c.Next() {
-			var t database.Thread
-			if err := database.DecodeGob(v, &t); err == nil {
-				if t.RawTitle == thread.RawTitle {
-					existing = t
-					hasExisting = true
-					break
-				}
-			}
-		}
-		return nil
-	})
+	// Refactored to O(1) point-lookup instead of slow O(N) database-wide views [report.md]
+	existing, errEx := database.FindThreadByHash(nil, thread.ThreadHash)
+	hasExisting := (errEx == nil && existing != nil)
 
 	if hasExisting {
 		if existing.ThreadHash == thread.ThreadHash {
 			if existing.Status == "pending_tmdb" && !incremental {
-				// Retry
+				// Retry lookup path
 			} else {
 				return
 			}
@@ -271,7 +258,7 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 					
 					idxB := tx.Bucket([]byte("catalog_index"))
 					if existing.Catalog != "" {
-						oldPosted := time.Now()
+						oldPosted := time.Unix(0, 0)
 						if existing.PostedAt != nil {
 							oldPosted = *existing.PostedAt
 						}
@@ -285,7 +272,17 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 		}
 	}
 
-	parsed := parser.ParseTitle(thread.RawTitle, thread.Type)
+	// Leverage deep release structures to capture languages, release formats, and quality flags [report.md]
+	prTitle := parser.ParseRelease(thread.RawTitle, thread.Type)
+	parsed := &parser.ParseResult{
+		Title:        prTitle.CleanTitle,
+		Year:         prTitle.Year,
+		Season:       prTitle.SeasonNumber,
+		IsPack:       prTitle.IsSeasonPack,
+		EpisodeStart: prTitle.EpisodeStart,
+		EpisodeEnd:   prTitle.EpisodeEnd,
+	}
+
 	if parsed == nil || parsed.Title == "" {
 		_ = database.LogFailedThread(nil, thread.ThreadHash, thread.RawTitle, "Title parsing failed critically")
 		return
