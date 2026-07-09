@@ -1,6 +1,6 @@
 
-// Version: 2.0.5
-// Change log: Restored the unpaginated GetFailedThreads() database view helper alongside GetFailedThreadsPaginated to resolve undefined reference errors inside failuresHandler while keeping optimized pagination intact.
+// Version: 2.0.6
+// Change log: Refactored FindSeriesStreams to implement layered boundary checks on Nullable episode pointers, cleanly resolving empty streams listings for single-episode releases.
 
 package database
 
@@ -209,6 +209,30 @@ func GetPendingThreads() ([]Thread, error) {
 	return list, err
 }
 
+func GetRecentLinkedThreads() ([]Thread, error) {
+	var list []Thread
+	err := DB.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("threads"))
+		c := b.Cursor()
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			var t Thread
+			if err := DecodeGob(v, &t); err == nil {
+				if t.Status == "linked" {
+					list = append(list, t)
+				}
+			}
+		}
+		return nil
+	})
+	sort.Slice(list, func(i, j int) bool {
+		return list[i].UpdatedAt.After(list[j].UpdatedAt)
+	})
+	if len(list) > 15 {
+		list = list[:15]
+	}
+	return list, err
+}
+
 // GetRecentLinkedThreadsPaginated supports high-speed page-slicing inside Bbolt View transactions.
 func GetRecentLinkedThreadsPaginated(offset, limit int) ([]Thread, error) {
 	var list []Thread
@@ -277,15 +301,25 @@ func FindSeriesStreams(tx *bolt.Tx, tmdbID string, season, episode int) ([]Strea
 	for _, s := range allStreams {
 		match := false
 		if s.Season != nil && *s.Season == season {
-			if s.Episode != nil && s.EpisodeEnd != nil {
-				if episode >= *s.Episode && episode <= *s.EpisodeEnd {
-					match = true
+			if s.Episode != nil {
+				if s.EpisodeEnd != nil {
+					// 1. Matches multi-episode ranges (e.g., Episode 1 to 6)
+					if episode >= *s.Episode && episode <= *s.EpisodeEnd {
+						match = true
+					}
+				} else {
+					// 2. Matches standard single episode releases (e.g., Episode 2)
+					if *s.Episode == episode {
+						match = true
+					}
 				}
-			} else if s.Episode == nil {
-				match = true // Season Pack
+			} else {
+				// 3. Matches Season Packs
+				match = true
 			}
 		} else if s.Season == nil && s.Episode == nil {
-			match = true // Series Pack / Fallback
+			// 4. Matches global Series Packs / Fallback
+			match = true
 		}
 
 		if match {
