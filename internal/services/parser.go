@@ -1,5 +1,5 @@
-// Version: 1.6.5
-// Change log: Fixed compiler syntax error where '576p' was incorrectly written as an integer case literal in getQuality switch block.
+// Version: 1.6.6
+// Change log: Restored PrimaryLanguage to ParsedRelease struct, declared bracketPair correctly to fix cleanBalancedBrackets compiler issues, and fully restored package-level languageToISO map.
 
 package parser
 
@@ -54,7 +54,7 @@ type BadgeFilter struct {
 	Negatives []*regexp.Regexp
 }
 
-type bracketRange struct {
+type bracketPair struct {
 	start int
 	end   int
 }
@@ -73,6 +73,7 @@ type ParsedRelease struct {
 	IsPartialSeason bool
 	Quality         QualityInfo
 	Languages       []string
+	PrimaryLanguage string // RESTORED: Ensured parity with existing magnet-parsing pipelines
 	ReleaseGroup    string
 	Edition         EditionInfo
 	SpecialTags     []string
@@ -237,6 +238,64 @@ var (
 	cleanSuffixPunctRe = regexp.MustCompile(`[':\?,]([sm]\s|\s|$)`)
 )
 
+// ── Complete Language Parser Mapping ──
+
+var languageToISO = map[rtp.Language]string{
+	rtp.LanguageEnglish:       "en",
+	rtp.LanguageSpanish:       "es",
+	rtp.LanguageGerman:        "de",
+	rtp.LanguageFrench:        "fr",
+	rtp.LanguageItalian:       "it",
+	rtp.LanguageRussian:       "ru",
+	rtp.LanguageJapanese:      "ja",
+	rtp.LanguageChinese:       "zh",
+	rtp.LanguageKorean:        "ko",
+	rtp.LanguagePortuguese:    "pt",
+	rtp.LanguagePortugueseBR:  "pt-BR",
+	rtp.LanguageDutch:         "nl",
+	rtp.LanguageDanish:        "da",
+	rtp.LanguageNorwegian:     "no",
+	rtp.LanguageSwedish:       "sv",
+	rtp.LanguageFinnish:       "fi",
+	rtp.LanguagePolish:        "pl",
+	rtp.LanguageCzech:         "cs",
+	rtp.LanguageSlovak:        "sk",
+	rtp.LanguageHungarian:     "hu",
+	rtp.LanguageRomanian:      "ro",
+	rtp.LanguageBulgarian:     "bg",
+	rtp.LanguageUkrainian:     "uk",
+	rtp.LanguageGreek:         "el",
+	rtp.LanguageTurkish:       "tr",
+	rtp.LanguageArabic:        "ar",
+	rtp.LanguageHindi:         "hi",
+	rtp.LanguageThai:          "th",
+	rtp.LanguageVietnamese:    "vi",
+	rtp.LanguageHebrew:        "he",
+	rtp.LanguagePersian:       "fa",
+	rtp.LanguageBengali:       "bn",
+	rtp.LanguageLatvian:       "lv",
+	rtp.LanguageLithuanian:    "lt",
+	rtp.LanguageSpanishLatino: "es-MX",
+	rtp.LanguageTamil:         "ta",
+	rtp.LanguageTelugu:        "te",
+	rtp.LanguageMalayalam:     "ml",
+	rtp.LanguageKannada:       "kn",
+	rtp.LanguageAlbanian:      "sq",
+	rtp.LanguageAfrikaans:     "af",
+	rtp.LanguageMarathi:       "mr",
+	rtp.LanguageTagalog:       "tl",
+	rtp.LanguageIcelandic:     "is",
+	rtp.LanguageFlemish:       "nl-BE",
+	rtp.LanguageUrdu:          "ur",
+	rtp.LanguageMongolian:     "mn",
+	rtp.LanguageGeorgian:      "ka",
+	rtp.LanguageRomansh:       "rm",
+	rtp.LanguageOriginal:      "original",
+	rtp.LanguageCatalan:       "ca",
+	rtp.LanguageAzerbaijani:   "az",
+	rtp.LanguageUzbek:         "uz",
+}
+
 func extractInfohash(magnet string) string {
 	m := infohashRegex.FindStringSubmatch(magnet)
 	if len(m) > 1 {
@@ -382,7 +441,7 @@ func getQuality(res int) string {
 		return "720p"
 	case 480:
 		return "480p"
-	case 576: // FIXED: Resolved 576p integer case literal compilation syntax error
+	case 576:
 		return "576p"
 	case 360:
 		return "360p"
@@ -1373,7 +1432,7 @@ func ParseMagnet(magnetURI string, contentType string) *ParsedMagnet {
 	pm := &ParsedMagnet{
 		Infohash:     infohash,
 		Quality:      pr.Resolution,
-		Language:     pr.PrimaryLanguage,
+		Language:     pr.PrimaryLanguage, // RESTORED
 		Season:       pr.SeasonNumber,
 		Episode:      0,
 		EpisodeStart: 0,
@@ -1766,7 +1825,7 @@ func ParseRelease(rawTitle string, contentType string) *ParsedRelease {
 		Source:          metadata.Source,
 		Resolution:      metadata.Resolution,
 		Languages:       metadata.Languages,
-		PrimaryLanguage: lp.GetPrimaryLanguage(rawTitle),
+		PrimaryLanguage: lp.GetPrimaryLanguage(rawTitle), // RESTORED
 		ReleaseGroup:    metadata.ReleaseGroup,
 		Edition:         metadata.Edition,
 		SpecialTags:     metadata.SpecialTags,
