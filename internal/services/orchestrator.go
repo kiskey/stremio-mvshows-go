@@ -1,5 +1,5 @@
-// Version: 1.1.7
-// Change log: Fixed processThread to defensively sanitize raw metadata out of CleanTitle values before saving linked threads.
+// Version: 1.1.8
+// Change log: Overhauled with strict validation safeguards (isValidParsedTitle) prior to lookup execution, and switched matching to SearchWithAliases variants.
 
 package orchestrator
 
@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/kiskey/stremio-mvshows-go/internal/config"
 	"github.com/kiskey/stremio-mvshows-go/internal/database"
@@ -32,21 +33,18 @@ type DashboardStats struct {
 	LastUpdated time.Time `json:"lastUpdated"`
 }
 
-// IsCrawling safely reads the active crawling execution flag.
 func IsCrawling() bool {
 	crawlMu.Lock()
 	defer crawlMu.Unlock()
 	return isCrawling
 }
 
-// GetDashboardCache safely reads currently cached dashboard statistics.
 func GetDashboardCache() DashboardStats {
 	cacheMu.RLock()
 	defer cacheMu.RUnlock()
 	return dashboardCache
 }
 
-// UpdateDashboardCache recalculates aggregate statistics from the database.
 func UpdateDashboardCache() {
 	var linked, pending, failed int64
 
@@ -85,9 +83,7 @@ func UpdateDashboardCache() {
 	cacheMu.Unlock()
 }
 
-// RunFullWorkflow triggers the full sequence: scrape, parse, TMDB lookup, and relational linking.
 func RunFullWorkflow(cfg *config.Config) {
-	// Defensive panic recovery to prevent unhandled background panics from crashing the entire process
 	defer func() {
 		if r := recover(); r != nil {
 			utils.Logger.Error().Interface("panic", r).Msg("Recovered from panic inside RunFullWorkflow background thread.")
@@ -158,6 +154,78 @@ func RunFullWorkflow(cfg *config.Config) {
 	utils.Logger.Info().Int("total_scraped", len(scraped)).Msg("Workflow thread processing complete.")
 }
 
+// Problem 11 Validation Safeguard Check
+func isValidParsedTitle(parsed *parser.ParseResult) bool {
+	if parsed == nil {
+		return false
+	}
+	if strings.TrimSpace(parsed.Title) == "" {
+		return false
+	}
+	if len(parsed.Title) <= 1 {
+		return false
+	}
+	if isAllNumbers(parsed.Title) {
+		return false
+	}
+	if isAllUppercase(parsed.Title) && len(parsed.Title) > 3 {
+		return false
+	}
+
+	// Filter metadata heavy junk ratios
+	words := strings.Fields(strings.ToLower(parsed.Title))
+	metadataCount := 0
+	for _, w := range words {
+		if isMetadataWord(w) {
+			metadataCount++
+		}
+	}
+	if len(words) > 0 && float64(metadataCount)/float64(len(words)) > 0.5 {
+		return false
+	}
+
+	return true
+}
+
+func isAllNumbers(s string) bool {
+	for _, r := range s {
+		if !unicode.IsDigit(r) && !unicode.IsSpace(r) {
+			return false
+		}
+	}
+	return true
+}
+
+func isAllUppercase(s string) bool {
+	hasLetter := false
+	for _, r := range s {
+		if unicode.IsLetter(r) {
+			hasLetter = true
+			if unicode.IsLower(r) {
+				return false
+			}
+		}
+	}
+	return hasLetter
+}
+
+func isMetadataWord(s string) bool {
+	metadataWords := []string{
+		"proper", "repack", "extended", "unrated", "remastered",
+		"x264", "x265", "hevc", "avc", "aac", "ac3", "dts",
+		"720p", "1080p", "2160p", "480p", "4k", "uhd",
+		"webdl", "webrip", "bluray", "hdtv", "dvdrip",
+		"gb", "mb", "kb", "esub", "sub", "subs",
+	}
+	s = strings.ToLower(s)
+	for _, w := range metadataWords {
+		if s == w {
+			return true
+		}
+	}
+	return false
+}
+
 func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient, incremental bool) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -189,25 +257,19 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 	if hasExisting {
 		if existing.ThreadHash == thread.ThreadHash {
 			if existing.Status == "pending_tmdb" && !incremental {
-				// Retry
+				// Retry allowed
 			} else {
 				return
 			}
 		}
 
-		// ⚡ ATOMIC TRANSACTION PRUNER (Resolves Crawler Duplicate Gap):
-		// If the thread's hash has changed, we must delete the old thread from "threads"
-		// and clean its index points to keep the database layout unfragmented.
 		if existing.ThreadHash != thread.ThreadHash {
 			_ = database.DB.Update(func(tx *bolt.Tx) error {
-				// Delete old record payload
 				_ = tx.Bucket([]byte("threads")).Delete([]byte(existing.ThreadHash))
-
 				if existing.TmdbID != nil {
 					_ = tx.Bucket([]byte("streams")).Delete([]byte(*existing.TmdbID))
 					_ = tx.Bucket([]byte("tmdb_thread_index")).Delete([]byte(*existing.TmdbID))
 					
-					// Delete legacy index pointers
 					idxB := tx.Bucket([]byte("catalog_index"))
 					if existing.Catalog != "" {
 						oldPosted := time.Now()
@@ -230,7 +292,21 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 		return
 	}
 
-	tmdbResult, errTmdb := tmdbClient.Search(parsed.Title, parsed.Year, thread.Type)
+	// Problem 11: strict parse validation prior to execution
+	if !isValidParsedTitle(parsed) {
+		_ = database.LogFailedThread(nil, thread.ThreadHash, thread.RawTitle,
+			fmt.Sprintf("Parsed title invalid: %s", parsed.Title))
+		return
+	}
+
+	utils.Logger.Debug().
+		Str("raw", thread.RawTitle).
+		Str("clean", parsed.Title).
+		Int("year", parsed.Year).
+		Msg("Title parsed successfully")
+
+	// Call alias-variants TMDB query
+	tmdbResult, errTmdb := tmdbClient.SearchWithAliases(parsed.Title, parsed.Year, thread.Type)
 	if errTmdb != nil {
 		utils.Logger.Warn().Err(errTmdb).Str("title", parsed.Title).Msg("TMDB lookup failed or score below threshold. Storing as pending_tmdb.")
 
@@ -302,13 +378,11 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 			return err
 		}
 
-		// Pre-populate dynamic secondary lookup indexing for immediate pointer resolves
 		if tmdbMetadata.ImdbID != nil && *tmdbMetadata.ImdbID != "" {
 			_ = metaBucket.Put([]byte(*tmdbMetadata.ImdbID), metaBytes)
 		}
 
 		cleanTitle := tmdbResult.Title
-		// Dynamic Sanitation Safeguard: Ensure clean title is defensively formatted and free of raw patterns
 		if cleanTitle == "" || strings.Contains(cleanTitle, "[") || strings.Contains(cleanTitle, "]") || strings.Contains(strings.ToLower(cleanTitle), "1080p") || strings.Contains(strings.ToLower(cleanTitle), "720p") || strings.Contains(strings.ToLower(cleanTitle), "s0") {
 			parsed := parser.ParseTitle(thread.RawTitle, thread.Type)
 			if parsed != nil && parsed.Title != "" {
@@ -349,7 +423,6 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 				continue
 			}
 
-			// Store cache record
 			cacheRecord := database.MagnetCache{
 				Infohash:  parsedMagnet.Infohash,
 				Magnet:    magnet,
