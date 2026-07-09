@@ -1,5 +1,5 @@
-// Version: 2.1.0
-// Change log: Integrated title previews, corrected stream handler labels to display clean names instead of raw hashes, and added detailed autoMatchHandler logging parameters.
+// Version: 2.1.1
+// Change log: Overhauled admin controller; enforced StripTrackersFromMagnet on linkOfficial/autoMatch paths, fixed customMeta empty string handling to write nil fallbacks, and integrated strict title checking rules to weed out TMDB linking anomalies.
 
 package api
 
@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 
 	"github.com/gin-gonic/gin"
 	"github.com/kiskey/stremio-mvshows-go/internal/config"
@@ -38,7 +39,7 @@ func RegisterAdminRoutes(r *gin.RouterGroup) {
 	r.POST("/retry-parse", retryParseHandler)
 	r.GET("/recent", recentHandler)
 	r.GET("/cinemeta-search", cinemetaSearchHandler)
-	r.POST("/parse-preview", parsePreviewHandler) // New Parse Preview Route
+	r.POST("/parse-preview", parsePreviewHandler)
 }
 
 func healthHandler(c *gin.Context) {
@@ -128,7 +129,6 @@ func pendingStreamsHandler(c *gin.Context) {
 			continue
 		}
 
-		// FIX: Use CleanTitle for label, fallback to parsed title (Problem 8)
 		displayLabel := t.CleanTitle
 		if displayLabel == "" {
 			parsed := parser.ParseTitle(t.RawTitle, t.Type)
@@ -174,8 +174,18 @@ func customMetaHandler(c *gin.Context) {
 		return
 	}
 
-	t.CustomPoster = body.Poster
-	t.CustomDescription = body.Desc
+	// Sanitize empty overrides cleanly [report.md]
+	if body.Poster != nil && strings.TrimSpace(*body.Poster) == "" {
+		t.CustomPoster = nil
+	} else {
+		t.CustomPoster = body.Poster
+	}
+
+	if body.Desc != nil && strings.TrimSpace(*body.Desc) == "" {
+		t.CustomDescription = nil
+	} else {
+		t.CustomDescription = body.Desc
+	}
 
 	if errSave := database.CreateOrUpdateThread(nil, t); errSave != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update custom metadata"})
@@ -281,6 +291,13 @@ func linkOfficialHandler(c *gin.Context) {
 			t.Year = &tmdbResult.Year
 		}
 
+		// Enforce tracker-stripping on manual linking paths to resolve Risk 1 [report.md]
+		var cleanedMagnets []string
+		for _, m := range t.MagnetURIs {
+			cleanedMagnets = append(cleanedMagnets, parser.StripTrackersFromMagnet(m))
+		}
+		t.MagnetURIs = cleanedMagnets
+
 		err = database.CreateOrUpdateThread(tx, t)
 		if err != nil {
 			return err
@@ -295,7 +312,7 @@ func linkOfficialHandler(c *gin.Context) {
 
 			cacheRecord := database.MagnetCache{
 				Infohash:  parsedMagnet.Infohash,
-				Magnet:    magnet,
+				Magnet:    parser.StripTrackersFromMagnet(magnet), // Ensure stripped writes [report.md]
 				CreatedAt: time.Now(),
 			}
 			cacheBytes, _ := database.EncodeGob(cacheRecord)
@@ -406,7 +423,14 @@ func autoMatchHandler(c *gin.Context) {
 				return
 			}
 
-			// FIX: Detail logged title attributes including raw and clean titles (Problem 9)
+			// Validate titles prior to auto-matching metadata targets [report.md]
+			if parsed.Title == "" || len(parsed.Title) <= 1 || isAllNumbers(parsed.Title) || (isAllUppercase(parsed.Title) && len(parsed.Title) > 3) {
+				mu.Lock()
+				failCount++
+				mu.Unlock()
+				return
+			}
+
 			utils.Logger.Info().
 				Int("index", index+1).
 				Str("raw_title", t.RawTitle).
@@ -501,6 +525,13 @@ func autoMatchHandler(c *gin.Context) {
 				res.Thread.Year = &res.Result.Year
 			}
 
+			// Enforce tracker-stripping on autoMatch paths to resolve Risk 1 [report.md]
+			var cleanedMagnets []string
+			for _, m := range res.Thread.MagnetURIs {
+				cleanedMagnets = append(cleanedMagnets, parser.StripTrackersFromMagnet(m))
+			}
+			res.Thread.MagnetURIs = cleanedMagnets
+
 			err = database.CreateOrUpdateThread(tx, &res.Thread)
 			if err != nil {
 				return err
@@ -515,7 +546,7 @@ func autoMatchHandler(c *gin.Context) {
 
 				cacheRecord := database.MagnetCache{
 					Infohash:  parsedMagnet.Infohash,
-					Magnet:    magnet,
+					Magnet:    parser.StripTrackersFromMagnet(magnet), // Save tracker-stripped variants cleanly [report.md]
 					CreatedAt: time.Now(),
 				}
 				cacheBytes, _ := database.EncodeGob(cacheRecord)
@@ -564,7 +595,7 @@ func autoMatchHandler(c *gin.Context) {
 			utils.Logger.Info().
 				Int("index", idx+1).
 				Str("raw_title", res.Thread.RawTitle).
-				Str("clean_title", res.Thread.CleanTitle). // FIX: Log clean title
+				Str("clean_title", res.Thread.CleanTitle).
 				Str("matched_as", res.Result.Title).
 				Str("imdb_id", res.Result.ImdbID).
 				Msg("Successfully linked thread and saved stream references.")
@@ -592,6 +623,28 @@ func autoMatchHandler(c *gin.Context) {
 		"failCount":     failCount,
 		"matchedTitles": matchedTitles,
 	})
+}
+
+func isAllNumbers(s string) bool {
+	for _, r := range s {
+		if !unicode.IsDigit(r) && !unicode.IsSpace(r) {
+			return false
+		}
+	}
+	return true
+}
+
+func isAllUppercase(s string) bool {
+	hasLetter := false
+	for _, r := range s {
+		if unicode.IsLetter(r) {
+			hasLetter = true
+			if unicode.IsLower(r) {
+				return false
+			}
+		}
+	}
+	return hasLetter
 }
 
 func cinemetaSearchHandler(c *gin.Context) {
