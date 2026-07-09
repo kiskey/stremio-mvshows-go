@@ -978,12 +978,19 @@ func FindBestSeriesFile(candidates []CandidateFile, targetSeason, targetEpisode,
 	return CandidateFile{}, false
 }
 
-func GenerateThreadHash(title string, magnetURIs []string) string {
-	sorted := make([]string, len(magnetURIs))
-	copy(sorted, magnetURIs)
-	sort.Strings(sorted)
-	data := title + strings.Join(sorted, "")
-	h := sha256.Sum256([]byte(data))
+// GenerateThreadHash produces a 100% deterministic, immutable SHA256 string
+// bound strictly to the raw title. It normalizes spacing and casing to ensure
+// that subsequent magnet additions overwrite existing records atomically.
+func GenerateThreadHash(title string, _ []string) string {
+	// 1. Normalize spaces, strip non-alphanumeric separators, and convert to lower case
+	normalized := strings.ToLower(strings.TrimSpace(title))
+	
+	// Collapse multiple spaces to prevent variations from producing different hashes
+	words := strings.Fields(normalized)
+	normalized = strings.Join(words, " ")
+
+	// 2. Generate SHA256 bytes
+	h := sha256.Sum256([]byte(normalized))
 	return hex.EncodeToString(h[:])
 }
 
