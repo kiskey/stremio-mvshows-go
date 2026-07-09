@@ -1,5 +1,5 @@
-// Version: 2.1.3
-// Change log: Fully resolved undefined compile helpers (getDebridCachedLink, getDownloadLinkForFile) with fallback unrestrict mappings for Real-Debrid and Torbox to guarantee clean builds.
+// Version: 2.1.4
+// Change log: Removed all references to meta.Threads in handlers to match the cyclic-safe TmdbMetadata model conversion, decoupling cached metadata records from local thread lookups [report.md].
 
 package api
 
@@ -67,15 +67,15 @@ type StremioMetaResponse struct {
 }
 
 type StremioMetaDetail struct {
-	ID          string               `json:"id"`
-	Type        string               `json:"type"`
-	Name        string               `json:"name"`
-	ReleaseInfo string               `json:"releaseInfo"`
-	Poster      string               `json:"poster,omitempty"`
-	Description string               `json:"description,omitempty"`
-	ImdbRating  string               `json:"imdbRating,omitempty"`
-	Genres      []string             `json:"genres,omitempty"`
-	Videos      []StremioVideoDetail `json:"videos,omitempty"`
+	ID               string               `json:"id"`
+	Type             string               `json:"type"`
+	Name             string               `json:"name"`
+	ReleaseInfo      string               `json:"releaseInfo"`
+	Poster           string               `json:"poster,omitempty"`
+	Description      string               `json:"description,omitempty"`
+	ImdbRating       string               `json:"imdbRating,omitempty"`
+	Genres           []string             `json:"genres,omitempty"`
+	Videos           []StremioVideoDetail `json:"videos,omitempty"`
 }
 
 type StremioVideoDetail struct {
@@ -457,6 +457,8 @@ func metaHandler(c *gin.Context) {
 
 	var meta database.TmdbMetadata
 	var foundMeta bool
+	var mappedThread database.Thread
+	var hasMappedThread bool
 
 	_ = database.DB.View(func(tx *bolt.Tx) error {
 		metaB := tx.Bucket([]byte("tmdb_metadata"))
@@ -470,14 +472,14 @@ func metaHandler(c *gin.Context) {
 			}
 		}
 
+		// Decouple thread point-lookup dynamically from TmdbMetadata, eliminating cyclic meta.Threads [report.md]
 		if foundMeta {
 			tHash := threadIdxB.Get([]byte(meta.TmdbID))
 			if tHash != nil {
 				tBytes := thrB.Get(tHash)
 				if tBytes != nil {
-					var t database.Thread
-					if errDec := database.DecodeGob(tBytes, &t); errDec == nil {
-						meta.Threads = []database.Thread{t}
+					if errDec := database.DecodeGob(tBytes, &mappedThread); errDec == nil {
+						hasMappedThread = true
 					}
 				}
 			}
@@ -487,10 +489,10 @@ func metaHandler(c *gin.Context) {
 
 	if foundMeta {
 		displayName := "Unknown"
-		if len(meta.Threads) > 0 {
-			displayName = meta.Threads[0].CleanTitle
+		if hasMappedThread {
+			displayName = mappedThread.CleanTitle
 			if displayName == "" || strings.Contains(displayName, "[") || strings.Contains(displayName, "]") || strings.Contains(strings.ToLower(displayName), "1080p") || strings.Contains(strings.ToLower(displayName), "720p") || strings.Contains(strings.ToLower(displayName), "s0") {
-				parsed := parser.ParseTitle(meta.Threads[0].RawTitle, meta.Threads[0].Type)
+				parsed := parser.ParseTitle(mappedThread.RawTitle, mappedThread.Type)
 				if parsed != nil && parsed.Title != "" {
 					displayName = parsed.Title
 				}
@@ -498,15 +500,15 @@ func metaHandler(c *gin.Context) {
 		}
 
 		mediaType := "movie"
-		if len(meta.Threads) > 0 {
-			mediaType = meta.Threads[0].Type
+		if hasMappedThread {
+			mediaType = mappedThread.Type
 		}
 
 		poster := "https://images.metahub.space/poster/medium/" + cleanID + "/img"
 
 		overview := "Up-to-date metadata resolving on Cinemeta."
-		if len(meta.Threads) > 0 {
-			t := meta.Threads[0]
+		if hasMappedThread {
+			t := mappedThread
 			if t.CustomPoster != nil && *t.CustomPoster != "" {
 				poster = *t.CustomPoster
 			}
@@ -642,6 +644,8 @@ func streamHandler(c *gin.Context) {
 
 	var meta database.TmdbMetadata
 	var foundMeta bool
+	var mappedThread database.Thread
+	var hasMappedThread bool
 
 	_ = database.DB.View(func(tx *bolt.Tx) error {
 		metaB := tx.Bucket([]byte("tmdb_metadata"))
@@ -660,9 +664,8 @@ func streamHandler(c *gin.Context) {
 			if tHash != nil {
 				tBytes := thrB.Get(tHash)
 				if tBytes != nil {
-					var t database.Thread
-					if errDec := database.DecodeGob(tBytes, &t); errDec == nil {
-						meta.Threads = []database.Thread{t}
+					if errDec := database.DecodeGob(tBytes, &mappedThread); errDec == nil {
+						hasMappedThread = true
 					}
 				}
 			}
@@ -795,15 +798,15 @@ func streamHandler(c *gin.Context) {
 	seenStreams := make(map[streamDupKey]bool)
 
 	mediaType := "movie"
-	if len(meta.Threads) > 0 {
-		mediaType = meta.Threads[0].Type
+	if hasMappedThread {
+		mediaType = mappedThread.Type
 	}
 
 	tmdbTitle := ""
-	if len(meta.Threads) > 0 {
-		tmdbTitle = meta.Threads[0].CleanTitle
+	if hasMappedThread {
+		tmdbTitle = mappedThread.CleanTitle
 		if tmdbTitle == "" || strings.Contains(tmdbTitle, "[") || strings.Contains(tmdbTitle, "]") || strings.Contains(strings.ToLower(tmdbTitle), "1080p") || strings.Contains(strings.ToLower(tmdbTitle), "720p") || strings.Contains(strings.ToLower(tmdbTitle), "s0") {
-			parsed := parser.ParseTitle(meta.Threads[0].RawTitle, meta.Threads[0].Type)
+			parsed := parser.ParseTitle(mappedThread.RawTitle, mappedThread.Type)
 			if parsed != nil && parsed.Title != "" {
 				tmdbTitle = parsed.Title
 			}
@@ -905,151 +908,6 @@ func streamHandler(c *gin.Context) {
 	sortStreams(streamList)
 
 	writeJSON(c, http.StatusOK, StremioStreamResponse{Streams: streamList})
-}
-
-// ---- Problem 10: Rich stream title formatting engine ----
-
-func buildStreamTitle(pr *parser.ParsedRelease, tmdbTitle string, mediaType string, fallbackDn string) string {
-	var b strings.Builder
-
-	if mediaType == "series" {
-		seasonStr := fmt.Sprintf("S%02d", pr.SeasonNumber)
-		var epPart string
-		if pr.IsSeasonPack {
-			epPart = "Season Pack"
-		} else if len(pr.EpisodeNumbers) == 1 {
-			epPart = fmt.Sprintf("E%02d", pr.EpisodeNumbers[0])
-		} else if len(pr.EpisodeNumbers) > 1 {
-			epPart = fmt.Sprintf("E%02d-E%02d", pr.EpisodeNumbers[0], pr.EpisodeNumbers[len(pr.EpisodeNumbers)-1])
-		} else {
-			epPart = "Pack"
-		}
-		b.WriteString(fmt.Sprintf("🎬 %s (%s | %s)", tmdbTitle, seasonStr, epPart))
-	} else {
-		b.WriteString(fmt.Sprintf("🎬 %s", tmdbTitle))
-	}
-
-	if pr.Edition.EditionString != "" {
-		b.WriteString(fmt.Sprintf(" [%s]", pr.Edition.EditionString))
-	}
-
-	b.WriteString("\n✨ ")
-	if pr.Quality.FullString != "Unknown" {
-		b.WriteString(pr.Quality.FullString)
-	} else if pr.Resolution != "" {
-		b.WriteString(pr.Resolution)
-	} else {
-		b.WriteString("SD")
-	}
-
-	if pr.Source != "" {
-		b.WriteString(" | " + pr.Source)
-	}
-
-	if pr.VideoCodec != "" {
-		b.WriteString(" | " + pr.VideoCodec)
-	}
-	if pr.AudioCodec != "" {
-		b.WriteString(" | " + pr.AudioCodec)
-	}
-	if pr.AudioChannels != "" {
-		b.WriteString(" " + pr.AudioChannels)
-	}
-
-	b.WriteString("\n🔊 ")
-	if len(pr.Languages) > 0 {
-		b.WriteString(formatLanguage(pr.Languages[0]))
-		if len(pr.Languages) > 1 {
-			b.WriteString(fmt.Sprintf(" +%d", len(pr.Languages)-1))
-		}
-	} else {
-		b.WriteString("Tamil 🇮🇳")
-	}
-
-	if pr.ReleaseGroup != "" {
-		b.WriteString(fmt.Sprintf("\n🏷️ %s", pr.ReleaseGroup))
-	}
-
-	if len(pr.SpecialTags) > 0 {
-		b.WriteString(fmt.Sprintf("\n⚡ %s", strings.Join(pr.SpecialTags, ", ")))
-	}
-
-	b.WriteString("\n📥 Click to Stream")
-	return b.String()
-}
-
-var languageFlags = map[string]string{
-	"ta": "Tamil 🇮🇳",
-	"te": "Telugu 🇮🇳",
-	"ml": "Malayalam 🇮🇳",
-	"hi": "Hindi 🇮🇳",
-	"kn": "Kannada 🇮🇳",
-	"en": "English 🇬🇧",
-	"fr": "French 🇫🇷",
-	"es": "Spanish 🇪🇸",
-	"de": "German 🇩🇪",
-	"it": "Italian 🇮🇹",
-	"ja": "Japanese 🇯🇵",
-	"ko": "Korean 🇰🇷",
-	"zh": "Chinese 🇨🇳",
-}
-
-func formatLanguage(lang string) string {
-	lang = strings.ToLower(strings.TrimSpace(lang))
-	if lang == "" {
-		return "Unknown 🌐"
-	}
-	if val, ok := languageFlags[lang]; ok {
-		return val
-	}
-	return strings.ToUpper(lang) + " 🌐"
-}
-
-func formatQualityBadge(q string) string {
-	q = strings.ToUpper(strings.TrimSpace(q))
-	switch q {
-	case "4K", "2160P":
-		return "🚀 4K UHD"
-	case "1080P":
-		return "🔥 1080p HD"
-	case "720P":
-		return "⚡ 720p HD"
-	case "480P", "SD", "360P":
-		return "📼 SD"
-	default:
-		return "🎥 " + q
-	}
-}
-
-func buildTrackerSources() []string {
-	trackers := tracker.GetTrackers()
-	allowed := make([]string, 0, len(trackers))
-	for _, t := range trackers {
-		if strings.HasPrefix(t, "udp://") || strings.HasPrefix(t, "http://") || strings.HasPrefix(t, "https://") {
-			proto := "http"
-			rest := t
-			if strings.HasPrefix(t, "udp://") {
-				proto = "udp"
-				rest = strings.TrimPrefix(t, "udp://")
-			} else if strings.HasPrefix(t, "http://") {
-				rest = strings.TrimPrefix(t, "http://")
-			} else if strings.HasPrefix(t, "https://") {
-				rest = strings.TrimPrefix(rest, "https://")
-			}
-			allowed = append(allowed, "tracker:"+proto+"://"+rest)
-		}
-	}
-	return allowed
-}
-
-func withDhtSource(sources []string, infohash string) []string {
-	if infohash == "" {
-		return sources
-	}
-	list := make([]string, len(sources))
-	copy(list, sources)
-	list = append(list, "dht:"+infohash)
-	return list
 }
 
 func rdAddHandler(c *gin.Context) {
@@ -1438,4 +1296,147 @@ func getDownloadLinkForFile(ctx context.Context, p debrid.Provider, info *debrid
 	}
 
 	return "", fmt.Errorf("link index not found or unrestricting failed")
+}
+
+func buildStreamTitle(pr *parser.ParsedRelease, tmdbTitle string, mediaType string, fallbackDn string) string {
+	var b strings.Builder
+
+	if mediaType == "series" {
+		seasonStr := fmt.Sprintf("S%02d", pr.SeasonNumber)
+		var epPart string
+		if pr.IsSeasonPack {
+			epPart = "Season Pack"
+		} else if len(pr.EpisodeNumbers) == 1 {
+			epPart = fmt.Sprintf("E%02d", pr.EpisodeNumbers[0])
+		} else if len(pr.EpisodeNumbers) > 1 {
+			epPart = fmt.Sprintf("E%02d-E%02d", pr.EpisodeNumbers[0], pr.EpisodeNumbers[len(pr.EpisodeNumbers)-1])
+		} else {
+			epPart = "Pack"
+		}
+		b.WriteString(fmt.Sprintf("🎬 %s (%s | %s)", tmdbTitle, seasonStr, epPart))
+	} else {
+		b.WriteString(fmt.Sprintf("🎬 %s", tmdbTitle))
+	}
+
+	if pr.Edition.EditionString != "" {
+		b.WriteString(fmt.Sprintf(" [%s]", pr.Edition.EditionString))
+	}
+
+	b.WriteString("\n✨ ")
+	if pr.Quality.FullString != "Unknown" {
+		b.WriteString(pr.Quality.FullString)
+	} else if pr.Resolution != "" {
+		b.WriteString(pr.Resolution)
+	} else {
+		b.WriteString("SD")
+	}
+
+	if pr.Source != "" {
+		b.WriteString(" | " + pr.Source)
+	}
+
+	if pr.VideoCodec != "" {
+		b.WriteString(" | " + pr.VideoCodec)
+	}
+	if pr.AudioCodec != "" {
+		b.WriteString(" | " + pr.AudioCodec)
+	}
+	if pr.AudioChannels != "" {
+		b.WriteString(" " + pr.AudioChannels)
+	}
+
+	b.WriteString("\n🔊 ")
+	if len(pr.Languages) > 0 {
+		b.WriteString(formatLanguage(pr.Languages[0]))
+		if len(pr.Languages) > 1 {
+			b.WriteString(fmt.Sprintf(" +%d", len(pr.Languages)-1))
+		}
+	} else {
+		b.WriteString("Tamil 🇮🇳")
+	}
+
+	if pr.ReleaseGroup != "" {
+		b.WriteString(fmt.Sprintf("\n🏷️ %s", pr.ReleaseGroup))
+	}
+
+	if len(pr.SpecialTags) > 0 {
+		b.WriteString(fmt.Sprintf("\n⚡ %s", strings.Join(pr.SpecialTags, ", ")))
+	}
+
+	b.WriteString("\n📥 Click to Stream")
+	return b.String()
+}
+
+var languageFlags = map[string]string{
+	"ta": "Tamil 🇮🇳",
+	"te": "Telugu 🇮🇳",
+	"ml": "Malayalam 🇮🇳",
+	"hi": "Hindi 🇮🇳",
+	"kn": "Kannada 🇮🇳",
+	"en": "English 🇬🇧",
+	"fr": "French 🇫🇷",
+	"es": "Spanish 🇪🇸",
+	"de": "German 🇩🇪",
+	"it": "Italian 🇮🇹",
+	"ja": "Japanese 🇯🇵",
+	"ko": "Korean 🇰🇷",
+	"zh": "Chinese 🇨🇳",
+}
+
+func formatLanguage(lang string) string {
+	lang = strings.ToLower(strings.TrimSpace(lang))
+	if lang == "" {
+		return "Unknown 🌐"
+	}
+	if val, ok := languageFlags[lang]; ok {
+		return val
+	}
+	return strings.ToUpper(lang) + " 🌐"
+}
+
+func formatQualityBadge(q string) string {
+	q = strings.ToUpper(strings.TrimSpace(q))
+	switch q {
+	case "4K", "2160P":
+		return "🚀 4K UHD"
+	case "1080P":
+		return "🔥 1080p HD"
+	case "720P":
+		return "⚡ 720p HD"
+	case "480P", "SD", "360P":
+		return "📼 SD"
+	default:
+		return "🎥 " + q
+	}
+}
+
+func buildTrackerSources() []string {
+	trackers := tracker.GetTrackers()
+	allowed := make([]string, 0, len(trackers))
+	for _, t := range trackers {
+		if strings.HasPrefix(t, "udp://") || strings.HasPrefix(t, "http://") || strings.HasPrefix(t, "https://") {
+			proto := "http"
+			rest := t
+			if strings.HasPrefix(t, "udp://") {
+				proto = "udp"
+				rest = strings.TrimPrefix(t, "udp://")
+			} else if strings.HasPrefix(t, "http://") {
+				rest = strings.TrimPrefix(t, "http://")
+			} else if strings.HasPrefix(t, "https://") {
+				rest = strings.TrimPrefix(rest, "https://")
+			}
+			allowed = append(allowed, "tracker:"+proto+"://"+rest)
+		}
+	}
+	return allowed
+}
+
+func withDhtSource(sources []string, infohash string) []string {
+	if infohash == "" {
+		return sources
+	}
+	list := make([]string, len(sources))
+	copy(list, sources)
+	list = append(list, "dht:"+infohash)
+	return list
 }
