@@ -1,6 +1,6 @@
 
-// Version: 1.1.5
-// Change log: Passed contextual parameters directly to ParseTitle inside linkOfficialHandler and autoMatchHandler to ensure precise movie parsing execution.
+// Version: 2.0.7
+// Change log: Corrected variable referencing typos inside cachePendingHandler background scope block, replacing "normalized\"" with "normalizedInfohash" to resolve syntax and compilation errors.
 
 package api
 
@@ -22,8 +22,7 @@ import (
 	"github.com/kiskey/stremio-mvshows-go/internal/services/parser"
 	"github.com/kiskey/stremio-mvshows-go/internal/services/tracker"
 	"github.com/kiskey/stremio-mvshows-go/internal/utils"
-	"gorm.io/gorm"
-	"gorm.io/gorm/clause"
+	bolt "go.etcd.io/bbolt"
 )
 
 func RegisterAdminRoutes(r *gin.RouterGroup) {
@@ -55,7 +54,7 @@ func healthHandler(c *gin.Context) {
 	}
 
 	dbSize := int64(0)
-	if stat, err := os.Stat("/data/stremio_addon.db"); err == nil {
+	if stat, err := os.Stat("/data/stremio_addon.db.bolt"); err == nil {
 		dbSize = stat.Size()
 	}
 
@@ -111,8 +110,8 @@ func pendingStreamsHandler(c *gin.Context) {
 		return
 	}
 
-	var t database.Thread
-	if errDb := database.DB.First(&t, "id = ?", threadId).Error; errDb != nil {
+	t, errDb := database.FindThreadByID(uint(threadId))
+	if errDb != nil || t == nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Thread not found"})
 		return
 	}
@@ -141,8 +140,7 @@ func pendingStreamsHandler(c *gin.Context) {
 		})
 
 		// Check lock status
-		var lock database.DebridCacheLock
-		if errLock := database.DB.First(&lock, "infohash = ?", parsedMagnet.Infohash).Error; errLock == nil {
+		if database.IsDebridCacheLocked(parsedMagnet.Infohash) {
 			locked = append(locked, parsedMagnet.Infohash)
 		}
 	}
@@ -164,8 +162,8 @@ func customMetaHandler(c *gin.Context) {
 		return
 	}
 
-	var t database.Thread
-	if errDb := database.DB.First(&t, "id = ?", body.ThreadID).Error; errDb != nil {
+	t, errDb := database.FindThreadByID(uint(body.ThreadID))
+	if errDb != nil || t == nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Thread not found"})
 		return
 	}
@@ -173,7 +171,7 @@ func customMetaHandler(c *gin.Context) {
 	t.CustomPoster = body.Poster
 	t.CustomDescription = body.Desc
 
-	if errSave := database.DB.Save(&t).Error; errSave != nil {
+	if errSave := database.CreateOrUpdateThread(nil, t); errSave != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update custom metadata"})
 		return
 	}
@@ -191,8 +189,8 @@ func linkOfficialHandler(c *gin.Context) {
 		return
 	}
 
-	var t database.Thread
-	if errDb := database.DB.First(&t, "id = ?", body.ThreadID).Error; errDb != nil {
+	t, errDb := database.FindThreadByID(uint(body.ThreadID))
+	if errDb != nil || t == nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Thread not found"})
 		return
 	}
@@ -217,17 +215,23 @@ func linkOfficialHandler(c *gin.Context) {
 		return
 	}
 
-	errTx := database.DB.Transaction(func(tx *gorm.DB) error {
-		// GORM-safe Collision Pre-check: Verify if this IMDb ID is already registered
-		if tmdbResult.ImdbID != "" {
-			var fetched []database.TmdbMetadata
-			if tx.Where("imdb_id = ?", tmdbResult.ImdbID).Limit(1).Find(&fetched).Error == nil && len(fetched) > 0 {
-				tmdbResult.TmdbID = fetched[0].TmdbID
+	errTx := database.DB.Update(func(tx *bolt.Tx) error {
+		metaBucket := tx.Bucket([]byte("tmdb_metadata"))
+		magnetBucket := tx.Bucket([]byte("magnet_cache"))
+
+		// Check if this IMDb ID is already registered under an alternative TMDB ID
+		c := metaBucket.Cursor()
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			var metadataRecord database.TmdbMetadata
+			if errDec := database.DecodeGob(v, &metadataRecord); errDec == nil {
+				if metadataRecord.ImdbID != nil && *metadataRecord.ImdbID == tmdbResult.ImdbID {
+					tmdbResult.TmdbID = metadataRecord.TmdbID
+					break
+				}
 			}
 		}
 
-		// ZERO-STALE METADATA OPTIMIZATION: Save lightweight empty JSON struct "{}" 
-		// and let Stremio handle dynamic updates via Cinemeta API on the fly
+		// Save tmdbMetadata
 		rawDataBytes := []byte("{}")
 		
 		var imdbIDPtr *string
@@ -237,26 +241,30 @@ func linkOfficialHandler(c *gin.Context) {
 		}
 
 		tmdbMetadata := database.TmdbMetadata{
-			TmdbID: tmdbResult.TmdbID,
-			ImdbID: imdbIDPtr,
-			Data:   string(rawDataBytes),
+			TmdbID:    tmdbResult.TmdbID,
+			ImdbID:    imdbIDPtr,
+			Data:      string(rawDataBytes),
+			CreatedAt: time.Now(),
+			UpdatedAt: time.Now(),
 		}
 		if tmdbResult.Year > 0 {
 			tmdbMetadata.Year = &tmdbResult.Year
 		}
 
-		errMeta := tx.Clauses(clause.OnConflict{
-			Columns:   []clause.Column{{Name: "tmdb_id"}},
-			UpdateAll: true,
-		}).Create(&tmdbMetadata).Error
-		if errMeta != nil {
-			return errMeta
+		metaBytes, err := database.EncodeGob(tmdbMetadata)
+		if err != nil {
+			return err
+		}
+		_ = metaBucket.Put([]byte(tmdbResult.TmdbID), metaBytes)
+		
+		// ⚡ DUAL-INDEX POINT-LOOKUP WRITES:
+		if tmdbMetadata.ImdbID != nil && *tmdbMetadata.ImdbID != "" {
+			_ = metaBucket.Put([]byte(*tmdbMetadata.ImdbID), metaBytes)
 		}
 
 		t.TmdbID = &tmdbResult.TmdbID
 		
 		// Write-Time Sanitation Failsafe:
-		// If Cinemeta details API returned an empty title (skeleton card), sanitize RawTitle on-the-fly.
 		cleanTitle := tmdbResult.Title
 		if cleanTitle == "" {
 			parsed := parser.ParseTitle(t.RawTitle, t.Type)
@@ -273,12 +281,14 @@ func linkOfficialHandler(c *gin.Context) {
 			t.Year = &tmdbResult.Year
 		}
 
-		errThr := tx.Save(&t).Error
-		if errThr != nil {
-			return errThr
+		// Save updated thread. Standardizing via helper compiles index-keys and thread pointers automatically!
+		err = database.CreateOrUpdateThread(tx, t)
+		if err != nil {
+			return err
 		}
 
 		// Create associated streams
+		var newStreams []database.Stream
 		for _, magnet := range t.MagnetURIs {
 			parsedMagnet := parser.ParseMagnet(magnet, t.Type)
 			if parsedMagnet == nil {
@@ -287,19 +297,20 @@ func linkOfficialHandler(c *gin.Context) {
 
 			// Store cache record
 			cacheRecord := database.MagnetCache{
-				Infohash: parsedMagnet.Infohash,
-				Magnet:   magnet,
+				Infohash:  parsedMagnet.Infohash,
+				Magnet:    magnet,
+				CreatedAt: time.Now(),
 			}
-			_ = tx.Clauses(clause.OnConflict{
-				Columns:   []clause.Column{{Name: "infohash"}},
-				UpdateAll: true,
-			}).Create(&cacheRecord)
+			cacheBytes, _ := database.EncodeGob(cacheRecord)
+			_ = magnetBucket.Put([]byte(parsedMagnet.Infohash), cacheBytes)
 
 			stream := database.Stream{
-				TmdbID:   tmdbResult.TmdbID,
-				Infohash: parsedMagnet.Infohash,
-				Quality:  parsedMagnet.Quality,
-				Language: parsedMagnet.Language,
+				TmdbID:    tmdbResult.TmdbID,
+				Infohash:  parsedMagnet.Infohash,
+				Quality:   parsedMagnet.Quality,
+				Language:  parsedMagnet.Language,
+				CreatedAt: time.Now(),
+				UpdatedAt: time.Now(),
 			}
 
 			if mediaType == "series" {
@@ -318,16 +329,14 @@ func linkOfficialHandler(c *gin.Context) {
 					endVal := parsedMagnet.EpisodeEnd
 					stream.Episode = &startVal
 					stream.EpisodeEnd = &endVal
-				} else {
-					stream.Episode = nil
-					stream.EpisodeEnd = nil
 				}
 			}
 
-			_ = tx.Clauses(clause.OnConflict{
-				Columns:   []clause.Column{{Name: "tmdb_id"}, {Name: "season"}, {Name: "episode"}, {Name: "infohash"}},
-				UpdateAll: true,
-			}).Create(&stream)
+			newStreams = append(newStreams, stream)
+		}
+
+		if len(newStreams) > 0 {
+			_ = database.CreateStreams(tx, newStreams)
 		}
 
 		return nil
@@ -367,11 +376,10 @@ func autoMatchHandler(c *gin.Context) {
 
 	var successCount int
 	var failCount int
-	matchedTitles := make([]string, 0) // Explicitly initialized using make to prevent null JSON serialization on 0 matches
+	matchedTitles := make([]string, 0)
 	var results []matchTaskResult
 	var mu sync.Mutex
 
-	// Bounded Concurrency: limit parallel API requests to maximum 5 workers to protect rate limits
 	sem := make(chan struct{}, 5)
 	var wg sync.WaitGroup
 
@@ -385,8 +393,8 @@ func autoMatchHandler(c *gin.Context) {
 			sem <- struct{}{}
 			defer func() { <-sem }()
 
-			var t database.Thread
-			if errDb := database.DB.First(&t, "id = ?", threadID).Error; errDb != nil {
+			t, errDb := database.FindThreadByID(uint(threadID))
+			if errDb != nil || t == nil {
 				utils.Logger.Warn().Int("thread_id", threadID).Msg("Thread ID not found in database. Skipping.")
 				mu.Lock()
 				failCount++
@@ -418,7 +426,7 @@ func autoMatchHandler(c *gin.Context) {
 			}
 
 			mu.Lock()
-			results = append(results, matchTaskResult{Thread: t, Result: tmdbResult})
+			results = append(results, matchTaskResult{Thread: *t, Result: tmdbResult})
 			mu.Unlock()
 
 		}(idx, id)
@@ -428,19 +436,24 @@ func autoMatchHandler(c *gin.Context) {
 
 	utils.Logger.Info().Int("matched_queued", len(results)).Msg("Network search completed. Commencing serialized database writes...")
 
-	// Serialize database writes one-by-one to completely prevent SQLite database is locked (SQLITE_BUSY) errors
+	// Serialize database writes one-by-one to completely prevent database locks
 	for idx, res := range results {
-		errTx := database.DB.Transaction(func(tx *gorm.DB) error {
+		errTx := database.DB.Update(func(tx *bolt.Tx) error {
+			metaBucket := tx.Bucket([]byte("tmdb_metadata"))
+			magnetBucket := tx.Bucket([]byte("magnet_cache"))
+
 			// GORM-safe Collision Pre-check: Verify if this IMDb ID is already registered under an alternative TMDB ID
-			if res.Result.ImdbID != "" {
-				var fetched []database.TmdbMetadata
-				if tx.Where("imdb_id = ?", res.Result.ImdbID).Limit(1).Find(&fetched).Error == nil && len(fetched) > 0 {
-					res.Result.TmdbID = fetched[0].TmdbID
+			c := metaBucket.Cursor()
+			for k, v := c.First(); k != nil; k, v = c.Next() {
+				var fetched database.TmdbMetadata
+				if errDec := database.DecodeGob(v, &fetched); errDec == nil {
+					if fetched.ImdbID != nil && *fetched.ImdbID == res.Result.ImdbID {
+						res.Result.TmdbID = fetched.TmdbID
+						break
+					}
 				}
 			}
 
-			// ZERO-STALE METADATA OPTIMIZATION: Discard massive metadata JSON string 
-			// and save a lightweight empty structure "{}" instead.
 			rawDataBytes := []byte("{}")
 			
 			var imdbIDPtr *string
@@ -450,20 +463,25 @@ func autoMatchHandler(c *gin.Context) {
 			}
 
 			tmdbMetadata := database.TmdbMetadata{
-				TmdbID: res.Result.TmdbID,
-				ImdbID: imdbIDPtr,
-				Data:   string(rawDataBytes),
+				TmdbID:    res.Result.TmdbID,
+				ImdbID:    imdbIDPtr,
+				Data:      string(rawDataBytes),
+				CreatedAt: time.Now(),
+				UpdatedAt: time.Now(),
 			}
 			if res.Result.Year > 0 {
 				tmdbMetadata.Year = &res.Result.Year
 			}
 
-			errMeta := tx.Clauses(clause.OnConflict{
-				Columns:   []clause.Column{{Name: "tmdb_id"}},
-				UpdateAll: true,
-			}).Create(&tmdbMetadata).Error
-			if errMeta != nil {
-				return errMeta
+			metaBytes, err := database.EncodeGob(tmdbMetadata)
+			if err != nil {
+				return err
+			}
+			_ = metaBucket.Put([]byte(res.Result.TmdbID), metaBytes)
+
+			// ⚡ DUAL-INDEX POINT-LOOKUP WRITES:
+			if tmdbMetadata.ImdbID != nil && *tmdbMetadata.ImdbID != "" {
+				_ = metaBucket.Put([]byte(*tmdbMetadata.ImdbID), metaBytes)
 			}
 
 			res.Thread.TmdbID = &res.Result.TmdbID
@@ -484,11 +502,13 @@ func autoMatchHandler(c *gin.Context) {
 				res.Thread.Year = &res.Result.Year
 			}
 
-			errThr := tx.Save(&res.Thread).Error
-			if errThr != nil {
-				return errThr
+			// Standardizing thread write automatically registers both catalog indexes and tmdb_thread_index!
+			err = database.CreateOrUpdateThread(tx, &res.Thread)
+			if err != nil {
+				return err
 			}
 
+			var newStreams []database.Stream
 			for _, magnet := range res.Thread.MagnetURIs {
 				parsedMagnet := parser.ParseMagnet(magnet, res.Thread.Type)
 				if parsedMagnet == nil {
@@ -496,19 +516,20 @@ func autoMatchHandler(c *gin.Context) {
 				}
 
 				cacheRecord := database.MagnetCache{
-					Infohash: parsedMagnet.Infohash,
-					Magnet:   magnet,
+					Infohash:  parsedMagnet.Infohash,
+					Magnet:    magnet,
+					CreatedAt: time.Now(),
 				}
-				_ = tx.Clauses(clause.OnConflict{
-					Columns:   []clause.Column{{Name: "infohash"}},
-					UpdateAll: true,
-				}).Create(&cacheRecord)
+				cacheBytes, _ := database.EncodeGob(cacheRecord)
+				_ = magnetBucket.Put([]byte(parsedMagnet.Infohash), cacheBytes)
 
 				stream := database.Stream{
-					TmdbID:   res.Result.TmdbID,
-					Infohash: parsedMagnet.Infohash,
-					Quality:  parsedMagnet.Quality,
-					Language: parsedMagnet.Language,
+					TmdbID:    res.Result.TmdbID,
+					Infohash:  parsedMagnet.Infohash,
+					Quality:   parsedMagnet.Quality,
+					Language:  parsedMagnet.Language,
+					CreatedAt: time.Now(),
+					UpdatedAt: time.Now(),
 				}
 
 				if res.Thread.Type == "series" {
@@ -527,19 +548,17 @@ func autoMatchHandler(c *gin.Context) {
 						endVal := parsedMagnet.EpisodeEnd
 						stream.Episode = &startVal
 						stream.EpisodeEnd = &endVal
-					} else {
-						stream.Episode = nil
-						stream.EpisodeEnd = nil
 					}
 				}
 
-				_ = tx.Clauses(clause.OnConflict{
-					Columns:   []clause.Column{{Name: "tmdb_id"}, {Name: "season"}, {Name: "episode"}, {Name: "infohash"}},
-					UpdateAll: true,
-				}).Create(&stream)
+				newStreams = append(newStreams, stream)
 			}
 
-			_ = database.DeleteFailedThread(res.Thread.ThreadHash, tx)
+			if len(newStreams) > 0 {
+				_ = database.CreateStreams(tx, newStreams)
+			}
+
+			_ = database.DeleteFailedThread(tx, res.Thread.ThreadHash)
 			return nil
 		})
 
@@ -562,7 +581,6 @@ func autoMatchHandler(c *gin.Context) {
 		}
 	}
 
-	// Real-time progress end log
 	utils.Logger.Info().
 		Int("success_count", successCount).
 		Int("fail_count", failCount).
@@ -596,8 +614,6 @@ func cinemetaSearchHandler(c *gin.Context) {
 	c.JSON(http.StatusOK, items)
 }
 
-// ── Appended Restored Admin Handlers ──
-
 func cachePendingHandler(c *gin.Context) {
 	var body struct {
 		ThreadID int    `json:"threadId"`
@@ -608,19 +624,26 @@ func cachePendingHandler(c *gin.Context) {
 		return
 	}
 
-	var lock database.DebridCacheLock
-	errLock := database.DB.First(&lock, "infohash = ?", body.Infohash).Error
-	if errLock == nil {
+	// Normalize lookup string to lowercase to align with on-disk Bbolt structures
+	normalizedInfohash := strings.ToLower(body.Infohash)
+
+	if database.IsDebridCacheLocked(normalizedInfohash) {
 		c.JSON(http.StatusConflict, gin.H{"message": "Cache operation already initiated / locked for this infohash."})
 		return
 	}
 
-	// Create duplicate lock mapping
-	_ = database.DB.Create(&database.DebridCacheLock{Infohash: body.Infohash})
+	_ = database.CreateDebridCacheLock(normalizedInfohash)
 
-	// Retrieve original magnet to add to debrid asynchronously
+	// Retrieve original magnet from local cache database
 	var cache database.MagnetCache
-	errCache := database.DB.Where("infohash = ?", body.Infohash).First(&cache).Error
+	errCache := database.DB.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("magnet_cache"))
+		data := b.Get([]byte(normalizedInfohash))
+		if data == nil {
+			return bolt.ErrBucketNotFound
+		}
+		return database.DecodeGob(data, &cache)
+	})
 	if errCache != nil {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Original magnet not found in cache database"})
 		return
@@ -629,38 +652,34 @@ func cachePendingHandler(c *gin.Context) {
 	cfg := config.Load()
 	p := debrid.GetProvider(cfg)
 	if !p.IsEnabled() {
-		c.JSON(http.StatusBadRequest, gin.H{"error": "Debrid provider is currently disabled"})
+		writeJSON(c, http.StatusBadRequest, gin.H{"error": "Debrid provider is currently disabled"})
 		return
 	}
 
-	// Secure the asynchronous background caching goroutine with recovery handling to prevent server crashes.
-	// Uses background context as the original request context will be canceled when the HTTP request terminates!
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
 				utils.Logger.Error().
 					Interface("panic", r).
-					Str("infohash", body.Infohash).
+					Str("infohash", normalizedInfohash).
 					Msg("Unhandled panic rescued inside asynchronous cachePendingHandler worker goroutine.")
-				_ = database.DB.Where("infohash = ?", body.Infohash).Delete(&database.DebridCacheLock{})
+				_ = database.DeleteDebridCacheLock(normalizedInfohash)
 			}
 		}()
 
-		utils.Logger.Info().Str("infohash", body.Infohash).Msg("Asynchronously caching pending magnet in debrid...")
+		utils.Logger.Info().Str("infohash", normalizedInfohash).Msg("Asynchronously caching pending magnet in debrid...")
 		_, errAdd := p.AddAndSelect(context.Background(), cache.Magnet)
 		if errAdd != nil {
-			utils.Logger.Error().Err(errAdd).Str("infohash", body.Infohash).Msg("Asynchronous debrid cache-add failed.")
-			// Delete lock so admin can try again
-			_ = database.DB.Where("infohash = ?", body.Infohash).Delete(&database.DebridCacheLock{})
+			utils.Logger.Error().Err(errAdd).Str("infohash", normalizedInfohash).Msg("Asynchronous debrid cache-add failed.")
+			_ = database.DeleteDebridCacheLock(normalizedInfohash)
 		} else {
-			utils.Logger.Info().Str("infohash", body.Infohash).Msg("Magnet submitted to debrid successfully.")
+			utils.Logger.Info().Str("infohash", normalizedInfohash).Msg("Magnet submitted to debrid successfully.")
 		}
 	}()
 
 	c.JSON(http.StatusOK, gin.H{"message": "Cache operation triggered in background successfully!"})
 }
 
-// rdCheckHandler queries the local GORM database only to check the download cache status of torrent files.
 func rdCheckHandler(c *gin.Context) {
 	var body struct {
 		Hashes []string `json:"hashes"`
@@ -675,15 +694,22 @@ func rdCheckHandler(c *gin.Context) {
 		result[strings.ToLower(h)] = false
 	}
 
-	if len(body.Hashes) > 0 {
-		var records []database.DebridTorrent
-		err := database.DB.Where("infohash IN ? AND status = ?", body.Hashes, "downloaded").Find(&records).Error
-		if err == nil {
-			for _, r := range records {
-				result[r.Infohash] = true
+	_ = database.DB.View(func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("debrid_torrents"))
+		for _, h := range body.Hashes {
+			hLower := strings.ToLower(h)
+			data := b.Get([]byte(hLower))
+			if data != nil {
+				var dt database.DebridTorrent
+				if errDec := database.DecodeGob(data, &dt); errDec == nil {
+					if dt.Status == "downloaded" {
+						result[hLower] = true
+					}
+				}
 			}
 		}
-	}
+		return nil
+	})
 
 	c.JSON(http.StatusOK, gin.H{"cached": result})
 }
@@ -706,20 +732,30 @@ func retryParseHandler(c *gin.Context) {
 		return
 	}
 
-	// Remove from failures list
-	_ = database.DeleteFailedThread(body.ThreadHash, nil)
+	_ = database.DeleteFailedThread(nil, body.ThreadHash)
 
 	orchestrator.UpdateDashboardCache()
 	c.JSON(http.StatusOK, gin.H{"message": "Thread deleted from parse failures list. It will be re-processed on next crawl."})
 }
 
 func recentHandler(c *gin.Context) {
-	// Paginated linked threads and parse failures list
-	var linked []database.Thread
-	_ = database.DB.Where("status = ?", "linked").Order("updated_at DESC").Limit(15).Find(&linked)
+	pageStr := c.DefaultQuery("page", "1")
+	limitStr := c.DefaultQuery("limit", "15")
 
-	var failures []database.FailedThread
-	_ = database.DB.Order("last_attempt DESC").Limit(15).Find(&failures)
+	page, errP := strconv.Atoi(pageStr)
+	limit, errL := strconv.Atoi(limitStr)
+	if errP != nil || page < 1 {
+		page = 1
+	}
+	if errL != nil || limit < 1 {
+		limit = 15
+	}
+
+	offset := (page - 1) * limit
+
+	// Fetch database-paginated rows directly from BoltDB View transactions
+	linked, _ := database.GetRecentLinkedThreadsPaginated(offset, limit)
+	failures, _ := database.GetFailedThreadsPaginated(offset, limit)
 
 	type activity struct {
 		Title     string `json:"title"`

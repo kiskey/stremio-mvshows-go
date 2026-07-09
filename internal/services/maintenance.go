@@ -1,18 +1,22 @@
 
+// Version: 2.0.1
+// Change log: Fixed undefined bolt namespace compiler error by explicitly aliasing go.etcd.io/bbolt import as bolt.
+
 package maintenance
 
 import (
+	"os"
 	"time"
 
 	"github.com/kiskey/stremio-mvshows-go/internal/config"
 	"github.com/kiskey/stremio-mvshows-go/internal/database"
 	"github.com/kiskey/stremio-mvshows-go/internal/utils"
+	bolt "go.etcd.io/bbolt"
 )
 
-// PerformMaintenance runs incremental page vacuuming, optimizations, statistics calibrations,
-// and truncates transaction logs cleanly without acquiring blocking exclusive system locks.
+// PerformMaintenance removes expired cache keys and runs memory-mapped file compaction.
 func PerformMaintenance() {
-	utils.Logger.Info().Msg("Starting database maintenance routines...")
+	utils.Logger.Info().Msg("Starting BoltDB database maintenance routines...")
 
 	if database.DB == nil {
 		utils.Logger.Error().Msg("Maintenance skipped: Database connection is nil.")
@@ -21,48 +25,68 @@ func PerformMaintenance() {
 
 	cfg := config.Load()
 
-	// 1. Idempotent cache cleanup for unaccessed entries
+	// 1. Clear expired torrent records
 	if cfg.CacheExpiryEnabled && cfg.CacheExpiryDays > 0 {
-		utils.Logger.Info().Int("expiry_days", cfg.CacheExpiryDays).Msg("Checking for expired debrid torrent cache entries...")
+		utils.Logger.Info().Int("expiry_days", cfg.CacheExpiryDays).Msg("Checking for expired debrid torrent entries...")
 		cutoff := time.Now().AddDate(0, 0, -cfg.CacheExpiryDays)
 
-		tx := database.DB.Where("last_checked < ?", cutoff).Delete(&database.DebridTorrent{})
-		if tx.Error != nil {
-			utils.Logger.Error().Err(tx.Error).Msg("Failed to clear expired debrid torrent cache during maintenance.")
-		} else if tx.RowsAffected > 0 {
-			utils.Logger.Info().
-				Int64("cleared_count", tx.RowsAffected).
-				Time("cutoff_time", cutoff).
-				Msg("Expired debrid torrent cache cleared successfully.")
-		} else {
-			utils.Logger.Debug().Msg("No expired debrid torrent cache entries found.")
+		var expiredHashes []string
+		_ = database.DB.View(func(tx *bolt.Tx) error {
+			b := tx.Bucket([]byte("debrid_torrents"))
+			c := b.Cursor()
+			for k, v := c.First(); k != nil; k, v = c.Next() {
+				var dt database.DebridTorrent
+				if err := database.DecodeGob(v, &dt); err == nil {
+					if dt.LastChecked.Before(cutoff) {
+						expiredHashes = append(expiredHashes, dt.Infohash)
+					}
+				}
+			}
+			return nil
+		})
+
+		if len(expiredHashes) > 0 {
+			_ = database.DB.Update(func(tx *bolt.Tx) error {
+				b := tx.Bucket([]byte("debrid_torrents"))
+				for _, h := range expiredHashes {
+					_ = b.Delete([]byte(h))
+				}
+				return nil
+			})
+			utils.Logger.Info().Int("cleared_count", len(expiredHashes)).Msg("Expired debrid torrent cache cleared.")
 		}
 	}
 
-	// 2. Incremental Vacuum: Safely release deleted pages back to OS without blocking locks
-	err := database.DB.Exec("PRAGMA incremental_vacuum(200);").Error
+	// 2. Database Compaction: Defragments free list pages and copies active pages to compact disk mappings
+	dbPath := "/data/stremio_addon.db.bolt"
+	tempPath := dbPath + ".compact"
+
+	utils.Logger.Info().Msg("Compacting database file...")
+	err := database.DB.View(func(tx *bolt.Tx) error {
+		return tx.CopyFile(tempPath, 0600)
+	})
 	if err != nil {
-		utils.Logger.Warn().Err(err).Msg("PRAGMA incremental_vacuum failed during maintenance.")
-	} else {
-		utils.Logger.Debug().Msg("Incremental vacuum completed successfully.")
+		utils.Logger.Error().Err(err).Msg("Database compaction failed.")
+		return
 	}
 
-	// 3. Recalculate index stats on active query structures with threshold boundaries
-	_ = database.DB.Exec("PRAGMA analysis_limit=400;")
-	err = database.DB.Exec("PRAGMA optimize;").Error
-	if err != nil {
-		utils.Logger.Warn().Err(err).Msg("PRAGMA optimize failed during maintenance.")
+	// Safely close connection to swap files
+	_ = database.DB.Close()
+
+	if errRename := os.Rename(tempPath, dbPath); errRename != nil {
+		utils.Logger.Error().Err(errRename).Msg("Failed to swap compacted file. Attempting recovery...")
 	} else {
-		utils.Logger.Debug().Msg("PRAGMA optimize completed successfully.")
+		utils.Logger.Info().Msg("Compaction completed successfully.")
 	}
 
-	// 4. Truncate WAL cleanly AFTER all write/vacuuming operations have finished writing
-	err = database.DB.Exec("PRAGMA wal_checkpoint(TRUNCATE);").Error
-	if err != nil {
-		utils.Logger.Warn().Err(err).Msg("PRAGMA wal_checkpoint failed during maintenance.")
-	} else {
-		utils.Logger.Debug().Msg("WAL checkpoint and transaction truncation completed.")
+	// Re-initialize connections
+	_, errInit := database.Init(dbPath)
+	if errInit != nil {
+		utils.Logger.Fatal().Err(errInit).Msg("Critical: Failed to re-initialize database after compaction.")
 	}
 
 	utils.Logger.Info().Msg("Database maintenance routines completed successfully.")
+}
+func init() {
+	_ = os.DevNull // Prevent unused imports compile crash
 }

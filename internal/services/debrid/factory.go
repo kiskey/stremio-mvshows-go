@@ -1,18 +1,20 @@
-// Version: 1.0.1
-// Change log: Enhanced CheckCached to run both external provider API cache-lookups and local database status overrides to ensure consistent instant playback badges.
+
+// Version: 2.0.1
+// Change log: Fixed undefined bolt namespace compiler error by explicitly aliasing go.etcd.io/bbolt import as bolt.
 
 package debrid
 
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"time"
 
 	"github.com/kiskey/stremio-mvshows-go/internal/config"
 	"github.com/kiskey/stremio-mvshows-go/internal/database"
 	"github.com/kiskey/stremio-mvshows-go/internal/utils"
-	"gorm.io/gorm"
+	bolt "go.etcd.io/bbolt"
 )
 
 var (
@@ -150,8 +152,7 @@ func (d *disabledProvider) GetCachedFileInfo(ctx context.Context, hash, fileName
 // ── Unified CheckCached Fallback Orchestrator ──
 
 // CheckCached implements unified cache checks for torrent lists.
-// Calls the live provider CheckCached endpoint (e.g. TorBox) and falls back on SQLite DB (e.g. Real-Debrid).
-func CheckCached(hashes []string, db *gorm.DB) map[string]bool {
+func CheckCached(hashes []string, _ interface{}) map[string]bool {
 	cfg := config.Load()
 	p := GetProvider(cfg)
 
@@ -167,22 +168,28 @@ func CheckCached(hashes []string, db *gorm.DB) map[string]bool {
 				normalized[h] = info.Cached
 			}
 		} else {
-			utils.Logger.Warn().Err(err).Msg("Provider CheckCached failed, falling back to local SQLite database cache status.")
+			utils.Logger.Warn().Err(err).Msg("Provider CheckCached failed, falling back to local database status.")
 		}
 	}
 
-	// SQLite Local DB Fallback & Override path:
-	// If a torrent is already completely downloaded and tracked locally, force mark it as cached!
-	if db != nil && len(hashes) > 0 {
-		var records []database.DebridTorrent
-		err := db.Where("infohash IN ?", hashes).Find(&records).Error
-		if err == nil {
-			for _, r := range records {
-				if r.Status == "downloaded" {
-					normalized[r.Infohash] = true
+	// BoltDB Local Override check
+	if database.DB != nil && len(hashes) > 0 {
+		_ = database.DB.View(func(tx *bolt.Tx) error {
+			b := tx.Bucket([]byte("debrid_torrents"))
+			for _, h := range hashes {
+				hLower := strings.ToLower(h)
+				data := b.Get([]byte(hLower))
+				if data != nil {
+					var dt database.DebridTorrent
+					if errDec := database.DecodeGob(data, &dt); errDec == nil {
+						if dt.Status == "downloaded" {
+							normalized[dt.Infohash] = true
+						}
+					}
 				}
 			}
-		}
+			return nil
+		})
 	}
 
 	return normalized

@@ -1,3 +1,7 @@
+
+// Version: 2.0.5
+// Change log: Removed all SQLite GORM connection logging pools and initialization pathways, booting the primary process directly into the bbolt transactional B+ Tree memory-mapped index layer.
+
 package main
 
 import (
@@ -14,7 +18,6 @@ import (
 	"github.com/kiskey/stremio-mvshows-go/internal/services/tracker"
 	"github.com/kiskey/stremio-mvshows-go/internal/utils"
 	"github.com/robfig/cron/v3"
-	gormlogger "gorm.io/gorm/logger"
 )
 
 func main() {
@@ -33,27 +36,21 @@ func main() {
 	utils.Init(cfg.LogLevel)
 	utils.Logger.Info().Msg("Bootstrap sequence initiated...")
 
-	// 3. Map global log levels to GORM SQLite log levels
-	gormLevel := gormlogger.Error
-	if cfg.LogLevel == "debug" {
-		gormLevel = gormlogger.Info
-	}
-
-	// 4. Initialize SQLite GORM Database
-	dbPath := "/data/stremio_addon.db"
-	_, err := database.Init(dbPath, gormLevel)
+	// 3. Initialize Bbolt Memory-Mapped Key-Value Engine
+	dbPath := "/data/stremio_addon.db.bolt"
+	_, err := database.Init(dbPath)
 	if err != nil {
 		utils.Logger.Fatal().Err(err).Str("path", dbPath).Msg("Critical database initialization failure.")
 	}
-	utils.Logger.Info().Str("path", dbPath).Msg("SQLite database connection verified and schemas synchronized.")
+	utils.Logger.Info().Str("path", dbPath).Msg("Bbolt transactional key-value store initialized successfully.")
 
-	// 5. Build initial trackers list cache
+	// 4. Build initial trackers list cache
 	tracker.FetchAndCacheTrackers(cfg)
 
-	// 6. Generate starting dashboard state cache
+	// 5. Generate starting dashboard state cache
 	orchestrator.UpdateDashboardCache()
 
-	// 7. Configure background cron scheduler using UTC timezone and panic recovery chain
+	// 6. Configure background cron scheduler using UTC timezone and panic recovery chain
 	c := cron.New(
 		cron.WithLocation(time.UTC),
 		cron.WithChain(cron.Recover(cron.PrintfLogger(log.New(os.Stdout, "[Cron] ", log.LstdFlags)))),
@@ -91,14 +88,14 @@ func main() {
 	c.Start()
 	utils.Logger.Info().Msg("Background cron scheduler started successfully.")
 
-	// 8. Fire initial background crawl workflow on cold start to immediately sync fresh releases
+	// 7. Fire initial background crawl workflow on cold start to immediately sync fresh releases
 	go func() {
 		// Small delay to let the HTTP server launch first
 		time.Sleep(3 * time.Second)
 		orchestrator.RunFullWorkflow(cfg)
 	}()
 
-	// 9. Bootstrap and launch primary Gin HTTP Server blocking on the main thread
+	// 8. Bootstrap and launch primary Gin HTTP Server blocking on the main thread
 	router := api.SetupRouter()
 	portStr := ":" + strconv.Itoa(cfg.Port)
 	utils.Logger.Info().Str("port", portStr).Msg("HTTP Server starting...")
