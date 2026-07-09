@@ -1,6 +1,6 @@
 
-// Version: 2.0.6
-// Change log: Refactored recentHandler to read page and limit query parameters, supporting database-level slice limits. Normalized cache lock hashes using lowercase parsing on inbound parameters.
+// Version: 2.0.7
+// Change log: Corrected variable referencing typos inside cachePendingHandler background scope block, replacing "normalized\"" with "normalizedInfohash" to resolve syntax and compilation errors.
 
 package api
 
@@ -670,10 +670,10 @@ func cachePendingHandler(c *gin.Context) {
 		utils.Logger.Info().Str("infohash", normalizedInfohash).Msg("Asynchronously caching pending magnet in debrid...")
 		_, errAdd := p.AddAndSelect(context.Background(), cache.Magnet)
 		if errAdd != nil {
-			utils.Logger.Error().Err(errAdd).Str("infohash", normalized").Msg("Asynchronous debrid cache-add failed.")
-			_ = database.DeleteDebridCacheLock(normalized)
+			utils.Logger.Error().Err(errAdd).Str("infohash", normalizedInfohash).Msg("Asynchronous debrid cache-add failed.")
+			_ = database.DeleteDebridCacheLock(normalizedInfohash)
 		} else {
-			utils.Logger.Info().Str("infohash", normalized).Msg("Magnet submitted to debrid successfully.")
+			utils.Logger.Info().Str("infohash", normalizedInfohash).Msg("Magnet submitted to debrid successfully.")
 		}
 	}()
 
