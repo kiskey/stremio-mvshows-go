@@ -1,6 +1,6 @@
 
-// Version: 2.0.6
-// Change log: Fixed undefined bbolt.BucketStats struct fields by matching the official CNCF Bbolt package API fields (Alloc vs Allocated, and logical PageN summation).
+// Version: 2.0.7
+// Change log: Removed the invalid InlineAlloc field from the BucketStats in-use bytes equation, relying on LeafInuse which natively includes inlined bucket bytes as per official Bbolt specifications.
 
 package main
 
@@ -150,8 +150,8 @@ func main() {
 			stats := b.Stats()
 			totalKeys += stats.KeyN
 			
-			// Calculate space actually occupied by GOB byte structures
-			inuse := int64(stats.BranchInuse) + int64(stats.LeafInuse) + int64(stats.InlineAlloc)
+			// Calculate space actually occupied. LeafInuse natively includes inline child bucket bytes.
+			inuse := int64(stats.BranchInuse) + int64(stats.LeafInuse)
 			allocated := int64(stats.BranchAlloc) + int64(stats.LeafAlloc)
 
 			totalInuseBytes += inuse
