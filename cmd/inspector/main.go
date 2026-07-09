@@ -1,6 +1,6 @@
 
-// Version: 2.0.4
-// Change log: Restructured code file by placing helper hash functions at the top, standardizing redundant counts variables, and explicitly declaring missing imports (strconv and time) to resolve compiler blocks.
+// Version: 2.0.5
+// Change log: Added structural database page allocation statistics profiling, calculating physical on-disk sizes vs logical in-use space to prove unfragmented page density natively.
 
 package main
 
@@ -47,6 +47,16 @@ func newGenerateThreadHash(title string) string {
 	normalized = strings.Join(words, " ")
 	h := sha256.Sum256([]byte(normalized))
 	return hex.EncodeToString(h[:])
+}
+
+func formatBytes(bytes int64) string {
+	if bytes < 1024 {
+		return fmt.Sprintf("%d B", bytes)
+	}
+	if bytes < 1024*1024 {
+		return fmt.Sprintf("%.2f KB", float64(bytes)/1024)
+	}
+	return fmt.Sprintf("%.2f MB", float64(bytes)/1024/1024)
 }
 
 func main() {
@@ -126,7 +136,54 @@ func main() {
 	})
 	log.Printf("  - Orphaned Catalog Keys Found: %d indexes\n", len(orphanedIndexKeys))
 
-	// 3. Optional Maintenance / Repair Transition Phase
+	// 3. Stats Phase: Print exact page allocation and logical sizing breakdown (Resolves Size verification)
+	log.Println("==================================================")
+	log.Println("► BBOLT PHYSICAL FILE PAGE STATS REPORT")
+	log.Println("==================================================")
+
+	var totalKeys int
+	var totalInuseBytes int64
+	var totalAllocatedBytes int64
+
+	_ = db.View(func(tx *bolt.Tx) error {
+		return tx.ForEach(func(name []byte, b *bolt.Bucket) error {
+			stats := b.Stats()
+			totalKeys += stats.KeyN
+			
+			// Calculate space actually occupied by serialization byte streams
+			inuse := int64(stats.BranchInuse) + int64(stats.LeafInuse) + int64(stats.InlineAllocated)
+			allocated := int64(stats.BranchAllocated) + int64(stats.LeafAllocated)
+
+			totalInuseBytes += inuse
+			totalAllocatedBytes += allocated
+
+			log.Printf("Bucket: %q\n", string(name))
+			log.Printf("  - KeyCount:            %d keys\n", stats.KeyN)
+			log.Printf("  - Total Pages:         %d pages (including %d overflow pages)\n", stats.PageCount, stats.OverflowPageCount)
+			log.Printf("  - Logical Space InUse: %s (Allocated space: %s)\n", formatBytes(inuse), formatBytes(allocated))
+			if allocated > 0 {
+				log.Printf("  - Page Fill Ratio:     %.1f%%\n", (float64(inuse)/float64(allocated))*100)
+			}
+			return nil
+		})
+	})
+
+	var diskSize int64
+	if stat, err := os.Stat(*dbPath); err == nil {
+		diskSize = stat.Size()
+	}
+
+	log.Println("--------------------------------------------------")
+	log.Printf("NATIVE PERFORMANCE SUMMARY:\n")
+	log.Printf("  - Overall Keys Tracked:         %d entries\n", totalKeys)
+	log.Printf("  - Logical Content In-Use:       %s\n", formatBytes(totalInuseBytes))
+	log.Printf("  - Virtual Mapped Allocations:   %s\n", formatBytes(totalAllocatedBytes))
+	log.Printf("  - Physical File Size on Disk:   %s\n", formatBytes(diskSize))
+	if diskSize > 0 {
+		log.Printf("  - Total Storage Efficiency:     %.1f%%\n", (float64(totalInuseBytes)/float64(diskSize))*100)
+	}
+
+	// 4. Maintenance / Repair Transition Phase
 	if !*repair && legacyHashCount == 0 && len(duplicateTitles) == 0 && len(orphanedIndexKeys) == 0 {
 		log.Println("==================================================")
 		log.Println("► VERDICT: [CLEAN] - No structural anomalies found in database.")
@@ -241,7 +298,7 @@ func main() {
 
 	log.Println("Database repair and hash migration transaction committed successfully!")
 
-	// 4. Shrink the Database on disk via compaction
+	// 5. Shrink the Database on disk via compaction
 	log.Println("Shrinking database file size via sequential compaction...")
 	compactPath := *dbPath + ".compacted"
 	_ = os.Remove(compactPath)
@@ -264,4 +321,8 @@ func main() {
 	log.Println("==================================================")
 	log.Println("► VERDICT: [SUCCESS] - Database converted, defragmented, and compacted.")
 	log.Println("==================================================")
+}
+
+func init() {
+	_ = time.Now // Prevent unused imports compile crash
 }
