@@ -1,6 +1,6 @@
 
-// Version: 2.0.4
-// Change log: Implemented database-side offset and limit pagination for GetRecentLinkedThreads and GetFailedThreads to support high-speed admin log list loading. Normalized lock and debrid check lookups using lowercase string conversions.
+// Version: 2.0.5
+// Change log: Restored the unpaginated GetFailedThreads() database view helper alongside GetFailedThreadsPaginated to resolve undefined reference errors inside failuresHandler while keeping optimized pagination intact.
 
 package database
 
@@ -394,6 +394,26 @@ func LogFailedThread(tx *bolt.Tx, hash, rawTitle, reason string) error {
 		}
 		return b.Put([]byte(hash), ftBytes)
 	})
+}
+
+// GetFailedThreads retrieves all recorded parsing/workflow failures (Unpaginated standard list).
+func GetFailedThreads() ([]FailedThread, error) {
+	var list []FailedThread
+	err := runView(nil, func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("failed_threads"))
+		c := b.Cursor()
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			var ft FailedThread
+			if err := DecodeGob(v, &ft); err == nil {
+				list = append(list, ft)
+			}
+		}
+		return nil
+	})
+	sort.Slice(list, func(i, j int) bool {
+		return list[i].LastAttempt.After(list[j].LastAttempt)
+	})
+	return list, err
 }
 
 // GetFailedThreadsPaginated compiles failing entries sequentially inside slice offsets
