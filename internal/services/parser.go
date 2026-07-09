@@ -1,5 +1,5 @@
-// Version: 1.6.9
-// Change log: Unified and restored parseCache caching variables alongside extractInfohash and ExtractMagnetDisplayName helper functions to resolve undefined compiler errors; verified compilation status.
+// Version: 1.7.0
+// Change log: Hoisted and pre-compiled every single regular expression globally to resolve undefined compilation errors; optimized performance to absolute zero runtime regular expression allocations.
 
 package parser
 
@@ -127,9 +127,10 @@ var (
 	channelRegex      = regexp.MustCompile(`\b(?:ddp)?\d\.\d(?:\.\d)?\b`)
 	sizeCaptureRegex  = regexp.MustCompile(`(?i)\b\d+(?:\.\d+)?\s*(?:GB|MB|KB)\b`)
 
-	// Standard year limits
+	// Standard year limits & checks
 	wrappedYearRegex = regexp.MustCompile(`[\(\[]((?:19|20)\d{2})[\)\]]`)
 	plainYearRegex   = regexp.MustCompile(`\b((?:19|20)\d{2})\b`)
+	yearRe           = regexp.MustCompile(`[\(\[]((?:19|20)\d{2})[\)\]]`)
 
 	// Language models
 	regionalLanguagePatterns = []struct {
@@ -236,6 +237,14 @@ var (
 	audioChannels71Re = regexp.MustCompile(`\b7\.1\b`)
 	audioChannels51Re = regexp.MustCompile(`\b5\.1\b`)
 	audioChannels20Re = regexp.MustCompile(`\b2\.0\b`)
+
+	// Fallbacks
+	fallbackYearRegex = regexp.MustCompile(`\s*[\(\[]?\d{4}[\)\]]?`)
+
+	// Pure RE2-compliant punctuation patterns using double-escaped format
+	cleanBracketsRe    = regexp.MustCompile(`[()\[\]{}]`)
+	cleanSpacesPunctRe = regexp.MustCompile("\\s+[,<>\\/\\\\;:'\"|`~!?@$%^*\\_\\-=]\\s+")
+	cleanSuffixPunctRe = regexp.MustCompile(`[':\?,]([sm]\s|\s|$)`)
 
 	// Bound patterns indicators list
 	compiledBoundaryPatterns []*regexp.Regexp
@@ -795,8 +804,7 @@ func filterTorrentNoise(title string, originalTitle string) string {
 		cleanOriginal = bracketRegex.ReplaceAllString(cleanOriginal, " ")
 		cleanOriginal = collapseSpaces(cleanOriginal)
 		
-		yearRegex := regexp.MustCompile(`\s*[\(\[]?\d{4}[\)\]]?`)
-		cleanOriginal = yearRegex.ReplaceAllString(cleanOriginal, "")
+		cleanOriginal = fallbackYearRegex.ReplaceAllString(cleanOriginal, "")
 		cleanOriginal = strings.Trim(cleanOriginal, " .-_[]()/\\")
 		
 		if cleanOriginal != "" {
