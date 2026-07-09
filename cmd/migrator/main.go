@@ -1,5 +1,5 @@
-// Version: 2.1.0
-// Change log: Overhauled GORM migration procedures to clean up SQLite titles and strip trackers from magnet caches dynamically on insertion (Problems 4, 11).
+// Version: 2.2.0
+// Change log: Preserved full JSON metadata fields (migrated sm.Data verbatim instead of writing empty defaults) and routed insertion through database.CreateOrUpdateThread to avoid indices drifts [report.md].
 
 package main
 
@@ -194,19 +194,13 @@ func main() {
 	if err := sqlDB.Find(&sqliteThreads).Error; err == nil {
 		log.Printf("Loaded %d thread records.\n", len(sqliteThreads))
 		errTx := boltDB.Update(func(tx *bolt.Tx) error {
-			threadBucket := tx.Bucket([]byte("threads"))
-			indexBucket := tx.Bucket([]byte("catalog_index"))
-			threadIdxBucket := tx.Bucket([]byte("tmdb_thread_index"))
-
 			for _, st := range sqliteThreads {
-				// Re-parse SQLite raw titles to ensure they are migrated cleanly
 				prTitle := parser.ParseRelease(st.RawTitle, st.Type)
 				cleanTitle := st.CleanTitle
 				if prTitle.IsValid && prTitle.CleanTitle != "" {
 					cleanTitle = prTitle.CleanTitle
 				}
 
-				// Compact magnets during offline conversion
 				var cleanMags []string
 				for _, m := range st.MagnetURIs {
 					cleanMags = append(cleanMags, parser.StripTrackersFromMagnet(m))
@@ -230,21 +224,11 @@ func main() {
 					CreatedAt:         st.CreatedAt,
 					UpdatedAt:         st.UpdatedAt,
 				}
-				bytesData, _ := database.EncodeGob(thread)
-				_ = threadBucket.Put([]byte(thread.ThreadHash), bytesData)
 
-				if thread.Status == "linked" && thread.Catalog != "" {
-					postedTime := time.Now()
-					if thread.PostedAt != nil {
-						postedTime = *thread.PostedAt
-					}
-					inverseTime := 9999999999 - postedTime.Unix()
-					indexKey := fmt.Sprintf("cat:%s:%s:%010d:%s", thread.Catalog, thread.Type, inverseTime, thread.ThreadHash)
-					_ = indexBucket.Put([]byte(indexKey), []byte(thread.ThreadHash))
-				}
-
-				if thread.Status == "linked" && thread.TmdbID != nil {
-					_ = threadIdxBucket.Put([]byte(*thread.TmdbID), []byte(thread.ThreadHash))
+				// Avoid index drift by utilizing unified database write pathways [report.md]
+				err = database.CreateOrUpdateThread(tx, &thread)
+				if err != nil {
+					return err
 				}
 			}
 			return nil
@@ -265,7 +249,7 @@ func main() {
 					TmdbID:    sm.TmdbID,
 					ImdbID:    sm.ImdbID,
 					Year:      sm.Year,
-					Data:      "{}",
+					Data:      sm.Data, // FIXED: Migrates data instead of discarding [report.md]
 					CreatedAt: sm.CreatedAt,
 					UpdatedAt: sm.UpdatedAt,
 				}
