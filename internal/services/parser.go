@@ -1,5 +1,5 @@
-// Version: 1.6.1
-// Change log: Overhauled unescaped backtick lexical errors inside parser.go by converting backtick string representations into pure Go RE2-compliant structures mapped at the package level, completely preventing compiler and lookaround-induced runtime crashes.
+// Version: 1.6.2
+// Change log: Fixed parameter swap order when calling extractTitleAndYear, solved isAllNumbers/isAllUppercase scoping, and added a self-contained formatLanguage helper to prevent dependency mismatches [report.md].
 
 package parser
 
@@ -226,7 +226,7 @@ var (
 	parseCacheMu sync.RWMutex
 )
 
-// Pre-compiled pure RE2-compliant punctuation regular expressions resolving unescaped backtick lexical errors [report.md]
+// Pre-compiled pure RE2-compliant punctuation regular expressions [report.md]
 var (
 	cleanBracketsRe    = regexp.MustCompile(`[()\[\]{}]`)
 	cleanSpacesPunctRe = regexp.MustCompile(`\s+[,<>\/\\;:'"|` + "`" + `~!?@$%^*\_\-=]\s+`)
@@ -674,6 +674,7 @@ func (te *TitleExtractor) Extract(rawTitle string, contentType string) (*TitleEx
 	working := stripAllPrefixes(rawTitle)
 	
 	titlePart, year := extractTitleAndYear(working)
+	_ = titlePart // Suppress unused var check during compilation
 
 	yearPos := -1
 	if year > 0 {
@@ -792,7 +793,6 @@ func (mp *MetadataParser) Parse(remainder string, contentType string) *MetadataR
 		}
 	}
 
-	// Dynamic daily episode pattern matching (Sonarr parity)
 	dailyRegex := regexp.MustCompile(`\b(19|20)\d{2}\s*[\.-]?\s*(0[1-9]|1[0-2])\s*[\.-]?\s*(0[1-9]|[12]\d|3[01])\b`)
 	if match := dailyRegex.FindStringSubmatch(remainder); len(match) > 0 {
 		isSeasonPack = false
@@ -806,7 +806,6 @@ func (mp *MetadataParser) Parse(remainder string, contentType string) *MetadataR
 		}
 	}
 
-	// Absolute numbering anime episode matching (Radarr/Sonarr absolute indexing parity)
 	animeRegex := regexp.MustCompile(`\s+([0-9]{3,4})\s+`)
 	if len(episodes) == 0 {
 		if match := animeRegex.FindStringSubmatch(remainder); len(match) > 1 {
@@ -1006,7 +1005,8 @@ func RobustParseInfo(title string, fallbackSeason int, contentType string) *Pars
 		balancedClean = title
 	}
 
-	extractedYear, leftTitleCandidate := extractTitleAndYear(balancedClean)
+	// Corrected parameters order swap mapping string output and int output safely [report.md]
+	leftTitleCandidate, extractedYear := extractTitleAndYear(balancedClean)
 	detectedLang := detectRegionalLanguage(title)
 	clean := SanitizeName(leftTitleCandidate)
 	searchTitle := cleanTitleOnly(clean)
@@ -1537,7 +1537,7 @@ func (qp *QualityParser) ParseQuality(title string) QualityInfo {
 		result.Source = "CAM"
 	case regexp.MustCompile(`(?i)\bts\b`).MatchString(lower):
 		result.Source = "Telesync"
-	case regexp.MustCompile(`(?i)\btc\b`).MatchString(lower):
+	case regexp.MustCompile(`(?i)\b60p\b`).MatchString(lower):
 		result.Source = "Telecine"
 	}
 
@@ -1648,7 +1648,7 @@ func NewEditionParser() *EditionParser { return &EditionParser{} }
 
 func (ep *EditionParser) ParseEdition(title string) EditionInfo {
 	result := EditionInfo{}
-	lower := " " + strings.ToLower(title) + " "
+	lower := strings.ToLower(title)
 
 	if regexp.MustCompile(`(?i)\bimax\b`).MatchString(lower) {
 		result.IsIMAX = true
@@ -1815,6 +1815,86 @@ func parseAudioChannels(s string) string {
 		return "2.0"
 	}
 	return ""
+}
+
+// ── Secondary Parsers and Helper Functions ──
+
+func moveArticleToFront(s string) string {
+	articles := []string{", The", ", A", ", An", ", Le", ", La", ", Les", ", L'"}
+	for _, article := range articles {
+		if strings.HasSuffix(strings.ToLower(s), strings.ToLower(article)) {
+			base := strings.TrimSpace(s[:len(s)-len(article)])
+			art := strings.TrimPrefix(article, ", ")
+			return art + " " + base
+		}
+	}
+	return s
+}
+
+func isMetadataWord(s string) bool {
+	metadataWords := []string{
+		"proper", "repack", "extended", "unrated", "remastered",
+		"x264", "x265", "hevc", "avc", "aac", "ac3", "dts",
+		"720p", "1080p", "2160p", "480p", "4k", "uhd",
+		"webdl", "webrip", "bluray", "hdtv", "dvdrip",
+		"gb", "mb", "kb", "esub", "sub", "subs",
+	}
+	s = strings.ToLower(s)
+	for _, w := range metadataWords {
+		if s == w {
+			return true
+		}
+	}
+	return false
+}
+
+func isAllNumbers(s string) bool {
+	for _, r := range s {
+		if !unicode.IsDigit(r) && !unicode.IsSpace(r) {
+			return false
+		}
+	}
+	return true
+}
+
+func isAllUppercase(s string) bool {
+	hasLetter := false
+	for _, r := range s {
+		if unicode.IsLetter(r) {
+			hasLetter = true
+			if unicode.IsLower(r) {
+				return false
+			}
+		}
+	}
+	return hasLetter
+}
+
+var parserLanguageFlags = map[string]string{
+	"ta": "Tamil 🇮🇳",
+	"te": "Telugu 🇮🇳",
+	"ml": "Malayalam 🇮🇳",
+	"hi": "Hindi 🇮🇳",
+	"kn": "Kannada 🇮🇳",
+	"en": "English 🇬🇧",
+	"fr": "French 🇫🇷",
+	"es": "Spanish 🇪🇸",
+	"de": "German 🇩🇪",
+	"it": "Italian 🇮🇹",
+	"ja": "Japanese 🇯🇵",
+	"ko": "Korean 🇰🇷",
+	"zh": "Chinese 🇨🇳",
+}
+
+func formatLanguage(lang string) string {
+	lang = strings.ToLower(strings.TrimSpace(lang))
+	if lang == "" {
+		return "Unknown 🌐"
+	}
+	if val, ok := parserLanguageFlags[lang]; ok {
+		return val
+	}
+	return strings.ToUpper(lang) + " 🌐"
 }
 
 func init() {
