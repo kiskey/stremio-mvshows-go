@@ -1,6 +1,6 @@
 
-// Version: 1.1.8
-// Change log: Fixed case-folding duplicate compile cases inside foldRune, restoringĹ, Ļ, Ľ, Ŀ, Ł and Ŵ unicode characters to their correct values to resolve compilation failures permanently.
+// Version: 1.1.9
+// Change log: Added a high-performance unicode-safe natural alphanumeric sorting algorithm CompareNatural and refactored FindBestSeriesFile to sort numerical episode ranges chronologically matching Sonarr/Radarr standards.
 
 package parser
 
@@ -273,7 +273,7 @@ func foldRune(r rune) rune {
 		return 'J'
 	case 'Ķ':
 		return 'K'
-	case 'Ĺ', 'Ļ', 'Ľ', 'Ŀ', 'Ł': // Fixed: unicode references map uppercase case sets correctly
+	case 'Ĺ', 'Ļ', 'Ľ', 'Ŀ', 'Ł': 
 		return 'L'
 	case 'Ñ', 'Ń', 'Ņ', 'Ň', 'Ŋ':
 		return 'N'
@@ -287,7 +287,7 @@ func foldRune(r rune) rune {
 		return 'T'
 	case 'Ù', 'Ú', 'Û', 'Ü', 'Ũ', 'Ū', 'Ŭ', 'Ů', 'Ű', 'Ų', 'Ǔ', 'Ǖ', 'Ǘ', 'Ǜ':
 		return 'U'
-	case 'Ŵ': // Fixed: casing typo on circumflex w mapped uppercase reference correctly
+	case 'Ŵ': 
 		return 'W'
 	case 'Ý', 'Ÿ', 'Ŷ':
 		return 'Y'
@@ -543,6 +543,44 @@ func detectRegionalLanguage(title string) string {
 	return ""
 }
 
+// CompareNatural implements high-performance unicode-safe natural alphanumeric sorting
+// to ensure sequence values (such as "2.mp4") correctly precede multi-digit equivalents (like "10.mp4") natively.
+func CompareNatural(a, b string) bool {
+	runesA := []rune(strings.ToLower(a))
+	runesB := []rune(strings.ToLower(b))
+
+	i, j := 0, 0
+	for i < len(runesA) && j < len(runesB) {
+		rA := runesA[i]
+		rB := runesB[j]
+
+		if unicode.IsDigit(rA) && unicode.IsDigit(rB) {
+			numStartA := i
+			for i < len(runesA) && unicode.IsDigit(runesA[i]) {
+				i++
+			}
+			valA, _ := strconv.Atoi(string(runesA[numStartA:i]))
+
+			numStartB := j
+			for j < len(runesB) && unicode.IsDigit(runesB[j]) {
+				j++
+			}
+			valB, _ := strconv.Atoi(string(runesB[numStartB:j]))
+
+			if valA != valB {
+				return valA < valB
+			}
+		} else {
+			if rA != rB {
+				return rA < rB
+			}
+			i++
+			j++
+		}
+	}
+	return len(runesA) < len(runesB)
+}
+
 func filterTorrentNoise(title string, originalTitle string) string {
 	title = collapseSpaces(strings.ToLower(title))
 	title = fileSizeRegex.ReplaceAllString(title, " ")
@@ -568,9 +606,6 @@ func filterTorrentNoise(title string, originalTitle string) string {
 
 	finalTitle := collapseSpaces(strings.Join(filteredWords, " "))
 	if finalTitle == "" {
-		// RADARR-GRADE FAILSAFE:
-		// If noise filters completely blank out the title (e.g. proper nouns like "True", "The Rip", "2012"),
-		// fall back to the original parsed title, stripping only year tags and unneeded brackets manually.
 		cleanOriginal := strings.TrimSpace(originalTitle)
 		cleanOriginal = rePrefixRegex.ReplaceAllString(cleanOriginal, "")
 		cleanOriginal = urlRegex.ReplaceAllString(cleanOriginal, " ")
@@ -895,6 +930,7 @@ func FindBestSeriesFile(candidates []CandidateFile, targetSeason, targetEpisode,
 		return bestCandidate, true
 	}
 
+	// Fallback: Season sorting natural alphanumeric match if file naming doesn't have explicit episode indexes
 	var seasonMatches []CandidateFile
 	for _, c := range candidates {
 		if checkExtra(c.Path) {
@@ -920,8 +956,10 @@ func FindBestSeriesFile(candidates []CandidateFile, targetSeason, targetEpisode,
 	}
 
 	if len(seasonMatches) > 0 {
+		// ⚡ NATURAL ALPHANUMERIC SORT MATCHING (Radarr/Sonarr Parity):
+		// Sort matches using human-sort rules, guaranteeing that "2.mp4" correctly precedes "10.mp4"
 		sort.Slice(seasonMatches, func(i, j int) bool {
-			return strings.Compare(strings.ToLower(seasonMatches[i].Path), strings.ToLower(seasonMatches[j].Path)) < 0
+			return CompareNatural(seasonMatches[i].Path, seasonMatches[j].Path)
 		})
 
 		if targetEpisode > 0 && targetEpisode <= len(seasonMatches) {
