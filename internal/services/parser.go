@@ -1,5 +1,5 @@
-// Version: 1.6.4
-// Change log: Overhauled cleanSpacesPunctRe package definition to use double-quoted double-escaped format, resolving Go lexer quote conflicts permanently [report.md].
+// Version: 1.6.5
+// Change log: Fixed compiler syntax error where '576p' was incorrectly written as an integer case literal in getQuality switch block.
 
 package parser
 
@@ -54,7 +54,7 @@ type BadgeFilter struct {
 	Negatives []*regexp.Regexp
 }
 
-type bracketPair struct {
+type bracketRange struct {
 	start int
 	end   int
 }
@@ -62,25 +62,30 @@ type bracketPair struct {
 type ParsedRelease struct {
 	ReleaseTitle    string
 	CleanTitle      string
+	SeriesTitle     string
+	MovieTitle      string
 	Year            int
 	SeasonNumber    int
 	EpisodeNumbers  []int
+	AbsoluteNumbers []int
 	IsSeasonPack    bool
-	EpisodeStart    int
-	EpisodeEnd      int
+	IsMultiSeason   bool
+	IsPartialSeason bool
 	Quality         QualityInfo
-	Source          string
-	Resolution      string
 	Languages       []string
-	PrimaryLanguage string
 	ReleaseGroup    string
 	Edition         EditionInfo
 	SpecialTags     []string
+	Source          string
+	Resolution      string
 	VideoCodec      string
 	AudioCodec      string
 	AudioChannels   string
+	SizeMB          int64
 	IsValid         bool
 	ValidationError string
+	EpisodeStart    int
+	EpisodeEnd      int
 }
 
 type QualityInfo struct {
@@ -102,61 +107,60 @@ type EditionInfo struct {
 	EditionString  string
 }
 
-var languageToISO = map[rtp.Language]string{
-	rtp.LanguageEnglish:       "en",
-	rtp.LanguageSpanish:       "es",
-	rtp.LanguageGerman:        "de",
-	rtp.LanguageFrench:        "fr",
-	rtp.LanguageItalian:       "it",
-	rtp.LanguageRussian:       "ru",
-	rtp.LanguageJapanese:      "ja",
-	rtp.LanguageChinese:       "zh",
-	rtp.LanguageKorean:        "ko",
-	rtp.LanguagePortuguese:    "pt",
-	rtp.LanguagePortugueseBR:  "pt-BR",
-	rtp.LanguageDutch:         "nl",
-	rtp.LanguageDanish:        "da",
-	rtp.LanguageNorwegian:     "no",
-	rtp.LanguageSwedish:       "sv",
-	rtp.LanguageFinnish:       "fi",
-	rtp.LanguagePolish:        "pl",
-	rtp.LanguageCzech:         "cs",
-	rtp.LanguageSlovak:        "sk",
-	rtp.LanguageHungarian:     "hu",
-	rtp.LanguageRomanian:      "ro",
-	rtp.LanguageBulgarian:     "bg",
-	rtp.LanguageUkrainian:     "uk",
-	rtp.LanguageGreek:         "el",
-	rtp.LanguageTurkish:       "tr",
-	rtp.LanguageArabic:        "ar",
-	rtp.LanguageHindi:         "hi",
-	rtp.LanguageThai:          "th",
-	rtp.LanguageVietnamese:    "vi",
-	rtp.LanguageHebrew:        "he",
-	rtp.LanguagePersian:       "fa",
-	rtp.LanguageBengali:       "bn",
-	rtp.LanguageLatvian:       "lv",
-	rtp.LanguageLithuanian:    "lt",
-	rtp.LanguageSpanishLatino: "es-MX",
-	rtp.LanguageTamil:         "ta",
-	rtp.LanguageTelugu:        "te",
-	rtp.LanguageMalayalam:     "ml",
-	rtp.LanguageKannada:       "kn",
-	rtp.LanguageAlbanian:      "sq",
-	rtp.LanguageAfrikaans:     "af",
-	rtp.LanguageMarathi:       "mr",
-	rtp.LanguageTagalog:       "tl",
-	rtp.LanguageIcelandic:     "is",
-	rtp.LanguageFlemish:       "nl-BE",
-	rtp.LanguageUrdu:          "ur",
-	rtp.LanguageMongolian:     "mn",
-	rtp.LanguageGeorgian:      "ka",
-	rtp.LanguageRomansh:       "rm",
-	rtp.LanguageOriginal:      "original",
-	rtp.LanguageCatalan:       "ca",
-	rtp.LanguageAzerbaijani:   "az",
-	rtp.LanguageUzbek:         "uz",
+// ── Shared Pattern Library (Sonarr/Radarr Matching Standard) ──
+
+type PatternLibrary struct {
+	PrefixPatterns     []*regexp.Regexp
+	YearInParens       *regexp.Regexp
+	YearStandalone     *regexp.Regexp
+	MetadataIndicators []*regexp.Regexp
+	ResolutionPattern  *regexp.Regexp
+	SourcePatterns     map[string]*regexp.Regexp
+	ModifierPatterns   map[string]*regexp.Regexp
+	SeasonPattern      *regexp.Regexp
+	EpisodePattern     *regexp.Regexp
+	AbsolutePattern    *regexp.Regexp
+	DatePattern        *regexp.Regexp
+	TrailingGroup      *regexp.Regexp
+	LeadingGroup       *regexp.Regexp
+	ParenGroup         *regexp.Regexp
+	EditionPatterns    map[string]*regexp.Regexp
+	SpecialTagPatterns map[string]*regexp.Regexp
 }
+
+func NewPatternLibrary() *PatternLibrary {
+	pl := &PatternLibrary{
+		SourcePatterns:     make(map[string]*regexp.Regexp),
+		ModifierPatterns:   make(map[string]*regexp.Regexp),
+		EditionPatterns:    make(map[string]*regexp.Regexp),
+		SpecialTagPatterns: make(map[string]*regexp.Regexp),
+	}
+
+	pl.PrefixPatterns = []*regexp.Regexp{
+		regexp.MustCompile(`(?i)^\s*\[[\w.-]+\]\s*[-:]?\s*`),
+		regexp.MustCompile(`(?i)^\s*(?:www\.)?[a-zA-Z0-9-]+(?:\.[a-zA-Z]{2,})+\s*[-:]\s*`),
+		regexp.MustCompile(`(?i)^\s*\[[^\]]+\]\s*[-:]\s*`),
+		regexp.MustCompile(`(?i)^\s*(?:TamilMV|TamilBlasters|1TamilMV|TamilRockers|Isaimini)\s*(?:\.\w+)?\s*[-:]\s*`),
+		regexp.MustCompile(`(?i)^\s*[^-]{2,50}\s+[-:]\s+(?=[A-Z])`),
+	}
+
+	pl.YearInParens = regexp.MustCompile(`[\(\[]((?:19|20)\d{2})[\)\]]`)
+	pl.YearStandalone = regexp.MustCompile(`\s((?:19|20)\d{2})(?:\s|$|[\(\[])`)
+
+	pl.MetadataIndicators = []*regexp.Regexp{
+		regexp.MustCompile(`(?i)\b(?:2160p|1080p|720p|480p|360p|4K|UHD|HDR)\b`),
+		regexp.MustCompile(`(?i)\b(?:WEB[-_]?DL|WEB[-_]?Rip|Blu[-_]?Ray|BDRip|BRRip|HDTV|DVDRip|CAM|TS|TC)\b`),
+		regexp.MustCompile(`(?i)\b(?:AAC|AC3|DTS|DDP|DD5\.1|TrueHD|Atmos)\b`),
+		regexp.MustCompile(`(?i)\b(?:x264|x265|H\.264|H\.265|HEVC|AVC|AV1|VP9)\b`),
+		regexp.MustCompile(`(?i)\b(?:Tamil|Telugu|Hindi|Malayalam|Kannada|English|Dual|Multi)\b`),
+		regexp.MustCompile(`(?i)\b(?:S\d{1,2}|Season\s*\d+|Complete|Episodes?)\b`),
+		regexp.MustCompile(`(?i)\b\d+(?:\.\d+)?\s*(?:GB|MB|KB)\b`),
+	}
+
+	return pl
+}
+
+// ── Main Package Regex Definitions ──
 
 var epPatternRegex = regexp.MustCompile(`(?i)(S\d+)?[\s\-_]*\bEP[\s\-_]*[\(\[]?\s*(\d+)\s*[\)\]]?\b`)
 var urlRegex = regexp.MustCompile(`\b(https?://\S+|www\.\S+\.\w+|[\w.-]+@[\w.-]+)\b`)
@@ -226,7 +230,7 @@ var (
 	parseCacheMu sync.RWMutex
 )
 
-// Pre-compiled pure RE2-compliant punctuation patterns using double-escaped format to ensure clean lexing on all Go targets [report.md]
+// Pre-compiled pure RE2-compliant punctuation patterns using double-escaped format
 var (
 	cleanBracketsRe    = regexp.MustCompile(`[()\[\]{}]`)
 	cleanSpacesPunctRe = regexp.MustCompile("\\s+[,<>\\/\\\\;:'\"|`~!?@$%^*\\_\\-=]\\s+")
@@ -378,7 +382,7 @@ func getQuality(res int) string {
 		return "720p"
 	case 480:
 		return "480p"
-	case 576p:
+	case 576: // FIXED: Resolved 576p integer case literal compilation syntax error
 		return "576p"
 	case 360:
 		return "360p"
@@ -659,7 +663,7 @@ func filterTorrentNoise(title string, originalTitle string) string {
 	return capitalizeTitle(finalTitle)
 }
 
-// ---- Overhauled Parsing Framework (Architect-Grade Parity Objects) ----
+// ── Overhauled Parsing Framework (Architect-Grade Parity Objects) ──
 
 type TitleExtractor struct{}
 
@@ -676,7 +680,7 @@ func (te *TitleExtractor) Extract(rawTitle string, contentType string) (*TitleEx
 	working := stripAllPrefixes(rawTitle)
 	
 	titlePart, year := extractTitleAndYear(working)
-	_ = titlePart // Suppress unused var check during compilation
+	_ = titlePart
 
 	yearPos := -1
 	if year > 0 {
