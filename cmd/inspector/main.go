@@ -1,6 +1,5 @@
-
-// Version: 2.0.8
-// Change log: Integrated a transactional Self-Healing Index Rebuilder inside the repair sequence. This automatically compiles the missing tmdb_thread_index and dual-key metadata pointer maps, immediately resolving empty stream listings.
+// Version: 2.0.9
+// Change log: Integrated a transactional Self-Healing Index Rebuilder inside the repair sequence. This automatically compiles the missing tmdb_thread_index, regenerates corrected stream pointers from raw magnets, and rebuilds dual-key metadata pointer maps.
 
 package main
 
@@ -17,6 +16,7 @@ import (
 	"time"
 
 	"github.com/kiskey/stremio-mvshows-go/internal/database"
+	"github.com/kiskey/stremio-mvshows-go/internal/services/parser"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -61,7 +61,7 @@ func formatBytes(bytes int64) string {
 
 func main() {
 	dbPath := flag.String("db", "/data/stremio_addon.db.bolt", "Path to the active Bbolt database")
-	repair := flag.Bool("repair", false, "Execute automatic hash migration, duplicate pruning, and index repair")
+	repair := flag.Bool("repair", false, "Execute automatic hash migration, duplicate pruning, stream regenerator, and index repair")
 	flag.Parse()
 
 	log.Println("==================================================")
@@ -218,7 +218,7 @@ func main() {
 		log.Println("==================================================")
 		log.Println("► VERDICT: Audited in Dry-Run mode. No writes occurred.")
 		log.Printf("  - High-Speed Lookups Missing Indexes: %v\n", missingThreadIdxKeys)
-		log.Println("To apply transitions, compile missing indices, and prune duplicates, run with: --repair")
+		log.Println("To apply transitions, compile missing indices, regenerate streams and prune duplicates, run with: --repair")
 		log.Println("==================================================")
 		return
 	}
@@ -233,6 +233,7 @@ func main() {
 		threadIdxB := tx.Bucket([]byte("tmdb_thread_index"))
 		streamsB := tx.Bucket([]byte("streams"))
 		metaB := tx.Bucket([]byte("tmdb_metadata"))
+		magnetB := tx.Bucket([]byte("magnet_cache"))
 
 		// ⚡ SELF-HEALING MULTI-KEY INDEX REBUILDER (Bpasses old sqlite-migrator deficits)
 		log.Println("Re-indexing Metadata bucket into high-speed Dual-Key layout...")
@@ -337,6 +338,87 @@ func main() {
 			}
 		}
 
+		// ⚡ SELF-HEALING STREAM REBUILDER (Rebuilds streams from raw magnets with updated parser rules)
+		log.Println("Regenerating and correcting all stream indices from raw magnets...")
+		var streamKeysToDelete [][]byte
+		streamsCursor := streamsB.Cursor()
+		for k, _ := streamsCursor.First(); k != nil; k, _ = streamsCursor.Next() {
+			tempKey := make([]byte, len(k))
+			copy(tempKey, k)
+			streamKeysToDelete = append(streamKeysToDelete, tempKey)
+		}
+		for _, k := range streamKeysToDelete {
+			_ = streamsB.Delete(k)
+		}
+
+		var allRegenStreams []database.Stream
+		threadCursorForStreams := tb.Cursor()
+		for k, v := threadCursorForStreams.First(); k != nil; k, v = threadCursorForStreams.Next() {
+			var t database.Thread
+			if errDec := database.DecodeGob(v, &t); errDec == nil {
+				if t.Status == "linked" && t.TmdbID != nil {
+					isSeries := strings.ToLower(t.Type) == "series"
+					for _, magnet := range t.MagnetURIs {
+						parsedMagnet := parser.ParseMagnet(magnet, t.Type)
+						if parsedMagnet == nil {
+							continue
+						}
+
+						// Store cache record
+						cacheRecord := database.MagnetCache{
+							Infohash:  parsedMagnet.Infohash,
+							Magnet:    magnet,
+							CreatedAt: time.Now(),
+						}
+						cacheBytes, _ := database.EncodeGob(cacheRecord)
+						_ = magnetB.Put([]byte(parsedMagnet.Infohash), cacheBytes)
+
+						stream := database.Stream{
+							TmdbID:    *t.TmdbID,
+							Infohash:  parsedMagnet.Infohash,
+							Quality:   parsedMagnet.Quality,
+							Language:  parsedMagnet.Language,
+							CreatedAt: time.Now(),
+							UpdatedAt: time.Now(),
+						}
+
+						if isSeries {
+							seasonVal := parsedMagnet.Season
+							if seasonVal == 0 {
+								seasonVal = 1
+							}
+							stream.Season = &seasonVal
+
+							if parsedMagnet.Type == "SINGLE_EPISODE" {
+								epVal := parsedMagnet.Episode
+								stream.Episode = &epVal
+								stream.EpisodeEnd = &epVal
+							} else if parsedMagnet.Type == "EPISODE_PACK" {
+								startVal := parsedMagnet.EpisodeStart
+								endVal := parsedMagnet.EpisodeEnd
+								stream.Episode = &startVal
+								stream.EpisodeEnd = &endVal
+							}
+						}
+
+						allRegenStreams = append(allRegenStreams, stream)
+					}
+				}
+			}
+		}
+
+		if len(allRegenStreams) > 0 {
+			log.Printf("Successfully generated %d repaired stream pointers. Writing to Bbolt streams bucket...\n", len(allRegenStreams))
+			byTMDB := make(map[string][]database.Stream)
+			for _, s := range allRegenStreams {
+				byTMDB[s.TmdbID] = append(byTMDB[s.TmdbID], s)
+			}
+			for tmdbID, list := range byTMDB {
+				bytesData, _ := database.EncodeGob(list)
+				_ = streamsB.Put([]byte(tmdbID), bytesData)
+			}
+		}
+
 		// Prune orphaned catalog index keys collected during audit phase
 		if len(orphanedIndexKeys) > 0 {
 			log.Printf("Pruning %d orphaned keys from catalog_index...\n", len(orphanedIndexKeys))
@@ -352,7 +434,7 @@ func main() {
 		log.Fatalf("Transition transaction failed: %v\n", err)
 	}
 
-	log.Println("Database repair, high-speed index compiling, and hash migration transaction committed successfully!")
+	log.Println("Database repair, stream regeneration, index compiling, and hash migration committed successfully!")
 
 	// 5. Shrink the Database on disk via compaction
 	log.Println("Shrinking database file size via sequential compaction...")
@@ -375,7 +457,7 @@ func main() {
 	}
 
 	log.Println("==================================================")
-	log.Println("► VERDICT: [SUCCESS] - Indexes compiled, database defragmented, and compacted.")
+	log.Println("► VERDICT: [SUCCESS] - Streams regenerated, indexes compiled, database defragmented, and compacted.")
 	log.Println("==================================================")
 }
 
