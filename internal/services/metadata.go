@@ -1,5 +1,5 @@
-// Version: 1.4.2
-// Change log: Removed unused "unicode" package import to resolve compiler warnings [report.md].
+// Version: 1.4.3
+// Change log: Corrected undefined matchingPunctRe compilation error in NormalizeTitleForMatching by routing the string replacements through matchingBracketsRe, matchingSpacesPunctRe, and matchingSuffixPunctRe [report.md].
 
 package metadata
 
@@ -77,7 +77,7 @@ type TMDBClient struct {
 	apiKey string
 }
 
-// Pure Go RE2-compliant regular expressions resolving lookaround compilation failures safely
+// Pure Go RE2-compliant regular expressions resolving lookaround compilation failures safely [report.md]
 var (
 	matchingBracketsRe    = regexp.MustCompile(`[()\[\]{}]`)
 	matchingSpacesPunctRe = regexp.MustCompile(`\s+[,<>\/\\;:'"|` + "`" + `~!?@$%^*\_\-=]\s+`)
@@ -374,7 +374,7 @@ func (t *TMDBClient) executeSearch(ctx context.Context, title string, year int, 
 		return nil, 0, fmt.Errorf("no results found on TMDB")
 	}
 
-	var bestCand *tmdbSearchResult
+	var bestCamp *tmdbSearchResult
 	bestScore := -1.0
 
 	for i := range data.Results {
@@ -395,11 +395,11 @@ func (t *TMDBClient) executeSearch(ctx context.Context, title string, year int, 
 		score := calculateScore(title, year, candTitle, candYear)
 		if score > bestScore {
 			bestScore = score
-			bestCand = cand
+			bestCamp = cand
 		}
 	}
 
-	return bestCand, bestScore, nil
+	return bestCamp, bestScore, nil
 }
 
 func (t *TMDBClient) GetByID(id string, contentType string) (*TmdbResult, error) {
@@ -485,7 +485,10 @@ func NormalizeTitleForMatching(title string) string {
 	s := title
 	s = strings.ReplaceAll(s, "&", "and")
 
-	s = matchingPunctRe.ReplaceAllString(s, " ")
+	// Pre-compiled pure RE2 arrays cleanly handle bracket exclusions and spacing splits
+	s = matchingBracketsRe.ReplaceAllString(s, " ")
+	s = matchingSpacesPunctRe.ReplaceAllString(s, " ")
+	s = matchingSuffixPunctRe.ReplaceAllString(s, "$1")
 
 	s = strings.Join(strings.Fields(s), " ")
 	s = strings.ToLower(s)
