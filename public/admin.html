@@ -1,3 +1,4 @@
+
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -161,7 +162,7 @@
     </style>
 </head>
 <body>
-    <h1>► MVSHOWS ADMIN TERMINAL v1.2.1 ◄</h1>
+    <h1>► MVSHOWS ADMIN TERMINAL v2.0.0 ◄</h1>
 
     <div class="dashboard-grid">
         
@@ -497,6 +498,18 @@
                 }
             });
 
+            // FIXED: Fetch real paginated data matching current active page state (Resolves cosmetic pagination bug)
+            async function loadRecent(p) {
+                page = p || page;
+                const r = await fetch(`/admin/api/recent?page=${page}&limit=15`);
+                const d = await r.json();
+                el('currentPage').textContent = page;
+                const rows = [];
+                (d.linked || []).forEach(l => rows.push(`<tr><td class="glow-green">LINKED</td><td>${l.title}</td><td>${l.updatedAt}</td></tr>`));
+                (d.failures || []).forEach(f => rows.push(`<tr><td class="glow-red">FAILED</td><td>${f.title}</td><td>${f.last_attempt}</td></tr>`));
+                el('recentBody').innerHTML = rows.join('');
+            }
+
             el('selectedList').addEventListener('change', () => {
                 const sel = el('selectedList');
                 if (sel.selectedOptions.length > 0) {
@@ -790,7 +803,7 @@
                         statusDiv.innerHTML += `<span class="glow-red">ERROR: ${e.message}</span><br>`;
                     }
                     statusDiv.scrollTop = statusDiv.scrollHeight;
-                    // Minor delay to prevent GORM/SQLite lock contentions
+                    // Minor delay to prevent lock contentions
                     await new Promise(r => setTimeout(r, 200));
                 }
                 statusDiv.innerHTML += `<b>FINISHED: ${success} success, ${fail} failed.</b><br>`;
@@ -915,18 +928,6 @@
                 });
                 loadFailures();
             };
-
-            // ── Recent Activity ──────────────────────────────────
-            async function loadRecent(p) {
-                page = p || page;
-                const r = await fetch(`/admin/api/recent?limit=15`);
-                const d = await r.json();
-                el('currentPage').textContent = page;
-                const rows = [];
-                (d.linked || []).forEach(l => rows.push(`<tr><td class="glow-green">LINKED</td><td>${l.title}</td><td>${l.updatedAt}</td></tr>`));
-                (d.failures || []).forEach(f => rows.push(`<tr><td class="glow-red">FAILED</td><td>${f.title}</td><td>${f.last_attempt}</td></tr>`));
-                el('recentBody').innerHTML = rows.join('');
-            }
 
             el('prevPage').addEventListener('click', () => { if (page > 1) loadRecent(page - 1); });
             el('nextPage').addEventListener('click', () => loadRecent(page + 1));
