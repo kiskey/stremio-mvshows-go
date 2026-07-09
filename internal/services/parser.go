@@ -1,5 +1,5 @@
-// Version: 1.7.0
-// Change log: Hoisted and pre-compiled every single regular expression globally to resolve undefined compilation errors; optimized performance to absolute zero runtime regular expression allocations.
+// Version: 1.7.1
+// Change log: Removed destructive prefixRe4 uploader-stripping pattern to resolve critical P0 title-truncation and overcleaning bugs; preserved domain-specific prefixes.
 
 package parser
 
@@ -154,11 +154,10 @@ var (
 		regexp.MustCompile(`[\s\-_]{2,}.*`),
 	}
 
-	// Prefix stripping patterns
+	// Prefix stripping patterns (FIX: Removed prefixRe4 to prevent title destruction)
 	prefixRe1 = regexp.MustCompile(`(?i)^\s*\[[\w.-]+\]\s*[-:]?\s*`)
 	prefixRe2 = regexp.MustCompile(`(?i)^\s*(?:www\.)?[a-zA-Z0-9-]+(?:\.[a-zA-Z]{2,})+\s*[-:]\s*`)
 	prefixRe3 = regexp.MustCompile(`(?i)^\s*(?:TamilMV|TamilBlasters|1TamilMV|TamilRockers|Isaimini|TamilGun|TamilYogi)\s*(?:\.\w+)?\s*[-:]\s*`)
-	prefixRe4 = regexp.MustCompile(`(?i)^\s*[^-]{2,50}\s+[-:]\s+([A-Z])`)
 
 	// Additional tuning & metadata components
 	forumQualityRe  = regexp.MustCompile(`(?i)\b(2160p|1080p|720p|480p|360p|4k|uhd)\b`)
@@ -381,7 +380,7 @@ func NewPatternLibrary() *PatternLibrary {
 		SpecialTagPatterns: make(map[string]*regexp.Regexp),
 	}
 
-	pl.PrefixPatterns = []*regexp.Regexp{prefixRe1, prefixRe2, prefixRe3, prefixRe4}
+	pl.PrefixPatterns = []*regexp.Regexp{prefixRe1, prefixRe2, prefixRe3}
 	pl.YearInParens = wrappedYearRegex
 	pl.YearStandalone = plainYearRegex
 	pl.MetadataIndicators = compiledBoundaryPatterns
@@ -1558,7 +1557,6 @@ func stripAllPrefixes(s string) string {
 	s = prefixRe1.ReplaceAllString(s, "")
 	s = prefixRe2.ReplaceAllString(s, "")
 	s = prefixRe3.ReplaceAllString(s, "")
-	s = prefixRe4.ReplaceAllString(s, "$1")
 	return strings.TrimSpace(s)
 }
 
