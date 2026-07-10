@@ -1,5 +1,5 @@
-// Version: 2.2.0
-// Change log: Overhauled admin controller; enforced StripTrackersFromMagnet on linkOfficial/autoMatch paths, fixed customMeta empty string handling to write nil fallbacks, integrated strict title checking rules, and added purge-lookup / purge-confirm handlers to manage selective IMDb-indexed database teardowns.
+// Version: 2.3.0
+// Change log: Overhauled admin controller; enforced StripTrackersFromMagnet on linkOfficial/autoMatch paths, fixed customMeta empty string handling to write nil fallbacks, integrated strict title checking rules, and implemented selective purge-lookup, purge-confirm, and trigger-targeted-crawl controllers.
 
 package api
 
@@ -42,9 +42,12 @@ func RegisterAdminRoutes(r *gin.RouterGroup) {
 	r.GET("/cinemeta-search", cinemetaSearchHandler)
 	r.POST("/parse-preview", parsePreviewHandler)
 
-	// New Purge Console routes
+	// New Purge Console routes (Panel D)
 	r.GET("/purge-lookup", purgeLookupHandler)
 	r.POST("/purge-confirm", purgeConfirmHandler)
+
+	// New Targeted Recoup route (Panel E)
+	r.POST("/trigger-targeted-crawl", triggerTargetedCrawlHandler)
 }
 
 func healthHandler(c *gin.Context) {
@@ -1030,4 +1033,38 @@ func purgeConfirmHandler(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{
 		"message": fmt.Sprintf("Successfully purged %d thread(s) and all associated streams/metadata for IMDb ID %s.", deleteCount, body.ImdbID),
 	})
+}
+
+func triggerTargetedCrawlHandler(c *gin.Context) {
+	var body struct {
+		ThreadURL   string `json:"threadUrl"`
+		ContentType string `json:"contentType"`
+		CatalogID   string `json:"catalogId"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid payload parameters"})
+		return
+	}
+
+	if body.ThreadURL == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "threadUrl parameter is required"})
+		return
+	}
+	if body.ContentType == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "contentType parameter is required"})
+		return
+	}
+	if body.CatalogID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "catalogId parameter is required"})
+		return
+	}
+
+	cfg := config.Load()
+	err := orchestrator.RunTargetedWorkflow(cfg, body.ThreadURL, body.ContentType, body.CatalogID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Targeted crawl failed: " + err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Thread crawled, metadata mapped, and streams indexed successfully!"})
 }
