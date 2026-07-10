@@ -1,5 +1,5 @@
-// Version: 1.7.5
-// Change log: Overhauled ExtractMagnetDisplayName to use a robust query-safe string parser instead of Go's strict url.Parse, preventing unescaped spaces and square brackets from stripping display names on TamilMV magnets.
+// Version: 1.8.0
+// Change log: Restructured ParseFilePath to prioritize range matching and legacy formats; integrated HTML &nbsp; and Unicode non-breaking space cleanups; enforced strict Year guardrails (1900-2030) on absolute numbering matches; appended untouched/true/hq to parserJunkWords; cleanly removed unused truncateSeriesJunk function.
 
 package parser
 
@@ -138,6 +138,15 @@ var (
 	plainYearRegex   = regexp.MustCompile(`\b((?:19|20)\d{2})\b`)
 	yearRe           = regexp.MustCompile(`[\(\[]((?:19|20)\d{2})[\)\]]`)
 
+	// Sonarr/Radarr Naming Patterns (GAP-001, GAP-002, GAP-004)
+	adjacentRe        = regexp.MustCompile(`(?i)\bs(\d{1,2})e(\d{1,3})\b`)
+	dotSeparatorRe    = regexp.MustCompile(`(?i)\bs(\d{1,2})\.e(\d{1,3})(?:-e(\d{1,3}))?\b`)
+	legacyXRe         = regexp.MustCompile(`(?i)\b(\d{1,2})x(\d{1,3})(?:-(\d{1,3}))?\b`)
+	multiSeasonSRe    = regexp.MustCompile(`(?i)\bs(\d{1,2})-s(\d{1,2})\b`)
+	multiSeasonTextRe = regexp.MustCompile(`(?i)\bseason\s*(\d{1,2})\s*-\s*(\d{1,2})\b`)
+	absoluteEpRe      = regexp.MustCompile(`\b(\d{1,4})\b`)
+	adjacentRangeRe   = regexp.MustCompile(`(?i)\bs(\d{1,2})e(\d{1,3})-e(\d{1,3})\b`)
+
 	// Language models
 	regionalLanguagePatterns = []struct {
 		Lang string
@@ -160,7 +169,7 @@ var (
 		regexp.MustCompile(`[\s\-_]{2,}.*`),
 	}
 
-	// Prefix stripping patterns (FIX: Removed prefixRe4 to prevent title destruction)
+	// Prefix stripping patterns
 	prefixRe1 = regexp.MustCompile(`(?i)^\s*\[[\w.-]+\]\s*[-:]?\s*`)
 	prefixRe2 = regexp.MustCompile(`(?i)^\s*(?:www\.)?[a-zA-Z0-9-]+(?:\.[a-zA-Z]{2,})+\s*[-:]\s*`)
 	prefixRe3 = regexp.MustCompile(`(?i)^\s*(?:TamilMV|TamilBlasters|1TamilMV|TamilRockers|Isaimini|TamilGun|TamilYogi)\s*(?:\.\w+)?\s*[-:]\s*`)
@@ -347,12 +356,14 @@ var filtersDef = []struct {
 	{ID: "2160p", GroupID: "quality", Name: "2160p", Positive: `(?i)\b(?:2160p|4k)\b`, Negatives: []string{}},
 }
 
+// Added forum terminology elements to junkwords map (GAP-007)
 var parserJunkWords = map[string]bool{
 	"proper": true, "repack": true, "extended": true, "unrated": true, "remastered": true,
 	"x264": true, "x265": true, "hevc": true, "avc": true, "aac": true, "ac3": true, "dts": true,
 	"720p": true, "1080p": true, "2160p": true, "480p": true, "4k": true, "uhd": true,
 	"webdl": true, "webrip": true, "bluray": true, "hdtv": true, "dvdrip": true,
 	"gb": true, "mb": true, "kb": true, "esub": true, "sub": true, "subs": true,
+	"untouched": true, "true": true, "hq": true,
 }
 
 var parserStopWords = map[string]bool{
@@ -411,16 +422,20 @@ func extractInfohash(magnet string) string {
 }
 
 // ExtractMagnetDisplayName parses raw query parameters directly to prevent strict url.Parse from failing on unescaped spaces or square brackets in TamilMV magnet links.
+// Incorporates direct cleanup rules for both Unicode non-breaking spaces (\u00a0) and literal HTML &nbsp; entities (BUG-003 & GAP-010).
 func ExtractMagnetDisplayName(magnet string) string {
-	idx := strings.Index(magnet, "dn=")
+	magnetClean := strings.ReplaceAll(magnet, "&nbsp;", " ")
+	magnetClean = strings.ReplaceAll(magnetClean, "\u00a0", " ")
+
+	idx := strings.Index(magnetClean, "dn=")
 	if idx == -1 {
 		return ""
 	}
-	if idx > 0 && magnet[idx-1] != '?' && magnet[idx-1] != '&' {
+	if idx > 0 && magnetClean[idx-1] != '?' && magnetClean[idx-1] != '&' {
 		return ""
 	}
 
-	val := magnet[idx+3:]
+	val := magnetClean[idx+3:]
 	if endIdx := strings.Index(val, "&"); endIdx != -1 {
 		val = val[:endIdx]
 	}
@@ -585,6 +600,7 @@ func collapseSpaces(s string) string {
 func SanitizeName(name string) string {
 	s := name
 	s = strings.ReplaceAll(s, "\u00a0", " ")
+	s = strings.ReplaceAll(s, "&nbsp;", " ") // literal HTML &nbsp; entity (BUG-003 & GAP-010)
 	s = strings.ReplaceAll(s, "\u200b", " ")
 	s = normalizeEpisodePatterns(s)
 
@@ -630,17 +646,7 @@ func parseEpisodeRange(s string) (int, int, bool) {
 	return 0, 0, false
 }
 
-func truncateSeriesJunk(s string) string {
-	for _, re := range truncationRegexes {
-		if loc := re.FindStringIndex(s); loc != nil {
-			if loc[0] == 0 {
-				continue
-			}
-			s = s[:loc[0]]
-		}
-	}
-	return strings.Trim(s, " .-_[]()/\\")
-}
+// Removed dead uncalled truncateSeriesJunk function (GAP-014)
 
 // Check if block contains metadata
 func isMetadataBlock(content string) bool {
@@ -926,7 +932,7 @@ func (mp *MetadataParser) Parse(remainder string, contentType string) *MetadataR
 
 	season := 1
 	var episodes []int
-	isSeasonPack := false // SURGICAL FIX (v1.7.3): changed from true to false
+	isSeasonPack := false
 	var episodeStart, episodeEnd int
 
 	if match := metaSeasonRe.FindStringSubmatch(remainder); len(match) > 1 {
@@ -940,7 +946,7 @@ func (mp *MetadataParser) Parse(remainder string, contentType string) *MetadataR
 			if end, err2 := strconv.Atoi(match[2]); err2 == nil && start <= end {
 				episodeStart = start
 				episodeEnd = end
-				isSeasonPack = false // SURGICAL FIX (v1.7.3): changed from true to false
+				isSeasonPack = false
 				for ep := start; ep <= end; ep++ {
 					episodes = append(episodes, ep)
 				}
@@ -952,7 +958,7 @@ func (mp *MetadataParser) Parse(remainder string, contentType string) *MetadataR
 		if start, end, found := parseEpisodeRange(remainder); found {
 			episodeStart = start
 			episodeEnd = end
-			isSeasonPack = false // SURGICAL FIX (v1.7.3): changed from true to false
+			isSeasonPack = false
 			for ep := start; ep <= end; ep++ {
 				episodes = append(episodes, ep)
 			}
@@ -1299,15 +1305,130 @@ func RobustParseInfo(title string, fallbackSeason int, contentType string) *Pars
 	return res
 }
 
+// ParseFilePath evaluates complex multi-episode and legacy range-based patterns first, falling back to standard single-episode formats.
+// Implements absolute numbering fallbacks with year guardrails to eliminate false positives on release years (BUG-001 & GAP-005).
 func ParseFilePath(path string, fallbackSeason int) *ParseResult {
 	fileName := path
 	if idx := strings.LastIndexAny(path, "/\\"); idx != -1 {
 		fileName = path[idx+1:]
 	}
 
-	cleanPath := normalizeEpisodePatterns(fileName)
+	cleanPath := strings.ReplaceAll(fileName, "\u00a0", " ")
+	cleanPath = strings.ReplaceAll(cleanPath, "&nbsp;", " ")
+	cleanPath = strings.ReplaceAll(cleanPath, "\u200b", " ")
+	cleanPath = normalizeEpisodePatterns(cleanPath)
 
-	// Robust custom regex checks supporting multi-digit episode numbers
+	// 1. Evaluate range-based patterns FIRST (BUG-001)
+	if m := adjacentRangeRe.FindStringSubmatch(cleanPath); len(m) > 3 {
+		sVal, _ := strconv.Atoi(m[1])
+		startVal, _ := strconv.Atoi(m[2])
+		endVal, _ := strconv.Atoi(m[3])
+		return &ParseResult{
+			Season:       sVal,
+			Episode:      startVal,
+			EpisodeStart: startVal,
+			EpisodeEnd:   endVal,
+			IsPack:       true,
+		}
+	}
+
+	if m := dotSeparatorRe.FindStringSubmatch(cleanPath); len(m) > 3 && m[3] != "" {
+		sVal, _ := strconv.Atoi(m[1])
+		startVal, _ := strconv.Atoi(m[2])
+		endVal, _ := strconv.Atoi(m[3])
+		return &ParseResult{
+			Season:       sVal,
+			Episode:      startVal,
+			EpisodeStart: startVal,
+			EpisodeEnd:   endVal,
+			IsPack:       true,
+		}
+	}
+
+	if m := legacyXRe.FindStringSubmatch(cleanPath); len(m) > 3 && m[3] != "" {
+		sVal, _ := strconv.Atoi(m[1])
+		startVal, _ := strconv.Atoi(m[2])
+		endVal, _ := strconv.Atoi(m[3])
+		return &ParseResult{
+			Season:       sVal,
+			Episode:      startVal,
+			EpisodeStart: startVal,
+			EpisodeEnd:   endVal,
+			IsPack:       true,
+		}
+	}
+
+	if matches := filePathRangeRegex.FindAllStringSubmatch(cleanPath, -1); len(matches) > 0 {
+		match := matches[0]
+		if len(match) >= 3 {
+			start, err1 := strconv.Atoi(match[1])
+			end, err2 := strconv.Atoi(match[2])
+			if err1 == nil && err2 == nil && start <= end {
+				// Safety Guardrail: Skip if numeric episode matches represent valid release years (GAP-005)
+				if (start < 1900 || start > 2030) && (end < 1900 || end > 2030) {
+					season := fallbackSeason
+					if sMatch := regexp.MustCompile(`(?i)\bs(\d+)\b`).FindStringSubmatch(cleanPath); len(sMatch) > 1 {
+						season, _ = strconv.Atoi(sMatch[1])
+					}
+					return &ParseResult{
+						Season:       season,
+						Episode:      start,
+						EpisodeStart: start,
+						EpisodeEnd:   end,
+						IsPack:       true,
+					}
+				}
+			}
+		}
+	}
+
+	// Multi-season pack checks (GAP-004)
+	if m := multiSeasonSRe.FindStringSubmatch(cleanPath); len(m) > 2 {
+		startS, _ := strconv.Atoi(m[1])
+		return &ParseResult{
+			Season: startS,
+			IsPack: true,
+		}
+	}
+	if m := multiSeasonTextRe.FindStringSubmatch(cleanPath); len(m) > 2 {
+		startS, _ := strconv.Atoi(m[1])
+		return &ParseResult{
+			Season: startS,
+			IsPack: true,
+		}
+	}
+
+	// 2. Fallback to standard single-episode matches
+	if m := adjacentRe.FindStringSubmatch(cleanPath); len(m) > 2 {
+		sVal, _ := strconv.Atoi(m[1])
+		eVal, _ := strconv.Atoi(m[2])
+		return &ParseResult{
+			Season:  sVal,
+			Episode: eVal,
+			IsPack:  false,
+		}
+	}
+
+	if m := dotSeparatorRe.FindStringSubmatch(cleanPath); len(m) > 2 {
+		sVal, _ := strconv.Atoi(m[1])
+		eVal, _ := strconv.Atoi(m[2])
+		return &ParseResult{
+			Season:  sVal,
+			Episode: eVal,
+			IsPack:  false,
+		}
+	}
+
+	if m := legacyXRe.FindStringSubmatch(cleanPath); len(m) > 2 {
+		sVal, _ := strconv.Atoi(m[1])
+		eVal, _ := strconv.Atoi(m[2])
+		return &ParseResult{
+			Season:  sVal,
+			Episode: eVal,
+			IsPack:  false,
+		}
+	}
+
 	if m := sXeXRegex.FindStringSubmatch(cleanPath); len(m) > 2 {
 		sVal, _ := strconv.Atoi(m[1])
 		eVal, _ := strconv.Atoi(m[2])
@@ -1326,34 +1447,14 @@ func ParseFilePath(path string, fallbackSeason int) *ParseResult {
 			IsPack:  false,
 		}
 	}
-	// Try parsing range in file name, e.g. "EP (109-112)"
-	if matches := filePathRangeRegex.FindAllStringSubmatch(cleanPath, -1); len(matches) > 0 {
-		match := matches[0]
-		if len(match) >= 3 {
-			start, err1 := strconv.Atoi(match[1])
-			end, err2 := strconv.Atoi(match[2])
-			if err1 == nil && err2 == nil && start <= end {
-				// Determine season if present
-				season := fallbackSeason
-				if sMatch := regexp.MustCompile(`(?i)s(\d+)`).FindStringSubmatch(cleanPath); len(sMatch) > 1 {
-					season, _ = strconv.Atoi(sMatch[1])
-				}
-				return &ParseResult{
-					Season:       season,
-					Episode:      start,
-					EpisodeStart: start,
-					EpisodeEnd:   end,
-					IsPack:       true,
-				}
-			}
-		}
-	}
 	if m := epXRegex.FindStringSubmatch(cleanPath); len(m) > 1 {
 		eVal, _ := strconv.Atoi(m[1])
-		return &ParseResult{
-			Season:  fallbackSeason,
-			Episode: eVal,
-			IsPack:  false,
+		if eVal < 1900 || eVal > 2030 {
+			return &ParseResult{
+				Season:  fallbackSeason,
+				Episode: eVal,
+				IsPack:  false,
+			}
 		}
 	}
 
@@ -1367,18 +1468,35 @@ func ParseFilePath(path string, fallbackSeason int) *ParseResult {
 		if season == 0 {
 			season = fallbackSeason
 		}
-		res := &ParseResult{
-			Title:   info.SeriesTitle,
-			Season:  season,
-			Episode: episode,
-			IsPack:  len(info.EpisodeNumbers) == 0 || len(info.EpisodeNumbers) > 1,
+		if episode < 1900 || episode > 2030 {
+			res := &ParseResult{
+				Title:   info.SeriesTitle,
+				Season:  season,
+				Episode: episode,
+				IsPack:  len(info.EpisodeNumbers) == 0 || len(info.EpisodeNumbers) > 1,
+			}
+			if len(info.EpisodeNumbers) > 1 {
+				res.EpisodeStart = info.EpisodeNumbers[0]
+				res.EpisodeEnd = info.EpisodeNumbers[len(info.EpisodeNumbers)-1]
+			}
+			return res
 		}
-		if len(info.EpisodeNumbers) > 1 {
-			res.EpisodeStart = info.EpisodeNumbers[0]
-			res.EpisodeEnd = info.EpisodeNumbers[len(info.EpisodeNumbers)-1]
-		}
-		return res
 	}
+
+	// Fallback to absolute numbering (GAP-005 Anime Guardrail)
+	if matches := absoluteEpRe.FindAllStringSubmatch(cleanPath, -1); len(matches) > 0 {
+		for _, m := range matches {
+			val, err := strconv.Atoi(m[1])
+			if err == nil && (val < 1900 || val > 2030) {
+				return &ParseResult{
+					Season:  fallbackSeason,
+					Episode: val,
+					IsPack:  false,
+				}
+			}
+		}
+	}
+
 	return &ParseResult{
 		Season:  fallbackSeason,
 		Episode: 0,
