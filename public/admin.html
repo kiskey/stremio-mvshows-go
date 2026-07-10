@@ -1,4 +1,3 @@
-
 <!DOCTYPE html>
 <html lang="en">
 <head>
@@ -162,7 +161,7 @@
     </style>
 </head>
 <body>
-    <h1>► MVSHOWS ADMIN TERMINAL v2.0.0 ◄</h1>
+    <h1>► MVSHOWS ADMIN TERMINAL v2.1.0 ◄</h1>
 
     <div class="dashboard-grid">
         
@@ -205,7 +204,7 @@
         <div class="section span-12">
             <div class="terminal-header">
                 <span>► METADATA_RESCUE_BAY</span>
-                <span>ACTIVE_OVERRIDE</span>
+                <span>REGULAR_OVERRIDE</span>
             </div>
             
             <!-- Contextual Flow Instructions -->
@@ -365,6 +364,42 @@
                 </div>
                 <div style="margin-top: 15px; text-align: right;">
                     <button id="cacheSelected" style="font-size: 1.3rem;">📥 Push &amp; Cache Selected Stream</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- DATABASE RECORD PURGE CONSOLE (Panel D) -->
+        <div class="section span-12" style="border: 2px solid #ff2a5f; box-shadow: 4px 4px 0 #550011;">
+            <div class="terminal-header" style="background: #ff2a5f; color: #000;">
+                <span>► Panel D: Database Record Purge Console</span>
+                <span>CRITICAL_ADMIN_OVERRIDE</span>
+            </div>
+            
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; gap: 15px; flex-wrap: wrap;">
+                <div style="font-size: 1.35rem; color: #ff2a5f;">Enter linked IMDb ID:</div>
+                <div style="display: flex; gap: 10px; width: 50%; min-width: 300px;">
+                    <input type="text" id="purgeSearchInput" placeholder="tt1234567" style="flex: 1; border-color: #ff2a5f; color: #ff2a5f; background: #000; height: 38px;">
+                    <button id="purgeLookupBtn" style="border-color: #ff2a5f; color: #ff2a5f; box-shadow: 2px 2px 0 #550011; font-size: 1.2rem; padding: 2px 15px; margin: 0; height: 42px;">🔍 Lookup Records</button>
+                </div>
+            </div>
+
+            <!-- Validation/Result box (Hidden initially) -->
+            <div id="purgeResultBox" style="display: none; border: 1px dashed #ff2a5f; padding: 15px; background: #000; font-family: monospace; font-size: 1.25rem; line-height: 1.4; margin-bottom: 15px;">
+                <div style="font-weight: bold; color: #ff2a5f; font-size: 1.4rem; margin-bottom: 10px; border-bottom: 1px dotted #ff2a5f; padding-bottom: 5px;">► TARGET RECORDS VERIFIED</div>
+                <div style="margin-bottom: 5px;">Matched Title: <strong id="purgeResultTitle" class="glow-green">None</strong></div>
+                <div style="margin-bottom: 5px;">IMDb ID: <strong id="purgeResultImdb" style="color: #fff;">None</strong> | TMDB ID: <strong id="purgeResultTmdb" style="color: #fff;">None</strong></div>
+                <div style="margin-bottom: 10px;">Total Streams Indexed: <strong id="purgeResultStreams" class="glow-amber">0</strong></div>
+                
+                <div style="margin-bottom: 10px;">
+                    <strong>Threads Found:</strong>
+                    <ul id="purgeResultThreads" style="margin: 5px 0; padding-left: 20px; color: #aaa;">
+                    </ul>
+                </div>
+                
+                <div style="color: #ff2a5f; font-weight: bold; margin-bottom: 15px;">⚠️ WARNING: Wiping these records is permanent and cannot be undone. Threads, streams, metadata, and cached mapping links will be completely deleted.</div>
+                
+                <div style="text-align: right;">
+                    <button id="purgeExecuteBtn" style="border-color: #ff2a5f; color: #ff2a5f; box-shadow: 2px 2px 0 #550011; font-size: 1.3rem; padding: 5px 20px; background: #110003; margin: 0;">🔥 CONFIRM COMPLETELY DELETE RECORDS</button>
                 </div>
             </div>
         </div>
@@ -904,6 +939,100 @@
             el('bulkAutoMatch').addEventListener('click', runBulkAutoMatch);
             el('bulkLink').addEventListener('click', runBulkLinkToOneID);
             el('bulkUpdateMeta').addEventListener('click', runBulkUpdateMeta);
+
+            // ── Purge Console Handlers (Panel D) ────────────────
+            const purgeSearchInput = el('purgeSearchInput');
+            const purgeLookupBtn = el('purgeLookupBtn');
+            const purgeResultBox = el('purgeResultBox');
+            const purgeResultTitle = el('purgeResultTitle');
+            const purgeResultImdb = el('purgeResultImdb');
+            const purgeResultTmdb = el('purgeResultTmdb');
+            const purgeResultStreams = el('purgeResultStreams');
+            const purgeResultThreads = el('purgeResultThreads');
+            const purgeExecuteBtn = el('purgeExecuteBtn');
+
+            let currentPurgeImdbId = "";
+
+            purgeLookupBtn.addEventListener('click', async () => {
+                const imdbId = purgeSearchInput.value.trim();
+                if (!imdbId) {
+                    alert('Please enter a valid IMDb ID (e.g., tt39182415).');
+                    return;
+                }
+
+                purgeLookupBtn.disabled = true;
+                purgeLookupBtn.innerText = 'Searching...';
+                purgeResultBox.style.display = 'none';
+
+                try {
+                    const r = await fetch(`/admin/api/purge-lookup?imdbId=${encodeURIComponent(imdbId)}`);
+                    const d = await r.json();
+                    if (r.ok && d.found) {
+                        currentPurgeImdbId = d.imdbId;
+                        purgeResultTitle.textContent = d.title;
+                        purgeResultImdb.textContent = d.imdbId;
+                        purgeResultTmdb.textContent = d.tmdbId;
+                        purgeResultStreams.textContent = d.streamsCount;
+                        
+                        purgeResultThreads.innerHTML = '';
+                        if (d.threads && d.threads.length > 0) {
+                            d.threads.forEach(t => {
+                                const li = document.createElement('li');
+                                li.textContent = `[ID: ${t.id}] ${t.rawTitle} (${t.status.toUpperCase()})`;
+                                purgeResultThreads.appendChild(li);
+                            });
+                        } else {
+                            purgeResultThreads.innerHTML = '<li style="color: #666;">No raw thread files currently mapped</li>';
+                        }
+
+                        purgeResultBox.style.display = 'block';
+                    } else {
+                        alert(d.message || d.error || 'No linked records found.');
+                    }
+                } catch (err) {
+                    alert('Network error during lookup: ' + err.message);
+                } finally {
+                    purgeLookupBtn.disabled = false;
+                    purgeLookupBtn.innerText = '🔍 Lookup Records';
+                }
+            });
+
+            purgeExecuteBtn.addEventListener('click', async () => {
+                if (!currentPurgeImdbId) return;
+
+                const confirmed = confirm(`CRITICAL WARNING:\n\nYou are about to permanently purge ALL database records associated with IMDb ID: ${currentPurgeImdbId}.\n\nThis will completely wipe the threads and all streams. This action CANNOT be undone.\n\nAre you absolutely sure you want to proceed?`);
+                if (!confirmed) return;
+
+                purgeExecuteBtn.disabled = true;
+                purgeExecuteBtn.innerText = 'PURGING RECORDS...';
+
+                try {
+                    const r = await fetch('/admin/api/purge-confirm', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ imdbId: currentPurgeImdbId })
+                    });
+                    const d = await r.json();
+                    if (r.ok) {
+                        alert(d.message || 'Records successfully purged.');
+                        // Reset forms
+                        purgeSearchInput.value = '';
+                        purgeResultBox.style.display = 'none';
+                        currentPurgeImdbId = "";
+                        
+                        // Reload pending and dashboard stats
+                        loadPending();
+                        fetchHealth();
+                    } else {
+                        alert('Purge failed: ' + (d.error || 'Unknown error'));
+                    }
+                } catch (err) {
+                    alert('Network error during purge execution: ' + err.message);
+                } finally {
+                    purgeExecuteBtn.disabled = false;
+                    purgeExecuteBtn.innerText = '🔥 CONFIRM COMPLETELY DELETE RECORDS';
+                }
+            });
 
             // ── Failures ─────────────────────────────────────────
             async function loadFailures() {
