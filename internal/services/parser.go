@@ -1,5 +1,5 @@
-// Version: 1.7.3
-// Change log: Surgically corrected range episode parses in metaParser to set isSeasonPack to false, preventing multi-episode packs from being misclassified as complete season packs; fixed compile type violations in ParseSpecialTags.
+// Version: 1.7.5
+// Change log: Overhauled ExtractMagnetDisplayName to use a robust query-safe string parser instead of Go's strict url.Parse, preventing unescaped spaces and square brackets from stripping display names on TamilMV magnets.
 
 package parser
 
@@ -126,6 +126,12 @@ var (
 	fileSizeRegex     = regexp.MustCompile(`\b\d+(\.\d+)?[gmk]b\b`)
 	channelRegex      = regexp.MustCompile(`\b(?:ddp)?\d\.\d(?:\.\d)?\b`)
 	sizeCaptureRegex  = regexp.MustCompile(`(?i)\b\d+(?:\.\d+)?\s*(?:GB|MB|KB)\b`)
+
+	// Custom robust regexes for file path parsing supporting multi-digit episode numbers
+	sXeXRegex         = regexp.MustCompile(`(?i)s(\d+)\s*e(\d+)`)
+	sXepXRegex        = regexp.MustCompile(`(?i)s(\d+)[\s\-_]*ep(?:isode)?[\s\-_]*(\d+)`)
+	epXRegex          = regexp.MustCompile(`(?i)\bep(?:isode)?[\s\-_]*[\(\[]?\s*(\d+)\s*[\)\]]?\b`)
+	filePathRangeRegex = regexp.MustCompile(`(?i)\b(?:e|ep|episode)?[\s\-_]*[\(\[]?\s*(\d+)\s*(?:-|to)\s*(?:e|ep|episode)?\s*(\d+)\s*[\)\]]?\b`)
 
 	// Standard year limits & checks
 	wrappedYearRegex = regexp.MustCompile(`[\(\[]((?:19|20)\d{2})[\)\]]`)
@@ -404,11 +410,25 @@ func extractInfohash(magnet string) string {
 	return ""
 }
 
+// ExtractMagnetDisplayName parses raw query parameters directly to prevent strict url.Parse from failing on unescaped spaces or square brackets in TamilMV magnet links.
 func ExtractMagnetDisplayName(magnet string) string {
-	if u, err := url.Parse(magnet); err == nil {
-		return u.Query().Get("dn")
+	idx := strings.Index(magnet, "dn=")
+	if idx == -1 {
+		return ""
 	}
-	return ""
+	if idx > 0 && magnet[idx-1] != '?' && magnet[idx-1] != '&' {
+		return ""
+	}
+
+	val := magnet[idx+3:]
+	if endIdx := strings.Index(val, "&"); endIdx != -1 {
+		val = val[:endIdx]
+	}
+
+	if decoded, err := url.QueryUnescape(val); err == nil {
+		return decoded
+	}
+	return val
 }
 
 func FormatBadges(title string) string {
@@ -1286,6 +1306,57 @@ func ParseFilePath(path string, fallbackSeason int) *ParseResult {
 	}
 
 	cleanPath := normalizeEpisodePatterns(fileName)
+
+	// Robust custom regex checks supporting multi-digit episode numbers
+	if m := sXeXRegex.FindStringSubmatch(cleanPath); len(m) > 2 {
+		sVal, _ := strconv.Atoi(m[1])
+		eVal, _ := strconv.Atoi(m[2])
+		return &ParseResult{
+			Season:  sVal,
+			Episode: eVal,
+			IsPack:  false,
+		}
+	}
+	if m := sXepXRegex.FindStringSubmatch(cleanPath); len(m) > 2 {
+		sVal, _ := strconv.Atoi(m[1])
+		eVal, _ := strconv.Atoi(m[2])
+		return &ParseResult{
+			Season:  sVal,
+			Episode: eVal,
+			IsPack:  false,
+		}
+	}
+	// Try parsing range in file name, e.g. "EP (109-112)"
+	if matches := filePathRangeRegex.FindAllStringSubmatch(cleanPath, -1); len(matches) > 0 {
+		match := matches[0]
+		if len(match) >= 3 {
+			start, err1 := strconv.Atoi(match[1])
+			end, err2 := strconv.Atoi(match[2])
+			if err1 == nil && err2 == nil && start <= end {
+				// Determine season if present
+				season := fallbackSeason
+				if sMatch := regexp.MustCompile(`(?i)s(\d+)`).FindStringSubmatch(cleanPath); len(sMatch) > 1 {
+					season, _ = strconv.Atoi(sMatch[1])
+				}
+				return &ParseResult{
+					Season:       season,
+					Episode:      start,
+					EpisodeStart: start,
+					EpisodeEnd:   end,
+					IsPack:       true,
+				}
+			}
+		}
+	}
+	if m := epXRegex.FindStringSubmatch(cleanPath); len(m) > 1 {
+		eVal, _ := strconv.Atoi(m[1])
+		return &ParseResult{
+			Season:  fallbackSeason,
+			Episode: eVal,
+			IsPack:  false,
+		}
+	}
+
 	info := rtp.ParseSeriesPath(cleanPath)
 	if info != nil && (info.SeasonNumber != 0 || len(info.EpisodeNumbers) > 0) {
 		episode := 0
