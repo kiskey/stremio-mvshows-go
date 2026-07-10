@@ -1,5 +1,5 @@
-// Version: 2.1.4
-// Change log: Removed all references to meta.Threads in handlers to match the cyclic-safe TmdbMetadata model conversion, decoupling cached metadata records from local thread lookups [report.md].
+// Version: 2.1.5
+// Change log: Removed url.Parse in P2P magnet processing inside streamHandler to prevent unescaped characters from stripping titles and falling back to Season Pack.
 
 package api
 
@@ -705,21 +705,19 @@ func streamHandler(c *gin.Context) {
 
 				var p2pBadgeLine string
 				var p2pResTag string
-				if u, err := url.Parse(magnet); err == nil {
-					if dnQuery := u.Query().Get("dn"); dnQuery != "" {
-						if decoded, err := url.QueryUnescape(dnQuery); err == nil {
-							p2pBadgeLine = parser.FormatBadges(decoded)
-							if p2pSize := parser.ExtractFileSize(decoded); p2pSize != "" {
-								p2pBadgeLine += "  |  💾 " + p2pSize
-							}
+				
+				dnQuery := parser.ExtractMagnetDisplayName(magnet)
+				if dnQuery != "" {
+					p2pBadgeLine = parser.FormatBadges(dnQuery)
+					if p2pSize := parser.ExtractFileSize(dnQuery); p2pSize != "" {
+						p2pBadgeLine += "  |  💾 " + p2pSize
+					}
 
-							parser.CompileFilters()
-							for _, f := range parser.CompiledFilters {
-								if f.GroupID == "gr" && f.Positive.MatchString(decoded) {
-									p2pResTag = " [" + f.Name + "]"
-									break
-								}
-							}
+					parser.CompileFilters()
+					for _, f := range parser.CompiledFilters {
+						if f.GroupID == "gr" && f.Positive.MatchString(dnQuery) {
+							p2pResTag = " [" + f.Name + "]"
+							break
 						}
 					}
 				}
