@@ -1,5 +1,5 @@
 // Version: 1.7.3
-// Change log: Surgically changed isSeasonPack from true to false inside multi-episode range parser blocks to ensure multi-episode releases are correctly handled as EPISODE_PACKs instead of full SEASON_PACKs.
+// Change log: Surgically corrected range episode parses in metaParser to set isSeasonPack to false, preventing multi-episode packs from being misclassified as complete season packs; fixed compile type violations in ParseSpecialTags.
 
 package parser
 
@@ -622,6 +622,7 @@ func truncateSeriesJunk(s string) string {
 	return strings.Trim(s, " .-_[]()/\\")
 }
 
+// Check if block contains metadata
 func isMetadataBlock(content string) bool {
 	normalized := strings.ToLower(content)
 	metadataTokens := []string{
