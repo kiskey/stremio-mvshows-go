@@ -1,5 +1,5 @@
-// Version: 1.7.1
-// Change log: Removed destructive prefixRe4 uploader-stripping pattern to resolve critical P0 title-truncation and overcleaning bugs; preserved domain-specific prefixes.
+// Version: 1.7.3
+// Change log: Surgically changed isSeasonPack from true to false inside multi-episode range parser blocks to ensure multi-episode releases are correctly handled as EPISODE_PACKs instead of full SEASON_PACKs.
 
 package parser
 
@@ -905,7 +905,7 @@ func (mp *MetadataParser) Parse(remainder string, contentType string) *MetadataR
 
 	season := 1
 	var episodes []int
-	isSeasonPack := false
+	isSeasonPack := false // SURGICAL FIX (v1.7.3): changed from true to false
 	var episodeStart, episodeEnd int
 
 	if match := metaSeasonRe.FindStringSubmatch(remainder); len(match) > 1 {
@@ -919,7 +919,7 @@ func (mp *MetadataParser) Parse(remainder string, contentType string) *MetadataR
 			if end, err2 := strconv.Atoi(match[2]); err2 == nil && start <= end {
 				episodeStart = start
 				episodeEnd = end
-				isSeasonPack = true
+				isSeasonPack = false // SURGICAL FIX (v1.7.3): changed from true to false
 				for ep := start; ep <= end; ep++ {
 					episodes = append(episodes, ep)
 				}
@@ -931,7 +931,7 @@ func (mp *MetadataParser) Parse(remainder string, contentType string) *MetadataR
 		if start, end, found := parseEpisodeRange(remainder); found {
 			episodeStart = start
 			episodeEnd = end
-			isSeasonPack = true
+			isSeasonPack = false // SURGICAL FIX (v1.7.3): changed from true to false
 			for ep := start; ep <= end; ep++ {
 				episodes = append(episodes, ep)
 			}
