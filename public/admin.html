@@ -161,7 +161,7 @@
     </style>
 </head>
 <body>
-    <h1>► MVSHOWS ADMIN TERMINAL v2.1.0 ◄</h1>
+    <h1>► MVSHOWS ADMIN TERMINAL v2.2.0 ◄</h1>
 
     <div class="dashboard-grid">
         
@@ -400,6 +400,40 @@
                 
                 <div style="text-align: right;">
                     <button id="purgeExecuteBtn" style="border-color: #ff2a5f; color: #ff2a5f; box-shadow: 2px 2px 0 #550011; font-size: 1.3rem; padding: 5px 20px; background: #110003; margin: 0;">🔥 CONFIRM COMPLETELY DELETE RECORDS</button>
+                </div>
+            </div>
+        </div>
+
+        <!-- TARGETED THREAD RECOUP CONSOLE (Panel E) -->
+        <div class="section span-12" style="border: 2px solid #ff9900; box-shadow: 4px 4px 0 #553300;">
+            <div class="terminal-header" style="background: #ff9900; color: #000;">
+                <span>► Panel E: Targeted Thread Recoup Console</span>
+                <span>SELECTIVE_CRAWL_GATEWAY</span>
+            </div>
+            
+            <div style="display: flex; flex-direction: column; gap: 15px;">
+                <div style="display: flex; justify-content: space-between; align-items: center; gap: 15px; flex-wrap: wrap;">
+                    <div style="font-size: 1.35rem; color: #ff9900; min-width: 150px;">Target Thread URL:</div>
+                    <input type="text" id="recoupUrlInput" placeholder="https://www.1tamilmv.tf/index.php?/forums/topic/12345-thread-title/" style="flex: 1; border-color: #ff9900; color: #ff9900; background: #000; height: 38px;">
+                </div>
+                
+                <div style="display: flex; justify-content: space-between; align-items: center; gap: 15px; flex-wrap: wrap;">
+                    <div style="font-size: 1.35rem; color: #ff9900; min-width: 150px;">Category Mappings:</div>
+                    <select id="recoupCategorySelect" style="flex: 1; border-color: #ff9900; color: #ff9900; background: #000; height: 42px;">
+                        <option value="series:top-series-from-forum">Tamil WebSeries (series | Tamil WebSeries catalog)</option>
+                        <option value="movie:tamil-hd-movies">Tamil HD Movies (movie | Tamil HD Movies catalog)</option>
+                        <option value="movie:tamil-dubbed-movies">Tamil Dubbed Movies (movie | Tamil Dubbed Movies catalog)</option>
+                    </select>
+                </div>
+
+                <div style="text-align: right; margin-top: 5px;">
+                    <button id="recoupExecuteBtn" style="border-color: #ff9900; color: #ff9900; box-shadow: 2px 2px 0 #553300; font-size: 1.3rem; padding: 5px 25px; background: #0b0600; margin: 0;">⚡ Recoup &amp; Index Thread</button>
+                </div>
+
+                <!-- Status Console log box -->
+                <div style="font-size: 1.05rem; text-transform: uppercase; color: #888; margin-top: 5px; margin-bottom: -4px;">► Recoup Output Monitor</div>
+                <div id="recoupStatus" class="glow-amber" style="border: 1px dashed #333; padding: 6px; height: 100px; overflow-y: auto; font-size: 1.05rem; background: #000; font-family: monospace; line-height: 1.2;">
+                    Idle... Ready for targeted single-thread crawl.
                 </div>
             </div>
         </div>
@@ -1031,6 +1065,66 @@
                 } finally {
                     purgeExecuteBtn.disabled = false;
                     purgeExecuteBtn.innerText = '🔥 CONFIRM COMPLETELY DELETE RECORDS';
+                }
+            });
+
+            // ── Recoup Console Handlers (Panel E) ───────────────
+            const recoupUrlInput = el('recoupUrlInput');
+            const recoupCategorySelect = el('recoupCategorySelect');
+            const recoupExecuteBtn = el('recoupExecuteBtn');
+            const recoupStatus = el('recoupStatus');
+
+            recoupExecuteBtn.addEventListener('click', async () => {
+                const threadUrl = recoupUrlInput.value.trim();
+                if (!threadUrl) {
+                    alert('Please enter a valid thread URL (e.g., https://www.1tamilmv.tf/index.php?/forums/topic/...).');
+                    return;
+                }
+
+                if (!threadUrl.startsWith('http://') && !threadUrl.startsWith('https://')) {
+                    alert('Invalid URL format. URL must start with http:// or https://');
+                    return;
+                }
+
+                const catVal = recoupCategorySelect.value;
+                const parts = catVal.split(':');
+                const contentType = parts[0];
+                const catalogId = parts[1];
+
+                recoupExecuteBtn.disabled = true;
+                recoupExecuteBtn.innerText = 'INDEXING SINGLE THREAD...';
+                recoupStatus.innerHTML = `Initiating targeted crawl for: ${threadUrl}<br>`;
+                recoupStatus.innerHTML += `Contacting proxy gateway...<br>`;
+                recoupStatus.scrollTop = recoupStatus.scrollHeight;
+
+                try {
+                    const r = await fetch('/admin/api/trigger-targeted-crawl', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({
+                            threadUrl: threadUrl,
+                            contentType: contentType,
+                            catalogId: catalogId
+                        })
+                    });
+                    const d = await r.json();
+                    if (r.ok) {
+                        recoupStatus.innerHTML += `<span class="glow-green">SUCCESS: Thread crawled, parsed, and stream indexes updated successfully!</span><br>`;
+                        alert(d.message || 'Thread recouped and indexed successfully.');
+                        recoupUrlInput.value = '';
+                        loadPending();
+                        fetchHealth();
+                    } else {
+                        recoupStatus.innerHTML += `<span class="glow-red">FAILED: ${d.error || 'Unknown error'}</span><br>`;
+                        alert('Index failed: ' + (d.error || 'Unknown error'));
+                    }
+                } catch (err) {
+                    recoupStatus.innerHTML += `<span class="glow-red">NETWORK ERROR: ${err.message}</span><br>`;
+                    alert('Network error: ' + err.message);
+                } finally {
+                    recoupStatus.scrollTop = recoupStatus.scrollHeight;
+                    recoupExecuteBtn.disabled = false;
+                    recoupExecuteBtn.innerText = '⚡ Recoup & Index Thread';
                 }
             });
 
