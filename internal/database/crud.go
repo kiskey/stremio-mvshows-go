@@ -1,5 +1,5 @@
-// Version: 2.1.0
-// Change log: Redesigned FindThreadByID via a dedicated high-speed pointer index thread_id_index to resolve O(N) traversal, fully patched DeleteThread to check relations before purging streams, and enforced sentinel Unix(0,0) date offsets for empty PostedAt records.
+// Version: 2.1.1
+// Change log: Increased the stream array cap inside CreateStreams from 100 to 2000 to fully support long-running daily series with hundreds of episode range packets without truncating high-quality streams.
 
 package database
 
@@ -475,9 +475,9 @@ func CreateStreams(tx *bolt.Tx, streams []Stream) error {
 				}
 			}
 
-			// Cap existing streams array size to prevent performance degradation on hot queries [report.md]
-			if len(existing) > 100 {
-				existing = existing[len(existing)-100:]
+			// FIX: Increased cap from 100 to 2000 to prevent truncating long series streams
+			if len(existing) > 2000 {
+				existing = existing[len(existing)-2000:]
 			}
 
 			encBytes, err := EncodeGob(existing)
