@@ -1,5 +1,5 @@
-// Version: 1.8.0
-// Change log: Restructured ParseFilePath to prioritize range matching and legacy formats; integrated HTML &nbsp; and Unicode non-breaking space cleanups; enforced strict Year guardrails (1900-2030) on absolute numbering matches; appended untouched/true/hq to parserJunkWords; cleanly removed unused truncateSeriesJunk function.
+// Version: 1.8.1
+// Change log: Restructured ParseFilePath to prioritize range matching and legacy formats; integrated HTML &nbsp; and Unicode non-breaking space cleanups; enforced strict Year guardrails (1900-2030) on absolute numbering matches; appended untouched/true/hq to parserJunkWords; cleanly removed unused truncateSeriesJunk function. Added a safe filter (isVideoFile and min-size threshold) inside FindBestSeriesFile to prevent non-video clutter assets from generating alphabetical index-shifts.
 
 package parser
 
@@ -1305,6 +1305,11 @@ func RobustParseInfo(title string, fallbackSeason int, contentType string) *Pars
 	return res
 }
 
+func isVideoFile(path string) bool {
+	p := strings.ToLower(path)
+	return strings.HasSuffix(p, ".mkv") || strings.HasSuffix(p, ".mp4") || strings.HasSuffix(p, ".avi") || strings.HasSuffix(p, ".flv") || strings.HasSuffix(p, ".webm") || strings.HasSuffix(p, ".mov")
+}
+
 // ParseFilePath evaluates complex multi-episode and legacy range-based patterns first, falling back to standard single-episode formats.
 // Implements absolute numbering fallbacks with year guardrails to eliminate false positives on release years (BUG-001 & GAP-005).
 func ParseFilePath(path string, fallbackSeason int) *ParseResult {
@@ -1590,7 +1595,7 @@ func FindBestSeriesFile(candidates []CandidateFile, targetSeason, targetEpisode,
 	}
 
 	for _, c := range candidates {
-		if checkExtra(c.Path) {
+		if checkExtra(c.Path) || !isVideoFile(c.Path) || c.Size < 15*1024*1024 { // Guardrail: Ignore non-video and tiny assets
 			continue
 		}
 
@@ -1626,7 +1631,7 @@ func FindBestSeriesFile(candidates []CandidateFile, targetSeason, targetEpisode,
 
 	var seasonMatches []CandidateFile
 	for _, c := range candidates {
-		if checkExtra(c.Path) {
+		if checkExtra(c.Path) || !isVideoFile(c.Path) || c.Size < 15*1024*1024 { // Guardrail: Apply same filters on fallback indexing
 			continue
 		}
 
