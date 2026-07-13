@@ -1,4 +1,4 @@
-// Version: 2.1.5
+// Version: 2.1.6
 // Change log: Removed url.Parse in P2P magnet processing inside streamHandler to prevent unescaped characters from stripping titles and falling back to Season Pack.
 
 package api
@@ -1345,10 +1345,11 @@ func buildStreamTitle(pr *parser.ParsedRelease, tmdbTitle string, mediaType stri
 
 	b.WriteString("\n🔊 ")
 	if len(pr.Languages) > 0 {
-		b.WriteString(formatLanguage(pr.Languages[0]))
-		if len(pr.Languages) > 1 {
-			b.WriteString(fmt.Sprintf(" +%d", len(pr.Languages)-1))
+		var langList []string
+		for _, l := range pr.Languages {
+			langList = append(langList, formatLanguage(l))
 		}
+		b.WriteString(strings.Join(langList, " | "))
 	} else {
 		b.WriteString("Tamil 🇮🇳")
 	}
