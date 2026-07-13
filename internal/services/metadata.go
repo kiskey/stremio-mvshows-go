@@ -1,5 +1,5 @@
-// Version: 1.4.4
-// Change log: Overhauled matchingSpacesPunctRe string format with double-quoted, double-escaped strings to completely eliminate unescaped backtick lexical errors and Go compiler tokenization mismatches [report.md].
+// Version: 1.4.5
+// Change log: Overhauled matchingSpacesPunctRe string format with double-quoted, double-escaped strings to completely eliminate unescaped backtick lexical errors and Go compiler tokenization mismatches. Imposed a defensive Title Overlap threshold guardrail within calculateScore to prevent false-positive matching on unrelated same-year content.
 
 package metadata
 
@@ -597,7 +597,11 @@ func calculateScore(targetTitle string, targetYear int, candidateTitle string, c
 		yearScore = 20.0
 	}
 
-	titleScore := OverlapCoefficient(normTarget, normCandidate) * 60.0
+	titleOverlap := OverlapCoefficient(normTarget, normCandidate)
+	if titleOverlap < 0.18 { // Guardrail: Prevent unrelated titles from matching purely on exact-year criteria
+		return titleOverlap * 60.0
+	}
+	titleScore := titleOverlap * 60.0
 	return yearScore + titleScore
 }
 
