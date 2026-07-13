@@ -51,8 +51,9 @@ var bracketRegex = regexp.MustCompile(`\[.*?[^\w\s-].*?\]`)
 func SanitizeName(name string) string {
 	s := name
 
-	// 1. Normalize special unicode spaces (e.g. \u00a0, \u200b) to standard spaces
+	// 1. Normalize special unicode spaces (e.g. \u00a0, \u200b) and literal HTML &nbsp; to standard spaces
 	s = strings.ReplaceAll(s, "\u00a0", " ")
+	s = strings.ReplaceAll(s, "&nbsp;", " ") // literal HTML &nbsp; entity
 	s = strings.ReplaceAll(s, "\u200b", " ")
 
 	// 2. Collapse spacing on custom EP representations

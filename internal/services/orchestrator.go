@@ -1,5 +1,5 @@
-// Version: 1.3.0
-// Change log: Overhauled target check structures; migrated processThread from slow O(N) linear iteration to direct O(1) point checks via database.FindThreadByHash [report.md].
+// Version: 1.4.1
+// Change log: Overhauled target check structures; migrated processThread from slow O(N) linear iteration to direct O(1) point checks via database.FindThreadByHash [report.md]. Added RunTargetedWorkflow to execute proxy-isolated crawls on specific thread URLs, securely processing, database-indexing, and linking their media. Restored tmdbMetadata.Year assignment to match clean 1.3.0 compilation rules.
 
 package orchestrator
 
@@ -478,4 +478,28 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 	} else {
 		utils.Logger.Info().Str("title", thread.RawTitle).Msg("Successfully linked thread and saved stream references.")
 	}
+}
+
+// RunTargetedWorkflow executes an isolated single-page crawl on a specific thread URL and indexes its media.
+func RunTargetedWorkflow(cfg *config.Config, threadURL, contentType, catalogID string) error {
+	utils.Logger.Info().Str("url", threadURL).Str("type", contentType).Msg("Initiating targeted thread recoup workflow...")
+
+	scraped, err := crawler.RunTargetedCrawler(cfg, threadURL, contentType, catalogID)
+	if err != nil {
+		utils.Logger.Error().Err(err).Str("url", threadURL).Msg("Targeted crawler failed.")
+		return err
+	}
+
+	if len(scraped) == 0 {
+		return fmt.Errorf("no valid magnets detected on the targeted thread page")
+	}
+
+	tmdbClient := metadata.NewTMDBClient(cfg)
+	for _, thread := range scraped {
+		// incremental=false to make sure that the parser and linking logic runs fully on this specific thread (forces re-syncing)
+		processThread(thread, tmdbClient, false)
+	}
+
+	utils.Logger.Info().Str("url", threadURL).Msg("Targeted thread recoup and indexing workflow completed successfully.")
+	return nil
 }

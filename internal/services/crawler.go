@@ -1,5 +1,5 @@
-// Version: 1.0.2
-// Change log: Fixed fragile Parent().Parent() selector with stable ancestor search containers and introduced deep magnet deduplication inside detail extraction rules.
+// Version: 1.1.0
+// Change log: Fixed fragile Parent().Parent() selector with stable ancestor search containers and introduced deep magnet deduplication inside detail extraction rules. Added RunTargetedCrawler to perform safe proxy-aware single-page thread detail scrapes without affecting scheduling catalogs.
 
 package crawler
 
@@ -386,4 +386,172 @@ func ConvertToProxyPostRequest(req *http.Request, proxyURL string) (*http.Reques
 	newReq.Header.Set("Content-Type", "application/json")
 	newReq.Header.Set("User-Agent", req.Header.Get("User-Agent"))
 	return newReq, nil
+}
+
+// RunTargetedCrawler executes a single-page target crawl on a specific thread URL, extracting its magnets and page title.
+func RunTargetedCrawler(cfg *config.Config, threadURL, contentType, catalogID string) ([]CrawledThread, error) {
+	var crawled []CrawledThread
+	var mu sync.Mutex
+
+	c := colly.NewCollector()
+
+	c.SetRequestTimeout(time.Duration(cfg.ScraperTimeoutSecs) * time.Second)
+
+	baseTransport := createOptimizedScraperTransport()
+	if cfg.IsProxyEnabled {
+		utils.Logger.Info().Msg("Targeted Scraper: Injecting custom POST-mutating ProxyTransport for Cloudflare bypass.")
+		proxyTransport := &ProxyTransport{
+			ProxyURLs: cfg.ProxyURLs,
+			Base:      baseTransport,
+		}
+		c.WithTransport(proxyTransport)
+	} else {
+		c.WithTransport(baseTransport)
+	}
+
+	c.OnRequest(func(r *colly.Request) {
+		r.Headers.Set("User-Agent", cfg.ScraperUserAgent)
+		r.Headers.Set("Accept", "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7")
+		r.Headers.Set("Accept-Language", "en-US,en;q=0.9")
+		r.Headers.Set("Sec-Ch-Ua", `"Not/A)Brand";v="8", "Chromium";v="125", "Google Chrome";v="125"`)
+		r.Headers.Set("Sec-Ch-Ua-Mobile", "?0")
+		r.Headers.Set("Sec-Ch-Ua-Platform", `"Windows"`)
+		r.Headers.Set("Sec-Fetch-Dest", "document")
+		r.Headers.Set("Sec-Fetch-Mode", "navigate")
+		r.Headers.Set("Sec-Fetch-Site", "none")
+		r.Headers.Set("Sec-Fetch-User", "?1")
+		r.Headers.Set("Upgrade-Insecure-Requests", "1")
+	})
+
+	c.OnResponse(func(r *colly.Response) {
+		bodyStr := string(r.Body)
+		if strings.Contains(bodyStr, "cloudflare") && (strings.Contains(bodyStr, "captcha") || strings.Contains(bodyStr, "challenge-platform") || strings.Contains(bodyStr, "Access denied")) {
+			retryCount := 0
+			if val, ok := r.Request.Ctx.GetAny("retry_count").(int); ok {
+				retryCount = val
+			}
+
+			if retryCount < cfg.ScraperRetryCount {
+				retryCount++
+				r.Request.Ctx.Put("retry_count", retryCount)
+				backoff := time.Duration(retryCount*retryCount) * 2 * time.Second
+				utils.Logger.Warn().
+					Str("url", r.Request.URL.String()).
+					Str("proxy", r.Request.ProxyURL).
+					Int("retry_count", retryCount).
+					Dur("backoff", backoff).
+					Msg("Targeted Scraper: Cloudflare anti-bot block or challenge detected. Retrying request.")
+				time.Sleep(backoff)
+				_ = r.Request.Visit(r.Request.URL.String())
+			} else {
+				utils.Logger.Error().
+					Str("url", r.Request.URL.String()).
+					Str("proxy", r.Request.ProxyURL).
+					Msg("Targeted Scraper: Max retries exceeded for Cloudflare blocked URL.")
+			}
+		}
+	})
+
+	c.OnError(func(r *colly.Response, err error) {
+		retryCount := 0
+		if val, ok := r.Request.Ctx.GetAny("retry_count").(int); ok {
+			retryCount = val
+		}
+
+		if retryCount < cfg.ScraperRetryCount {
+			retryCount++
+			r.Request.Ctx.Put("retry_count", retryCount)
+			backoff := time.Duration(retryCount*retryCount) * 2 * time.Second
+			utils.Logger.Warn().
+				Str("url", r.Request.URL.String()).
+				Err(err).
+				Int("retry_count", retryCount).
+				Dur("backoff", backoff).
+				Msg("Targeted Scraper: Request failed. Scheduling retry.")
+			time.Sleep(backoff)
+			_ = r.Request.Visit(r.Request.URL.String())
+		} else {
+			utils.Logger.Error().
+				Str("url", r.Request.URL.String()).
+				Err(err).
+				Msg("Targeted Scraper: Max retries exceeded for URL.")
+		}
+	})
+
+	c.OnHTML("a[href^=\"magnet:?\"]", func(e *colly.HTMLElement) {
+		if e.Request.Ctx.GetAny("detail_parsed") != nil {
+			return
+		}
+		e.Request.Ctx.Put("detail_parsed", true)
+
+		// Find and extract clean title from h1 header or title tag
+		rawTitle := e.DOM.ParentsUntil("html").Find("h1.ipsType_pageTitle").Text()
+		rawTitle = strings.TrimSpace(rawTitle)
+		if rawTitle == "" {
+			rawTitle = e.DOM.ParentsUntil("html").Find("title").Text()
+			rawTitle = strings.TrimSpace(strings.ReplaceAll(rawTitle, " - TamilMV", ""))
+		}
+
+		if rawTitle == "" {
+			rawTitle = "Unknown Recouped Title"
+		}
+
+		var magnets []string
+		seenMags := make(map[string]bool)
+
+		container := e.DOM.Closest(".ipsPad")
+		if container.Length() == 0 {
+			container = e.DOM.Closest(".ipsType_normal")
+		}
+		if container.Length() == 0 {
+			container = e.DOM.Closest("article")
+		}
+		if container.Length() == 0 {
+			container = e.DOM.Parent()
+			if container.Parent().Length() > 0 {
+				container = container.Parent()
+			}
+		}
+
+		container.Find("a[href^=\"magnet:?\"]").Each(func(_ int, s *goquery.Selection) {
+			if href, ok := s.Attr("href"); ok {
+				if href != "" && !seenMags[href] {
+					seenMags[href] = true
+					magnets = append(magnets, href)
+				}
+			}
+		})
+
+		if len(magnets) > 0 {
+			hash := parser.GenerateThreadHash(rawTitle, magnets)
+			
+			var postedAt *time.Time
+			timeEl := e.DOM.ParentsUntil("html").Find("time[datetime]").First()
+			if postedAtStr, _ := timeEl.Attr("datetime"); postedAtStr != "" {
+				if t, errDate := time.Parse(time.RFC3339, postedAtStr); errDate == nil {
+					postedAt = &t
+				}
+			}
+			if postedAt == nil {
+				now := time.Now()
+				postedAt = &now
+			}
+
+			mu.Lock()
+			crawled = append(crawled, CrawledThread{
+				ThreadHash: hash,
+				RawTitle:   rawTitle,
+				MagnetURIs: magnets,
+				Type:       contentType,
+				PostedAt:   postedAt,
+				CatalogID:  catalogID,
+			})
+			mu.Unlock()
+		}
+	})
+
+	_ = c.Visit(threadURL)
+	c.Wait()
+
+	return crawled, nil
 }

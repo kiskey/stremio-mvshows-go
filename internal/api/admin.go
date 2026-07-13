@@ -1,10 +1,11 @@
-// Version: 2.1.1
-// Change log: Overhauled admin controller; enforced StripTrackersFromMagnet on linkOfficial/autoMatch paths, fixed customMeta empty string handling to write nil fallbacks, and integrated strict title checking rules to weed out TMDB linking anomalies.
+// Version: 2.3.0
+// Change log: Overhauled admin controller; enforced StripTrackersFromMagnet on linkOfficial/autoMatch paths, fixed customMeta empty string handling to write nil fallbacks, integrated strict title checking rules, and implemented selective purge-lookup, purge-confirm, and trigger-targeted-crawl controllers.
 
 package api
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 	"os"
 	"strconv"
@@ -40,6 +41,13 @@ func RegisterAdminRoutes(r *gin.RouterGroup) {
 	r.GET("/recent", recentHandler)
 	r.GET("/cinemeta-search", cinemetaSearchHandler)
 	r.POST("/parse-preview", parsePreviewHandler)
+
+	// New Purge Console routes (Panel D)
+	r.GET("/purge-lookup", purgeLookupHandler)
+	r.POST("/purge-confirm", purgeConfirmHandler)
+
+	// New Targeted Recoup route (Panel E)
+	r.POST("/trigger-targeted-crawl", triggerTargetedCrawlHandler)
 }
 
 func healthHandler(c *gin.Context) {
@@ -865,4 +873,198 @@ func recentHandler(c *gin.Context) {
 		"linked":   linkedAct,
 		"failures": failAct,
 	})
+}
+
+func purgeLookupHandler(c *gin.Context) {
+	imdbID := c.Query("imdbId")
+	if imdbID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "imdbId parameter is required"})
+		return
+	}
+
+	var meta database.TmdbMetadata
+	var foundMeta bool
+
+	_ = database.DB.View(func(tx *bolt.Tx) error {
+		metaB := tx.Bucket([]byte("tmdb_metadata"))
+		data := metaB.Get([]byte(imdbID))
+		if data != nil {
+			if errDec := database.DecodeGob(data, &meta); errDec == nil {
+				foundMeta = true
+			}
+		}
+		return nil
+	})
+
+	if !foundMeta {
+		c.JSON(http.StatusNotFound, gin.H{"found": false, "message": "No database records currently linked to this IMDb ID."})
+		return
+	}
+
+	// Search for all linked threads
+	type threadInfo struct {
+		ID       uint   `json:"id"`
+		RawTitle string `json:"rawTitle"`
+		Status   string `json:"status"`
+		Hash     string `json:"hash"`
+	}
+	var threads []threadInfo
+	var title string
+
+	_ = database.DB.View(func(tx *bolt.Tx) error {
+		tb := tx.Bucket([]byte("threads"))
+		c := tb.Cursor()
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			var t database.Thread
+			if err := database.DecodeGob(v, &t); err == nil {
+				if t.TmdbID != nil && *t.TmdbID == meta.TmdbID {
+					threads = append(threads, threadInfo{
+						ID:       t.ID,
+						RawTitle: t.RawTitle,
+						Status:   t.Status,
+						Hash:     t.ThreadHash,
+					})
+					if title == "" {
+						title = t.CleanTitle
+					}
+				}
+			}
+		}
+		return nil
+	})
+
+	if title == "" {
+		title = "Unknown Linked Title"
+	}
+
+	// Query stream count
+	var streams []database.Stream
+	_ = database.DB.View(func(tx *bolt.Tx) error {
+		sb := tx.Bucket([]byte("streams"))
+		data := sb.Get([]byte(meta.TmdbID))
+		if data != nil {
+			_ = database.DecodeGob(data, &streams)
+		}
+		return nil
+	})
+
+	c.JSON(http.StatusOK, gin.H{
+		"found":        true,
+		"imdbId":       imdbID,
+		"tmdbId":       meta.TmdbID,
+		"title":        title,
+		"threads":      threads,
+		"streamsCount": len(streams),
+	})
+}
+
+func purgeConfirmHandler(c *gin.Context) {
+	var body struct {
+		ImdbID string `json:"imdbId"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid payload parameters"})
+		return
+	}
+
+	if body.ImdbID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "imdbId parameter is required"})
+		return
+	}
+
+	var meta database.TmdbMetadata
+	var foundMeta bool
+
+	_ = database.DB.View(func(tx *bolt.Tx) error {
+		metaB := tx.Bucket([]byte("tmdb_metadata"))
+		data := metaB.Get([]byte(body.ImdbID))
+		if data != nil {
+			if errDec := database.DecodeGob(data, &meta); errDec == nil {
+				foundMeta = true
+			}
+		}
+		return nil
+	})
+
+	if !foundMeta {
+		c.JSON(http.StatusNotFound, gin.H{"error": "No metadata record found for this IMDb ID."})
+		return
+	}
+
+	var threadsToDelete []database.Thread
+	_ = database.DB.View(func(tx *bolt.Tx) error {
+		tb := tx.Bucket([]byte("threads"))
+		c := tb.Cursor()
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			var t database.Thread
+			if err := database.DecodeGob(v, &t); err == nil {
+				if t.TmdbID != nil && *t.TmdbID == meta.TmdbID {
+					threadsToDelete = append(threadsToDelete, t)
+				}
+			}
+		}
+		return nil
+	})
+
+	var deleteCount int
+	for _, t := range threadsToDelete {
+		err := database.DeleteThread(nil, &t)
+		if err == nil {
+			deleteCount++
+		}
+	}
+
+	// Direct stream and metadata cleanup guarantee
+	_ = database.DB.Update(func(tx *bolt.Tx) error {
+		_ = tx.Bucket([]byte("streams")).Delete([]byte(meta.TmdbID))
+		_ = tx.Bucket([]byte("tmdb_thread_index")).Delete([]byte(meta.TmdbID))
+		
+		// Clean up the IMDb ID and TMDB ID keys from tmdb_metadata
+		metaB := tx.Bucket([]byte("tmdb_metadata"))
+		_ = metaB.Delete([]byte(meta.TmdbID))
+		if meta.ImdbID != nil && *meta.ImdbID != "" {
+			_ = metaB.Delete([]byte(*meta.ImdbID))
+		}
+		return nil
+	})
+
+	orchestrator.UpdateDashboardCache()
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": fmt.Sprintf("Successfully purged %d thread(s) and all associated streams/metadata for IMDb ID %s.", deleteCount, body.ImdbID),
+	})
+}
+
+func triggerTargetedCrawlHandler(c *gin.Context) {
+	var body struct {
+		ThreadURL   string `json:"threadUrl"`
+		ContentType string `json:"contentType"`
+		CatalogID   string `json:"catalogId"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid payload parameters"})
+		return
+	}
+
+	if body.ThreadURL == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "threadUrl parameter is required"})
+		return
+	}
+	if body.ContentType == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "contentType parameter is required"})
+		return
+	}
+	if body.CatalogID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "catalogId parameter is required"})
+		return
+	}
+
+	cfg := config.Load()
+	err := orchestrator.RunTargetedWorkflow(cfg, body.ThreadURL, body.ContentType, body.CatalogID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Targeted crawl failed: " + err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Thread crawled, metadata mapped, and streams indexed successfully!"})
 }
