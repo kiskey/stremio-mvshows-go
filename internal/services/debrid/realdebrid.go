@@ -1,5 +1,5 @@
-// Version: 1.0.1
-// Change log: Overhauled AddAndSelect with a 10-attempt, 2-second sleep retry loop on selectFiles 404 errors to give Real-Debrid time to fetch torrent metadata over the DHT network.
+// Version: 1.0.2
+// Change log: Added CleanupStaleTorrents method implementation to conform to Provider interface.
 
 package debrid
 
@@ -224,10 +224,9 @@ func (r *realDebridProvider) CheckCached(ctx context.Context, hashes []string) (
 
 	torrents, err := r.getCachedTorrents(ctx)
 	if err != nil {
-		return result, nil // soft fail: mark all uncached
+		return result, nil
 	}
 
-	// Build hash lookup
 	hashMap := make(map[string]Torrent)
 	for _, t := range torrents {
 		hashMap[strings.ToLower(t.Hash)] = t
@@ -243,16 +242,12 @@ func (r *realDebridProvider) CheckCached(ctx context.Context, hashes []string) (
 	return result, nil
 }
 
-// AddAndSelect includes an automatic, 10-attempt loop to handle metadata delay on uncached magnets cleanly.
 func (r *realDebridProvider) AddAndSelect(ctx context.Context, magnet string) (*TorrentInfo, error) {
 	addRes, err := r.AddMagnet(ctx, magnet)
 	if err != nil {
 		return nil, err
 	}
 
-	// Real-Debrid metadata delay fallback:
-	// If the torrent was just added, Real-Debrid needs a few seconds to fetch metadata from the DHT network.
-	// We retry SelectFiles up to 10 times with a 2-second delay if it returns an HTTP 404 error.
 	var selectErr error
 	for attempt := 0; attempt < 10; attempt++ {
 		select {
@@ -266,7 +261,6 @@ func (r *realDebridProvider) AddAndSelect(ctx context.Context, magnet string) (*
 			break
 		}
 
-		// If it's a 404, log a warning, wait 2 seconds, and retry
 		if strings.Contains(selectErr.Error(), "status 404") {
 			utils.Logger.Warn().
 				Int("attempt", attempt+1).
@@ -276,7 +270,6 @@ func (r *realDebridProvider) AddAndSelect(ctx context.Context, magnet string) (*
 			continue
 		}
 
-		// Other severe error, abort
 		return nil, selectErr
 	}
 
@@ -289,6 +282,10 @@ func (r *realDebridProvider) AddAndSelect(ctx context.Context, magnet string) (*
 
 func (r *realDebridProvider) GetCachedFileInfo(ctx context.Context, hash, fileName string) (*FileInfo, error) {
 	return nil, fmt.Errorf("not supported for real-debrid")
+}
+
+func (r *realDebridProvider) CleanupStaleTorrents(ctx context.Context) (int, error) {
+	return 0, nil
 }
 
 func rdJsonDecode(resp *http.Response, v interface{}) error {
