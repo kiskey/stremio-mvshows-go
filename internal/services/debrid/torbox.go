@@ -1,5 +1,7 @@
-// Version: 2.1.0
-// Change log: Implemented CleanupStaleTorrents evaluating progress and age (>24h), and auto-triggering pre-add slot cleanups in AddAndSelect.
+--- START OF FILE stremio-mvshows-go-enhance1.0/internal/services/debrid/torbox.go ---
+
+// Version: 2.1.1
+// Change log: Fixed multi-line boolean condition parenthesis formatting in CleanupStaleTorrents to eliminate Go lexer automatic semicolon insertion build error.
 
 package debrid
 
@@ -724,15 +726,7 @@ func (t *torboxProvider) CleanupStaleTorrents(ctx context.Context) (int, error) 
 			}
 		}
 
-		isStaleOrExpired := !isFinished && (
-			state == "expired" ||
-			state == "error" ||
-			state == "failed" ||
-			state == "stalled" ||
-			strings.Contains(state, "stalled") ||
-			state == "paused" ||
-			(age > 24*time.Hour)
-		)
+		isStaleOrExpired := !isFinished && (state == "expired" || state == "error" || state == "failed" || state == "stalled" || strings.Contains(state, "stalled") || state == "paused" || age > 24*time.Hour)
 
 		if isStaleOrExpired {
 			utils.Logger.Info().
@@ -758,7 +752,6 @@ func (t *torboxProvider) CleanupStaleTorrents(ctx context.Context) (int, error) 
 }
 
 func (t *torboxProvider) AddAndSelect(ctx context.Context, magnet string) (*TorrentInfo, error) {
-	// Auto-trigger stale download purge before adding to keep active slots open
 	_, _ = t.CleanupStaleTorrents(ctx)
 
 	addRes, err := t.AddMagnet(ctx, magnet)
