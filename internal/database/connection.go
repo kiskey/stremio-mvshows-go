@@ -1,10 +1,10 @@
-
-// Version: 2.0.2
-// Change log: Added high-speed tmdb_thread_index bucket to manage microsecond-scale pointer lookups, avoiding full sweeps.
+// Version: 2.0.3
+// Change log: Added thread_id_index bucket to manage fast ID lookup pointers and auto-repaired legacy ID=0 records on database startup.
 
 package database
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"time"
@@ -39,6 +39,7 @@ func Init(dbPath string) (*bolt.DB, error) {
 			"torbox_id_map",
 			"catalog_index",
 			"tmdb_thread_index", // High-speed point index bucket
+			"thread_id_index",   // High-speed thread ID lookup index bucket
 		}
 		for _, bName := range buckets {
 			_, errBucket := tx.CreateBucketIfNotExists([]byte(bName))
@@ -46,6 +47,43 @@ func Init(dbPath string) (*bolt.DB, error) {
 				return errBucket
 			}
 		}
+
+		// Self-healing migration: Repair legacy threads with ID == 0 and populate thread_id_index
+		tb := tx.Bucket([]byte("threads"))
+		idB := tx.Bucket([]byte("thread_id_index"))
+		if tb != nil && idB != nil {
+			type repairItem struct {
+				key    []byte
+				thread Thread
+			}
+			var toUpdate []repairItem
+
+			c := tb.Cursor()
+			for k, v := c.First(); k != nil; k, v = c.Next() {
+				var t Thread
+				if errDec := DecodeGob(v, &t); errDec == nil {
+					if t.ID == 0 {
+						seq, errSeq := tb.NextSequence()
+						if errSeq == nil {
+							t.ID = uint(seq)
+							toUpdate = append(toUpdate, repairItem{key: k, thread: t})
+						}
+					} else {
+						// Ensure index pointer is populated
+						_ = idB.Put([]byte(fmt.Sprintf("%d", t.ID)), k)
+					}
+				}
+			}
+
+			for _, item := range toUpdate {
+				bytesData, errEnc := EncodeGob(item.thread)
+				if errEnc == nil {
+					_ = tb.Put(item.key, bytesData)
+					_ = idB.Put([]byte(fmt.Sprintf("%d", item.thread.ID)), item.key)
+				}
+			}
+		}
+
 		return nil
 	})
 	if err != nil {

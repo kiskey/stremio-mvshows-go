@@ -1,3 +1,6 @@
+// Version: 2.1.1
+// Change log: Fixed multi-line boolean condition parenthesis formatting in CleanupStaleTorrents to eliminate Go lexer automatic semicolon insertion build error.
+
 package debrid
 
 import (
@@ -35,8 +38,6 @@ type CacheStore interface {
 	Update(ctx context.Context, hash string, updates map[string]interface{}) error
 	GetByProviderID(ctx context.Context, id string) (map[string]interface{}, error)
 }
-
-// ── Low-Allocation Optimized Type-Safe API Structs ──────────────
 
 type TorboxCreateResponse struct {
 	Success bool   `json:"success"`
@@ -80,8 +81,8 @@ type TorboxCachedItem struct {
 }
 
 type TorboxCheckCachedResponse struct {
-	Success bool                         `json:"success"`
-	Data    map[string]TorboxCachedItem  `json:"data"`
+	Success bool                        `json:"success"`
+	Data    map[string]TorboxCachedItem `json:"data"`
 }
 
 type TorboxRequestDlResponse struct {
@@ -105,7 +106,6 @@ func getIDAsString(item map[string]interface{}, keys ...string) string {
 
 func NewTorbox(cache CacheStore) Provider {
 	cfg := config.Load()
-	// Dynamically expire shared memory caches for TorBox to enforce strict on-demand play redirects
 	URLCache.ttl = 1 * time.Second
 	TorrentInfoCache.ttl = 5 * time.Second
 
@@ -113,7 +113,7 @@ func NewTorbox(cache CacheStore) Provider {
 		client:        utils.NewOptimizedClient(15 * time.Second),
 		apiKey:        cfg.TorboxAPIKey,
 		enabled:       cfg.IsTorboxEnabled,
-		cache:         nil, // explicitly ignore and bypass local persistent DB caching for TorBox
+		cache:         nil,
 		selections:    make(map[string]map[int]bool),
 		recentAdds:    make(map[string]time.Time),
 		recentIDs:     make(map[string]string),
@@ -481,7 +481,7 @@ func (t *torboxProvider) CheckCached(ctx context.Context, hashes []string) (map[
 		return map[string]CacheStatus{}, nil
 	}
 	bodyMap := map[string]interface{}{"hashes": hashes}
-	b, _ := jsonMarshal(bodyMap)
+	b, _ := json.Marshal(bodyMap)
 	req, _ := http.NewRequestWithContext(ctx, "POST", "https://api.torbox.app/v1/api/torrents/checkcached?format=object&list_files=true", bytes.NewReader(b))
 	cfg := config.Load()
 	req.Header.Set("Authorization", "Bearer "+cfg.TorboxAPIKey)
@@ -543,7 +543,6 @@ func (t *torboxProvider) CheckCached(ctx context.Context, hashes []string) (map[
 }
 
 func (t *torboxProvider) GetDownloadLinkForFile(ctx context.Context, torrentID, fileID string) (string, error) {
-	// Retrieve exact filename for our structured playback INFO logging
 	fileName := "unknown"
 	if info, err := t.GetTorrentInfo(ctx, torrentID); err == nil && info != nil {
 		var targetFID int
@@ -646,7 +645,113 @@ func (t *torboxProvider) GetCachedFileInfo(ctx context.Context, hash, fileName s
 	return nil, nil
 }
 
+func (t *torboxProvider) CleanupStaleTorrents(ctx context.Context) (int, error) {
+	if !t.IsEnabled() {
+		return 0, nil
+	}
+
+	resp, err := t.do(ctx, "GET", "/torrents/mylist?bypass_cache=true", nil, "")
+	if err != nil {
+		return 0, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		return 0, fmt.Errorf("cleanup mylist status %d", resp.StatusCode)
+	}
+
+	var data TorboxMyListResponse
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		return 0, err
+	}
+
+	type TorboxItemDetailed struct {
+		ID            json.Number `json:"id"`
+		TorrentID     json.Number `json:"torrent_id"`
+		Hash          string      `json:"hash"`
+		Name          string      `json:"name"`
+		Status        string      `json:"status"`
+		DownloadState string      `json:"download_state"`
+		Progress      float64     `json:"progress"`
+		CreatedAt     string      `json:"created_at"`
+		UpdatedAt     string      `json:"updated_at"`
+		Timestamp     string      `json:"timestamp"`
+	}
+
+	var items []TorboxItemDetailed
+	dataStr := strings.TrimSpace(string(data.Data))
+	if strings.HasPrefix(dataStr, "[") {
+		_ = json.Unmarshal(data.Data, &items)
+	} else if strings.HasPrefix(dataStr, "{") {
+		var single TorboxItemDetailed
+		if err := json.Unmarshal(data.Data, &single); err == nil {
+			items = []TorboxItemDetailed{single}
+		}
+	}
+
+	purgedCount := 0
+	now := time.Now()
+
+	for _, item := range items {
+		torrentID := item.TorrentID.String()
+		if torrentID == "" || torrentID == "0" {
+			torrentID = item.ID.String()
+		}
+		if torrentID == "" || torrentID == "0" {
+			continue
+		}
+
+		state := strings.ToLower(item.DownloadState)
+		if state == "" {
+			state = strings.ToLower(item.Status)
+		}
+
+		isFinished := (state == "completed" || state == "cached" || state == "downloaded" || state == "seeding" || state == "uploading" || item.Progress >= 1.0 || item.Progress >= 100.0)
+
+		timeStr := item.CreatedAt
+		if timeStr == "" {
+			timeStr = item.UpdatedAt
+		}
+		if timeStr == "" {
+			timeStr = item.Timestamp
+		}
+
+		var age time.Duration
+		if timeStr != "" {
+			if parsedTime, errTime := time.Parse(time.RFC3339, timeStr); errTime == nil {
+				age = now.Sub(parsedTime)
+			} else if parsedTime, errTime := time.Parse("2006-01-02 15:04:05", timeStr); errTime == nil {
+				age = now.Sub(parsedTime)
+			}
+		}
+
+		isStaleOrExpired := !isFinished && (state == "expired" || state == "error" || state == "failed" || state == "stalled" || strings.Contains(state, "stalled") || state == "paused" || age > 24*time.Hour)
+
+		if isStaleOrExpired {
+			utils.Logger.Info().
+				Str("torrent_id", torrentID).
+				Str("name", item.Name).
+				Str("state", state).
+				Float64("progress", item.Progress).
+				Dur("age", age).
+				Msg("Purging inactive/stalled/expired Torbox torrent download.")
+
+			if errDel := t.DeleteTorrent(ctx, torrentID); errDel == nil {
+				purgedCount++
+			} else {
+				utils.Logger.Warn().Err(errDel).Str("torrent_id", torrentID).Msg("Failed to delete stale Torbox torrent.")
+			}
+		}
+	}
+
+	if purgedCount > 0 {
+		utils.Logger.Info().Int("purged_count", purgedCount).Msg("Torbox stale torrent cleanup completed.")
+	}
+	return purgedCount, nil
+}
+
 func (t *torboxProvider) AddAndSelect(ctx context.Context, magnet string) (*TorrentInfo, error) {
+	_, _ = t.CleanupStaleTorrents(ctx)
+
 	addRes, err := t.AddMagnet(ctx, magnet)
 	if err != nil {
 		return nil, err
@@ -658,12 +763,4 @@ func (t *torboxProvider) AddAndSelect(ctx context.Context, magnet string) (*Torr
 		return t.GetTorrentInfo(ctx, addRes.ID)
 	}
 	return nil, fmt.Errorf("addAndSelect failed")
-}
-
-func tbJsonDecode(resp *http.Response, v interface{}) error {
-	return json.NewDecoder(resp.Body).Decode(v)
-}
-
-func jsonMarshal(v interface{}) ([]byte, error) {
-	return json.Marshal(v)
 }

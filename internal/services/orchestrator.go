@@ -1,5 +1,5 @@
-// Version: 1.4.1
-// Change log: Overhauled target check structures; migrated processThread from slow O(N) linear iteration to direct O(1) point checks via database.FindThreadByHash [report.md]. Added RunTargetedWorkflow to execute proxy-isolated crawls on specific thread URLs, securely processing, database-indexing, and linking their media. Restored tmdbMetadata.Year assignment to match clean 1.3.0 compilation rules.
+// Version: 1.4.2
+// Change log: Ensured thread process relies on NextSequence() auto-assignment and safe index relinking via CreateOrUpdateThread.
 
 package orchestrator
 
@@ -161,7 +161,6 @@ func isValidParsedTitle(parsed *parser.ParseResult) bool {
 	if strings.TrimSpace(parsed.Title) == "" {
 		return false
 	}
-	// Accept short anime, classic, and daily catalog items [report.md]
 	if len(parsed.Title) < 1 {
 		return false
 	}
@@ -235,7 +234,6 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 		}
 	}()
 
-	// Refactored to O(1) point-lookup instead of slow O(N) database-wide views [report.md]
 	existing, errEx := database.FindThreadByHash(nil, thread.ThreadHash)
 	hasExisting := (errEx == nil && existing != nil)
 
@@ -272,7 +270,6 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 		}
 	}
 
-	// Leverage deep release structures to capture languages, release formats, and quality flags [report.md]
 	prTitle := parser.ParseRelease(thread.RawTitle, thread.Type)
 	parsed := &parser.ParseResult{
 		Title:        prTitle.CleanTitle,
@@ -480,7 +477,6 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 	}
 }
 
-// RunTargetedWorkflow executes an isolated single-page crawl on a specific thread URL and indexes its media.
 func RunTargetedWorkflow(cfg *config.Config, threadURL, contentType, catalogID string) error {
 	utils.Logger.Info().Str("url", threadURL).Str("type", contentType).Msg("Initiating targeted thread recoup workflow...")
 
@@ -496,7 +492,6 @@ func RunTargetedWorkflow(cfg *config.Config, threadURL, contentType, catalogID s
 
 	tmdbClient := metadata.NewTMDBClient(cfg)
 	for _, thread := range scraped {
-		// incremental=false to make sure that the parser and linking logic runs fully on this specific thread (forces re-syncing)
 		processThread(thread, tmdbClient, false)
 	}
 

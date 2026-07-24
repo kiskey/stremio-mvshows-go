@@ -67,4 +67,5 @@ type Provider interface {
 	CheckCached(ctx context.Context, hashes []string) (map[string]CacheStatus, error)
 	AddAndSelect(ctx context.Context, magnet string) (*TorrentInfo, error)
 	GetCachedFileInfo(ctx context.Context, hash, fileName string) (*FileInfo, error)
+	CleanupStaleTorrents(ctx context.Context) (int, error)
 }

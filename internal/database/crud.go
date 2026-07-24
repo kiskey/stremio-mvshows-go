@@ -1,5 +1,5 @@
-// Version: 2.1.1
-// Change log: Increased the stream array cap inside CreateStreams from 100 to 2000 to fully support long-running daily series with hundreds of episode range packets without truncating high-quality streams.
+// Version: 2.1.2
+// Change log: Auto-assign sequence IDs via NextSequence() when ID == 0, prune old streams and tmdb_thread_index during TMDB relinking, and keep thread_id_index synchronized.
 
 package database
 
@@ -27,7 +27,7 @@ func EncodeGob(val interface{}) ([]byte, error) {
 }
 
 // DecodeGob implements a resilient, panic-recovering GOB decoder to insulate the application
-// from future struct changes (e.g. data type adjustments or field renamings) without server crashes.
+// from future struct changes without server crashes.
 func DecodeGob(data []byte, val interface{}) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -109,7 +109,7 @@ func FindThreadByID(id uint) (*Thread, error) {
 			}
 		}
 
-		// Fallback O(N) sweep if pointer index is not initialized or missing [report.md]
+		// Fallback sweep
 		b := tx.Bucket([]byte("threads"))
 		c := b.Cursor()
 		for k, v := c.First(); k != nil; k, v = c.Next() {
@@ -126,7 +126,6 @@ func FindThreadByID(id uint) (*Thread, error) {
 	return found, err
 }
 
-// GetThreadByTmdbID manages microsecond-scale point lookups on TMDB records safely [report.md]
 func GetThreadByTmdbID(tx *bolt.Tx, tmdbID string) (*Thread, error) {
 	var found *Thread
 	err := runView(tx, func(tx *bolt.Tx) error {
@@ -156,8 +155,21 @@ func CreateOrUpdateThread(tx *bolt.Tx, data *Thread) error {
 	return runUpdate(tx, func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte("threads"))
 		idxB := tx.Bucket([]byte("catalog_index"))
+		idB, errIdBucket := tx.CreateBucketIfNotExists([]byte("thread_id_index"))
+		if errIdBucket != nil {
+			return errIdBucket
+		}
 
-		// 1. SELF-HEALING INDEX REGISTRY (Resolves Risk 1):
+		// Auto-assign unique sequence ID if ID is zero
+		if data.ID == 0 {
+			seq, errSeq := b.NextSequence()
+			if errSeq != nil {
+				return errSeq
+			}
+			data.ID = uint(seq)
+		}
+
+		// 1. SELF-HEALING INDEX REGISTRY
 		// Locate and prune old index files if the thread's PostedAt timestamp, Catalog, or Type is updated
 		existingData := b.Get([]byte(data.ThreadHash))
 		if existingData != nil {
@@ -172,6 +184,27 @@ func CreateOrUpdateThread(tx *bolt.Tx, data *Thread) error {
 					oldIndexKey := fmt.Sprintf("cat:%s:%s:%010d:%s", oldThread.Catalog, oldThread.Type, oldInverse, oldThread.ThreadHash)
 					_ = idxB.Delete([]byte(oldIndexKey))
 				}
+				// If TmdbID changed during relinking, clean up old tmdb_thread_index and streams
+				if oldThread.TmdbID != nil && (data.TmdbID == nil || *oldThread.TmdbID != *data.TmdbID) {
+					_ = tx.Bucket([]byte("tmdb_thread_index")).Delete([]byte(*oldThread.TmdbID))
+					// Verify no other thread shares oldTmdbID before wiping streams
+					hasShare := false
+					tCursor := b.Cursor()
+					for tk, tv := tCursor.First(); tk != nil; tk, tv = tCursor.Next() {
+						if string(tk) != data.ThreadHash {
+							var other Thread
+							if errDec := DecodeGob(tv, &other); errDec == nil {
+								if other.TmdbID != nil && *other.TmdbID == *oldThread.TmdbID {
+									hasShare = true
+									break
+								}
+							}
+						}
+					}
+					if !hasShare {
+						_ = tx.Bucket([]byte("streams")).Delete([]byte(*oldThread.TmdbID))
+					}
+				}
 			}
 		}
 
@@ -185,9 +218,9 @@ func CreateOrUpdateThread(tx *bolt.Tx, data *Thread) error {
 			return err
 		}
 
-		// 3. Write new, sorted Catalog Index Key (Resolves Risk 3)
+		// 3. Write new, sorted Catalog Index Key
 		if data.Status == "linked" && data.Catalog != "" {
-			postedTime := time.Unix(0, 0) // Sentinel fallback date used instead of Now() [report.md]
+			postedTime := time.Unix(0, 0)
 			if data.PostedAt != nil {
 				postedTime = *data.PostedAt
 			}
@@ -202,11 +235,8 @@ func CreateOrUpdateThread(tx *bolt.Tx, data *Thread) error {
 			_ = threadIdxB.Put([]byte(*data.TmdbID), []byte(data.ThreadHash))
 		}
 
-		// 5. Write sequential Thread ID lookup pointers dynamically [report.md]
-		idB, errIdBucket := tx.CreateBucketIfNotExists([]byte("thread_id_index"))
-		if errIdBucket == nil && idB != nil {
-			_ = idB.Put([]byte(fmt.Sprintf("%d", data.ID)), []byte(data.ThreadHash))
-		}
+		// 5. Write sequential Thread ID lookup pointers dynamically
+		_ = idB.Put([]byte(fmt.Sprintf("%d", data.ID)), []byte(data.ThreadHash))
 
 		return nil
 	})
@@ -225,7 +255,6 @@ func DeleteThread(tx *bolt.Tx, t *Thread) error {
 			}
 		}
 
-		// Relational safety check: Verify no other linked records share this TmdbID before wiping streams bucket arrays [report.md]
 		if t.TmdbID != nil {
 			_ = tx.Bucket([]byte("tmdb_thread_index")).Delete([]byte(*t.TmdbID))
 
@@ -307,7 +336,6 @@ func GetRecentLinkedThreads() ([]Thread, error) {
 	return list, err
 }
 
-// GetRecentLinkedThreadsPaginated supports high-speed page-slicing inside Bbolt View transactions.
 func GetRecentLinkedThreadsPaginated(offset, limit int) ([]Thread, error) {
 	var list []Thread
 	err := DB.View(func(tx *bolt.Tx) error {
@@ -377,22 +405,18 @@ func FindSeriesStreams(tx *bolt.Tx, tmdbID string, season, episode int) ([]Strea
 		if s.Season != nil && *s.Season == season {
 			if s.Episode != nil {
 				if s.EpisodeEnd != nil {
-					// 1. Matches multi-episode ranges (e.g., Episode 1 to 6)
 					if episode >= *s.Episode && episode <= *s.EpisodeEnd {
 						match = true
 					}
 				} else {
-					// 2. Matches standard single episode releases (e.g., Episode 2)
 					if *s.Episode == episode {
 						match = true
 					}
 				}
 			} else {
-				// 3. Matches Season Packs
 				match = true
 			}
 		} else if s.Season == nil && s.Episode == nil {
-			// 4. Matches global Series Packs / Fallback
 			match = true
 		}
 
@@ -475,7 +499,6 @@ func CreateStreams(tx *bolt.Tx, streams []Stream) error {
 				}
 			}
 
-			// FIX: Increased cap from 100 to 2000 to prevent truncating long series streams
 			if len(existing) > 2000 {
 				existing = existing[len(existing)-2000:]
 			}
@@ -509,7 +532,6 @@ func LogFailedThread(tx *bolt.Tx, hash, rawTitle, reason string) error {
 	})
 }
 
-// GetFailedThreads retrieves all recorded parsing/workflow failures (Unpaginated standard list).
 func GetFailedThreads() ([]FailedThread, error) {
 	var list []FailedThread
 	err := runView(nil, func(tx *bolt.Tx) error {
@@ -529,7 +551,6 @@ func GetFailedThreads() ([]FailedThread, error) {
 	return list, err
 }
 
-// GetFailedThreadsPaginated compiles failing entries sequentially inside slice offsets
 func GetFailedThreadsPaginated(offset, limit int) ([]FailedThread, error) {
 	var list []FailedThread
 	err := runView(nil, func(tx *bolt.Tx) error {
@@ -569,7 +590,6 @@ func IsDebridCacheLocked(hash string) bool {
 	locked := false
 	_ = DB.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte("debrid_cache_locks"))
-		// Force lowercase comparison to prevent key lookup mismatch
 		if b.Get([]byte(strings.ToLower(hash))) != nil {
 			locked = true
 		}

@@ -1,15 +1,17 @@
-// Version: 2.0.2
-// Change log: Integrated standard failed_threads (7 days) and magnet_cache (30 days) TTL pruning to prevent infinite table bloating, and enforced a safety check verifying that free disk space is at least 2.5x the size of the database before compaction begins.
+// Version: 2.0.3
+// Change log: Integrated Debrid provider cloud account stale download purge into maintenance cycle.
 
 package maintenance
 
 import (
+	"context"
 	"os"
 	"syscall"
 	"time"
 
 	"github.com/kiskey/stremio-mvshows-go/internal/config"
 	"github.com/kiskey/stremio-mvshows-go/internal/database"
+	"github.com/kiskey/stremio-mvshows-go/internal/services/debrid"
 	"github.com/kiskey/stremio-mvshows-go/internal/utils"
 	bolt "go.etcd.io/bbolt"
 )
@@ -57,7 +59,7 @@ func PerformMaintenance() {
 		}
 	}
 
-	// 2. Clear expired failed thread log lines (>7 days TTL) [report.md]
+	// 2. Clear expired failed thread log lines (>7 days TTL)
 	utils.Logger.Info().Msg("Checking for expired failed thread logs...")
 	cutoffFailed := time.Now().AddDate(0, 0, -7)
 	var expiredFailedKeys [][]byte
@@ -85,7 +87,7 @@ func PerformMaintenance() {
 		utils.Logger.Info().Int("cleared_count", len(expiredFailedKeys)).Msg("Expired failed thread logs pruned.")
 	}
 
-	// 3. Clear expired magnet caches (>30 days TTL) [report.md]
+	// 3. Clear expired magnet caches (>30 days TTL)
 	utils.Logger.Info().Msg("Checking for expired magnet cache entries...")
 	cutoffMagnet := time.Now().AddDate(0, 0, -30)
 	var expiredMagnetKeys [][]byte
@@ -113,7 +115,20 @@ func PerformMaintenance() {
 		utils.Logger.Info().Int("cleared_count", len(expiredMagnetKeys)).Msg("Expired magnet cache entries pruned.")
 	}
 
-	// 4. Database Compaction
+	// 4. Trigger Debrid Provider Stale Torrent Cleanup (Torbox cloud account purge)
+	utils.Logger.Info().Msg("Executing Debrid provider cloud account stale torrent cleanup...")
+	provider := debrid.GetProvider(cfg)
+	if provider.IsEnabled() {
+		if purged, err := provider.CleanupStaleTorrents(context.Background()); err == nil {
+			if purged > 0 {
+				utils.Logger.Info().Int("purged_torrents", purged).Msg("Debrid cloud account stale downloads purged successfully.")
+			}
+		} else {
+			utils.Logger.Warn().Err(err).Msg("Debrid cloud account cleanup encountered an error.")
+		}
+	}
+
+	// 5. Database Compaction
 	dbPath := "/data/stremio_addon.db.bolt"
 	tempPath := dbPath + ".compact"
 
@@ -122,7 +137,6 @@ func PerformMaintenance() {
 		dbSize = stat.Size()
 	}
 
-	// Safety Check: Verify that available disk space is at least 2.5x the size of the database before compaction begins to prevent truncation errors [report.md]
 	requiredSpace := int64(float64(dbSize) * 2.5)
 	if !hasEnoughSpaceForCompaction("/data", requiredSpace) {
 		utils.Logger.Error().
@@ -162,12 +176,8 @@ func hasEnoughSpaceForCompaction(path string, requiredSpace int64) bool {
 	err := syscall.Statfs(path, &stat)
 	if err != nil {
 		utils.Logger.Warn().Err(err).Msg("Could not verify disk space via syscall, bypassing check.")
-		return true // Fallback to allowing write to ensure cross-platform test safety
+		return true
 	}
 	availableBytes := stat.Bavail * uint64(stat.Bsize)
 	return int64(availableBytes) > requiredSpace
-}
-
-func init() {
-	_ = os.DevNull // Prevent unused imports compile crash
 }

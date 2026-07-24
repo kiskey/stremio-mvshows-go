@@ -1,6 +1,5 @@
-
-// Version: 2.0.1
-// Change log: Fixed undefined bolt namespace compiler error by explicitly aliasing go.etcd.io/bbolt import as bolt.
+// Version: 2.0.2
+// Change log: Updated disabledProvider stub to implement CleanupStaleTorrents.
 
 package debrid
 
@@ -24,7 +23,6 @@ var (
 	URLCache         = NewMemoryCache(1 * time.Hour)
 )
 
-// GetProvider retrieves or initializes the configured debrid provider instance.
 func GetProvider(cfg *config.Config) Provider {
 	once.Do(func() {
 		switch cfg.DebridService {
@@ -39,7 +37,6 @@ func GetProvider(cfg *config.Config) Provider {
 	return providerInstance
 }
 
-// LoadProvider acts as a parameter-less fallback to GetProvider, loading config on-demand.
 func LoadProvider() Provider {
 	return GetProvider(config.Load())
 }
@@ -148,10 +145,12 @@ func (d *disabledProvider) AddAndSelect(ctx context.Context, magnet string) (*To
 func (d *disabledProvider) GetCachedFileInfo(ctx context.Context, hash, fileName string) (*FileInfo, error) {
 	return nil, errors.New("debrid not configured")
 }
+func (d *disabledProvider) CleanupStaleTorrents(ctx context.Context) (int, error) {
+	return 0, nil
+}
 
 // ── Unified CheckCached Fallback Orchestrator ──
 
-// CheckCached implements unified cache checks for torrent lists.
 func CheckCached(hashes []string, _ interface{}) map[string]bool {
 	cfg := config.Load()
 	p := GetProvider(cfg)
@@ -172,7 +171,6 @@ func CheckCached(hashes []string, _ interface{}) map[string]bool {
 		}
 	}
 
-	// BoltDB Local Override check
 	if database.DB != nil && len(hashes) > 0 {
 		_ = database.DB.View(func(tx *bolt.Tx) error {
 			b := tx.Bucket([]byte("debrid_torrents"))
