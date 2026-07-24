@@ -161,7 +161,7 @@
     </style>
 </head>
 <body>
-    <h1>► MVSHOWS ADMIN TERMINAL v2.2.0 ◄</h1>
+    <h1>► MVSHOWS ADMIN TERMINAL v2.3.0 ◄</h1>
 
     <div class="dashboard-grid">
         
@@ -337,7 +337,7 @@
                         </div>
                     </div>
 
-                    <!-- Scrollable Visual Cards Grid (Responsive Multi-Column Deck with Large Posters) -->
+                    <!-- Scrollable Visual Cards Grid -->
                     <div id="visualCandidatesContainer" style="max-height: 480px; overflow-y: auto; display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 15px; border: 1px dashed #333; padding: 12px; background: #000;">
                         <div style="grid-column: 1 / -1; color: #666; text-align: center; font-size: 1.3rem; padding: 40px 0;">Select a pending item above to search visual candidates.</div>
                     </div>
@@ -383,7 +383,6 @@
                 </div>
             </div>
 
-            <!-- Validation/Result box (Hidden initially) -->
             <div id="purgeResultBox" style="display: none; border: 1px dashed #ff2a5f; padding: 15px; background: #000; font-family: monospace; font-size: 1.25rem; line-height: 1.4; margin-bottom: 15px;">
                 <div style="font-weight: bold; color: #ff2a5f; font-size: 1.4rem; margin-bottom: 10px; border-bottom: 1px dotted #ff2a5f; padding-bottom: 5px;">► TARGET RECORDS VERIFIED</div>
                 <div style="margin-bottom: 5px;">Matched Title: <strong id="purgeResultTitle" class="glow-green">None</strong></div>
@@ -430,7 +429,6 @@
                     <button id="recoupExecuteBtn" style="border-color: #ff9900; color: #ff9900; box-shadow: 2px 2px 0 #553300; font-size: 1.3rem; padding: 5px 25px; background: #0b0600; margin: 0;">⚡ Recoup &amp; Index Thread</button>
                 </div>
 
-                <!-- Status Console log box -->
                 <div style="font-size: 1.05rem; text-transform: uppercase; color: #888; margin-top: 5px; margin-bottom: -4px;">► Recoup Output Monitor</div>
                 <div id="recoupStatus" class="glow-amber" style="border: 1px dashed #333; padding: 6px; height: 100px; overflow-y: auto; font-size: 1.05rem; background: #000; font-family: monospace; line-height: 1.2;">
                     Idle... Ready for targeted single-thread crawl.
@@ -492,15 +490,25 @@
             let focusedThreadId = null;
             let page = 1;
 
-            // ── Utility: safe DOM access ─────────────────────────
             function el(id) {
                 return document.getElementById(id);
             }
 
-            // ── Health & Dashboard ───────────────────────────────
+            function clearFocusState() {
+                focusedThreadId = null;
+                el('focusedTitle').textContent = 'None';
+                el('customPoster').value = '';
+                el('customDescription').value = '';
+                el('officialId').value = '';
+                el('visualSearchTarget').textContent = 'None';
+                el('visualSearchInput').value = '';
+                el('visualCandidatesContainer').innerHTML = '<div style="color: #666; text-align: center; font-size: 1.1rem; padding: 20px 0; grid-column: 1 / -1;">Select a pending item above to search visual candidates.</div>';
+                el('streamsBody').innerHTML = '<tr><td colspan="3" style="color: #666; text-align: center;">Set a focused item above to query available streams.</td></tr>';
+            }
+
             async function fetchHealth() {
                 try {
-                    const r = await fetch('/admin/api/health');
+                    const r = await fetch('/admin/api/health?_t=' + Date.now());
                     const d = await r.json();
                     el('isCrawling').textContent = d.isCrawling ? 'ACTIVE' : 'IDLE';
                     el('isCrawling').className = d.isCrawling ? 'glow-amber' : 'glow-green';
@@ -517,7 +525,6 @@
                     el('trackerCount').textContent = d.trackerCount;
                     el('dbSize').textContent = d.dbSizeBytes ? (d.dbSizeBytes / 1024 / 1024).toFixed(1) + ' MB' : '-';
 
-                    // Dashboard counts
                     el('linkedCount').textContent = d.linked ?? 0;
                     el('pendingCount').textContent = d.pending ?? 0;
                     el('failedCount').textContent = d.failed ?? 0;
@@ -526,40 +533,69 @@
                 }
             }
 
-            // ── Trigger Crawl ────────────────────────────────────
             el('triggerCrawl').addEventListener('click', async () => {
                 await fetch('/admin/api/trigger-crawl', { method: 'POST' });
                 alert('Crawl sequence initiated in background.');
                 fetchHealth();
             });
 
-            // ── Pending Items ────────────────────────────────────
+            // Synchronized Dual-List & Anti-Cache Refresh Implementation
             async function loadPending() {
-                const r = await fetch('/admin/api/pending');
-                const items = await r.json();
-                const sel = el('availableList');
-                sel.innerHTML = '';
-                items.forEach(t => {
-                    const opt = document.createElement('option');
-                    opt.value = t.id;
-                    opt.textContent = t.clean_title || t.raw_title;
-                    sel.appendChild(opt);
-                });
+                try {
+                    const r = await fetch('/admin/api/pending?_t=' + Date.now());
+                    const items = await r.json();
+
+                    const pendingMap = new Map();
+                    (items || []).forEach(t => {
+                        pendingMap.set(String(t.id), t.clean_title || t.raw_title);
+                    });
+
+                    // 1. Refresh Available List (#availableList)
+                    const availSel = el('availableList');
+                    const selectedBatchIds = new Set([...el('selectedList').options].map(opt => String(opt.value)));
+                    
+                    availSel.innerHTML = '';
+                    pendingMap.forEach((title, id) => {
+                        if (!selectedBatchIds.has(id)) {
+                            const opt = document.createElement('option');
+                            opt.value = id;
+                            opt.textContent = title;
+                            availSel.appendChild(opt);
+                        }
+                    });
+
+                    // 2. Synchronize & Purge Batch List (#selectedList)
+                    const batchSel = el('selectedList');
+                    const currentBatchOpts = [...batchSel.options];
+                    batchSel.innerHTML = '';
+                    currentBatchOpts.forEach(opt => {
+                        if (pendingMap.has(String(opt.value))) {
+                            const newOpt = document.createElement('option');
+                            newOpt.value = opt.value;
+                            newOpt.textContent = pendingMap.get(String(opt.value));
+                            batchSel.appendChild(newOpt);
+                        }
+                    });
+
+                    // 3. Purge focused state if focused item was linked/removed
+                    if (focusedThreadId && !pendingMap.has(String(focusedThreadId))) {
+                        clearFocusState();
+                    }
+                } catch (err) {
+                    console.error('Failed to load pending threads:', err);
+                }
             }
 
-            // Centralized helper to set focused item and search Cinemeta visually
             async function selectFocusedItem(threadId, title) {
                 focusedThreadId = threadId;
                 el('focusedTitle').textContent = title;
                 el('visualSearchTarget').textContent = title;
                 el('visualSearchInput').value = title;
                 
-                // Fetch streams and visually match candidates
                 loadStreams(threadId);
                 triggerCinemetaSearch(title);
             }
 
-            // Auto-Focus handlers when selecting an option in either list
             el('availableList').addEventListener('change', () => {
                 const sel = el('availableList');
                 if (sel.selectedOptions.length > 0) {
@@ -567,24 +603,23 @@
                 }
             });
 
-            // FIXED: Fetch real paginated data matching current active page state (Resolves cosmetic pagination bug)
-            async function loadRecent(p) {
-                page = p || page;
-                const r = await fetch(`/admin/api/recent?page=${page}&limit=15`);
-                const d = await r.json();
-                el('currentPage').textContent = page;
-                const rows = [];
-                (d.linked || []).forEach(l => rows.push(`<tr><td class="glow-green">LINKED</td><td>${l.title}</td><td>${l.updatedAt}</td></tr>`));
-                (d.failures || []).forEach(f => rows.push(`<tr><td class="glow-red">FAILED</td><td>${f.title}</td><td>${f.last_attempt}</td></tr>`));
-                el('recentBody').innerHTML = rows.join('');
-            }
-
             el('selectedList').addEventListener('change', () => {
                 const sel = el('selectedList');
                 if (sel.selectedOptions.length > 0) {
                     selectFocusedItem(sel.selectedOptions[0].value, sel.selectedOptions[0].textContent);
                 }
             });
+
+            async function loadRecent(p) {
+                page = p || page;
+                const r = await fetch(`/admin/api/recent?page=${page}&limit=15&_t=${Date.now()}`);
+                const d = await r.json();
+                el('currentPage').textContent = page;
+                const rows = [];
+                (d.linked || []).forEach(l => rows.push(`<tr><td class="glow-green">LINKED</td><td>${l.title}</td><td>${l.updatedAt}</td></tr>`));
+                (d.failures || []).forEach(f => rows.push(`<tr><td class="glow-red">FAILED</td><td>${f.title}</td><td>${f.updatedAt}</td></tr>`));
+                el('recentBody').innerHTML = rows.join('');
+            }
 
             el('setFocusBtn').addEventListener('click', async () => {
                 const sel = el('selectedList').selectedOptions.length > 0 ? el('selectedList') : el('availableList');
@@ -594,7 +629,7 @@
             });
 
             async function loadStreams(threadId) {
-                const r = await fetch(`/admin/api/pending/${threadId}/streams`);
+                const r = await fetch(`/admin/api/pending/${threadId}/streams?_t=${Date.now()}`);
                 const data = await r.json();
                 const tbody = el('streamsBody');
                 tbody.innerHTML = '';
@@ -617,13 +652,12 @@
                 });
             }
 
-            // ── Panel C: Visual Cinemeta Search Resolver ────────
             async function triggerCinemetaSearch(query) {
                 const container = el('visualCandidatesContainer');
                 container.innerHTML = '<div style="color: #00ff66; text-align: center; padding: 25px 0; grid-column: 1 / -1;">🔍 Querying Cinemeta catalogs in parallel...</div>';
 
                 try {
-                    const r = await fetch(`/admin/api/cinemeta-search?query=${encodeURIComponent(query)}`);
+                    const r = await fetch(`/admin/api/cinemeta-search?query=${encodeURIComponent(query)}&_t=${Date.now()}`);
                     const candidates = await r.json();
                     if (r.ok) {
                         renderVisualCandidates(candidates);
@@ -680,7 +714,6 @@
                 container.querySelectorAll('.visualLinkBtn').forEach(btn => {
                     btn.addEventListener('click', async () => {
                         const imdbId = btn.getAttribute('data-id');
-                        const mediaType = btn.getAttribute('data-type');
 
                         if (!focusedThreadId) {
                             alert("Select a focused pending item first!");
@@ -702,14 +735,9 @@
                             const d = await response.json();
                             if (response.ok) {
                                 alert(`Successfully linked to ${imdbId}!`);
-                                focusedThreadId = null;
-                                el('focusedTitle').textContent = 'None';
-                                el('visualSearchTarget').textContent = 'None';
-                                el('visualSearchInput').value = '';
-                                container.innerHTML = '<div style="color: #666; text-align: center; font-size: 1.1rem; padding: 20px 0; grid-column: 1 / -1;">Select a pending item above to search visual candidates.</div>';
-                                el('streamsBody').innerHTML = '<tr><td colspan="3" style="color: #666; text-align: center;">Set a focused item above to query available streams.</td></tr>';
-                                loadPending();
-                                fetchHealth();
+                                clearFocusState();
+                                await loadPending();
+                                await fetchHealth();
                             } else {
                                 alert('Linking failed: ' + (d.error || 'Unknown error'));
                                 btn.disabled = false;
@@ -731,7 +759,6 @@
                 }
             });
 
-            // ── General Cache Caching ────────────────────────────
             el('cacheSelected').addEventListener('click', async () => {
                 if (!focusedThreadId) return alert('Set a focused item first.');
                 const radio = document.querySelector('input[name="streamSelect"]:checked');
@@ -758,8 +785,9 @@
                 });
                 const d = await r.json();
                 alert(d.message);
-                loadPending();
-                fetchHealth();
+                clearFocusState();
+                await loadPending();
+                await fetchHealth();
             });
 
             el('autoMatchFocused').addEventListener('click', async () => {
@@ -774,14 +802,9 @@
                     const d = await r.json();
                     if (d.successCount > 0) {
                         alert(`Successfully auto-matched: "${(d.matchedTitles || []).join(', ')}"!`);
-                        focusedThreadId = null;
-                        el('focusedTitle').textContent = 'None';
-                        el('visualSearchTarget').textContent = 'None';
-                        el('visualSearchInput').value = '';
-                        el('visualCandidatesContainer').innerHTML = '<div style="color: #666; text-align: center; font-size: 1.1rem; padding: 20px 0; grid-column: 1 / -1;">Select a pending item above to search visual candidates.</div>';
-                        el('streamsBody').innerHTML = '<tr><td colspan="3" style="color: #666; text-align: center;">Set a focused item above to query available streams.</td></tr>';
-                        loadPending();
-                        fetchHealth();
+                        clearFocusState();
+                        await loadPending();
+                        await fetchHealth();
                     } else {
                         alert('Auto-matching failed to locate a confident metadata candidate. Please enter a manual ID.');
                     }
@@ -791,8 +814,6 @@
                     el('autoMatchFocused').disabled = false;
                 }
             });
-
-            // ── Panel B: Orchestrated Batch Actions ───────────
 
             async function runBulkAutoMatch() {
                 const sel = el('selectedList');
@@ -829,8 +850,9 @@
                 btn.disabled = false;
                 
                 sel.innerHTML = '';
-                loadPending();
-                fetchHealth();
+                clearFocusState();
+                await loadPending();
+                await fetchHealth();
             }
 
             async function runBulkLinkToOneID() {
@@ -872,7 +894,6 @@
                         statusDiv.innerHTML += `<span class="glow-red">ERROR: ${e.message}</span><br>`;
                     }
                     statusDiv.scrollTop = statusDiv.scrollHeight;
-                    // Minor delay to prevent lock contentions
                     await new Promise(r => setTimeout(r, 200));
                 }
                 statusDiv.innerHTML += `<b>FINISHED: ${success} success, ${fail} failed.</b><br>`;
@@ -880,8 +901,9 @@
                 btn.disabled = false;
                 
                 sel.innerHTML = '';
-                loadPending();
-                fetchHealth();
+                clearFocusState();
+                await loadPending();
+                await fetchHealth();
             }
 
             async function runBulkUpdateMeta() {
@@ -934,7 +956,7 @@
                 statusDiv.scrollTop = statusDiv.scrollHeight;
                 btn.disabled = false;
                 
-                loadPending();
+                await loadPending();
             }
 
             el('saveFocused').addEventListener('click', async () => {
@@ -952,7 +974,6 @@
                 alert(d.message);
             });
 
-            // Move buttons
             el('moveBtn').addEventListener('click', () => moveItems('availableList', 'selectedList'));
             el('removeBtn').addEventListener('click', () => moveItems('selectedList', 'availableList'));
             el('moveAllBtn').addEventListener('click', () => moveAll('availableList', 'selectedList'));
@@ -969,12 +990,10 @@
                 [...from.options].forEach(opt => to.appendChild(opt));
             }
 
-            // Bind batch console action listeners
             el('bulkAutoMatch').addEventListener('click', runBulkAutoMatch);
             el('bulkLink').addEventListener('click', runBulkLinkToOneID);
             el('bulkUpdateMeta').addEventListener('click', runBulkUpdateMeta);
 
-            // ── Purge Console Handlers (Panel D) ────────────────
             const purgeSearchInput = el('purgeSearchInput');
             const purgeLookupBtn = el('purgeLookupBtn');
             const purgeResultBox = el('purgeResultBox');
@@ -999,7 +1018,7 @@
                 purgeResultBox.style.display = 'none';
 
                 try {
-                    const r = await fetch(`/admin/api/purge-lookup?imdbId=${encodeURIComponent(imdbId)}`);
+                    const r = await fetch(`/admin/api/purge-lookup?imdbId=${encodeURIComponent(imdbId)}&_t=${Date.now()}`);
                     const d = await r.json();
                     if (r.ok && d.found) {
                         currentPurgeImdbId = d.imdbId;
@@ -1049,14 +1068,13 @@
                     const d = await r.json();
                     if (r.ok) {
                         alert(d.message || 'Records successfully purged.');
-                        // Reset forms
                         purgeSearchInput.value = '';
                         purgeResultBox.style.display = 'none';
                         currentPurgeImdbId = "";
                         
-                        // Reload pending and dashboard stats
-                        loadPending();
-                        fetchHealth();
+                        clearFocusState();
+                        await loadPending();
+                        await fetchHealth();
                     } else {
                         alert('Purge failed: ' + (d.error || 'Unknown error'));
                     }
@@ -1068,7 +1086,6 @@
                 }
             });
 
-            // ── Recoup Console Handlers (Panel E) ───────────────
             const recoupUrlInput = el('recoupUrlInput');
             const recoupCategorySelect = el('recoupCategorySelect');
             const recoupExecuteBtn = el('recoupExecuteBtn');
@@ -1112,8 +1129,9 @@
                         recoupStatus.innerHTML += `<span class="glow-green">SUCCESS: Thread crawled, parsed, and stream indexes updated successfully!</span><br>`;
                         alert(d.message || 'Thread recouped and indexed successfully.');
                         recoupUrlInput.value = '';
-                        loadPending();
-                        fetchHealth();
+                        clearFocusState();
+                        await loadPending();
+                        await fetchHealth();
                     } else {
                         recoupStatus.innerHTML += `<span class="glow-red">FAILED: ${d.error || 'Unknown error'}</span><br>`;
                         alert('Index failed: ' + (d.error || 'Unknown error'));
@@ -1128,12 +1146,11 @@
                 }
             });
 
-            // ── Failures ─────────────────────────────────────────
             async function loadFailures() {
-                const r = await fetch('/admin/api/failures');
+                const r = await fetch('/admin/api/failures?_t=' + Date.now());
                 const items = await r.json();
                 const tbody = el('failuresBody');
-                tbody.innerHTML = items.map(f => `
+                tbody.innerHTML = (items || []).map(f => `
                     <tr>
                         <td>${f.raw_title}</td>
                         <td class="glow-red">${f.reason}</td>
@@ -1155,13 +1172,11 @@
             el('prevPage').addEventListener('click', () => { if (page > 1) loadRecent(page - 1); });
             el('nextPage').addEventListener('click', () => loadRecent(page + 1));
 
-            // ── Init ─────────────────────────────────────────────
             document.addEventListener('DOMContentLoaded', () => {
                 fetchHealth();
                 loadPending();
                 loadFailures();
                 loadRecent(1);
-                // Refresh health and dashboard every 30 seconds
                 setInterval(fetchHealth, 30000);
             });
         })();
