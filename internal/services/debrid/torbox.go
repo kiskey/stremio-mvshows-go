@@ -1,5 +1,3 @@
---- START OF FILE stremio-mvshows-go-enhance1.0/internal/services/debrid/torbox.go ---
-
 // Version: 2.1.1
 // Change log: Fixed multi-line boolean condition parenthesis formatting in CleanupStaleTorrents to eliminate Go lexer automatic semicolon insertion build error.
 
