@@ -1,5 +1,5 @@
-// Version: 2.3.1
-// Change log: Enforced tracker stripping on manual link / autoMatch paths, cleaned up old streams and tmdb_thread_index during TMDB relinking, and added title validation guardrails.
+// Version: 2.3.2
+// Change log: Added HTTP anti-caching response headers (Cache-Control: no-cache, no-store, must-revalidate) to pending, recent, and failures endpoints to eliminate stale browser cache lag.
 
 package api
 
@@ -95,7 +95,14 @@ func triggerCrawlHandler(c *gin.Context) {
 	c.JSON(http.StatusAccepted, gin.H{"message": "Manual crawl triggered successfully"})
 }
 
+func setAntiCacheHeaders(c *gin.Context) {
+	c.Header("Cache-Control", "no-cache, no-store, must-revalidate")
+	c.Header("Pragma", "no-cache")
+	c.Header("Expires", "0")
+}
+
 func pendingThreadsHandler(c *gin.Context) {
+	setAntiCacheHeaders(c)
 	threads, err := database.GetPendingThreads()
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve pending threads"})
@@ -105,6 +112,7 @@ func pendingThreadsHandler(c *gin.Context) {
 }
 
 func pendingStreamsHandler(c *gin.Context) {
+	setAntiCacheHeaders(c)
 	threadIdStr := c.Param("threadId")
 	threadId, err := strconv.Atoi(threadIdStr)
 	if err != nil {
@@ -800,6 +808,7 @@ func rdCheckHandler(c *gin.Context) {
 }
 
 func failuresHandler(c *gin.Context) {
+	setAntiCacheHeaders(c)
 	failures, err := database.GetFailedThreads()
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve parse failures"})
@@ -824,6 +833,7 @@ func retryParseHandler(c *gin.Context) {
 }
 
 func recentHandler(c *gin.Context) {
+	setAntiCacheHeaders(c)
 	pageStr := c.DefaultQuery("page", "1")
 	limitStr := c.DefaultQuery("limit", "15")
 
