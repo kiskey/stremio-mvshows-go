@@ -1,5 +1,5 @@
-// Version: 2.3.0
-// Change log: Overhauled admin controller; enforced StripTrackersFromMagnet on linkOfficial/autoMatch paths, fixed customMeta empty string handling to write nil fallbacks, integrated strict title checking rules, and implemented selective purge-lookup, purge-confirm, and trigger-targeted-crawl controllers.
+// Version: 2.3.1
+// Change log: Enforced tracker stripping on manual link / autoMatch paths, cleaned up old streams and tmdb_thread_index during TMDB relinking, and added title validation guardrails.
 
 package api
 
@@ -42,11 +42,8 @@ func RegisterAdminRoutes(r *gin.RouterGroup) {
 	r.GET("/cinemeta-search", cinemetaSearchHandler)
 	r.POST("/parse-preview", parsePreviewHandler)
 
-	// New Purge Console routes (Panel D)
 	r.GET("/purge-lookup", purgeLookupHandler)
 	r.POST("/purge-confirm", purgeConfirmHandler)
-
-	// New Targeted Recoup route (Panel E)
 	r.POST("/trigger-targeted-crawl", triggerTargetedCrawlHandler)
 }
 
@@ -73,18 +70,18 @@ func healthHandler(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"isCrawling":         orchestrator.IsCrawling(),
-		"lastUpdated":        stats.LastUpdated.Format(time.RFC3339),
-		"debridService":      cfg.DebridService,
-		"debridCacheCheck":   cacheCheck,
-		"realDebridEnabled":  cfg.IsRDEnabled,
-		"torboxEnabled":      cfg.IsTorboxEnabled,
-		"tmdbConfigured":     cfg.TMDBAPIKey != "",
-		"trackerCount":       len(tracker.GetTrackers()),
-		"dbSizeBytes":        dbSize,
-		"linked":             stats.Linked,
-		"pending":            stats.Pending,
-		"failed":             stats.Failed,
+		"isCrawling":        orchestrator.IsCrawling(),
+		"lastUpdated":       stats.LastUpdated.Format(time.RFC3339),
+		"debridService":     cfg.DebridService,
+		"debridCacheCheck":  cacheCheck,
+		"realDebridEnabled": cfg.IsRDEnabled,
+		"torboxEnabled":     cfg.IsTorboxEnabled,
+		"tmdbConfigured":    cfg.TMDBAPIKey != "",
+		"trackerCount":      len(tracker.GetTrackers()),
+		"dbSizeBytes":       dbSize,
+		"linked":            stats.Linked,
+		"pending":           stats.Pending,
+		"failed":            stats.Failed,
 	})
 }
 
@@ -182,7 +179,6 @@ func customMetaHandler(c *gin.Context) {
 		return
 	}
 
-	// Sanitize empty overrides cleanly [report.md]
 	if body.Poster != nil && strings.TrimSpace(*body.Poster) == "" {
 		t.CustomPoster = nil
 	} else {
@@ -299,7 +295,6 @@ func linkOfficialHandler(c *gin.Context) {
 			t.Year = &tmdbResult.Year
 		}
 
-		// Enforce tracker-stripping on manual linking paths to resolve Risk 1 [report.md]
 		var cleanedMagnets []string
 		for _, m := range t.MagnetURIs {
 			cleanedMagnets = append(cleanedMagnets, parser.StripTrackersFromMagnet(m))
@@ -320,7 +315,7 @@ func linkOfficialHandler(c *gin.Context) {
 
 			cacheRecord := database.MagnetCache{
 				Infohash:  parsedMagnet.Infohash,
-				Magnet:    parser.StripTrackersFromMagnet(magnet), // Ensure stripped writes [report.md]
+				Magnet:    parser.StripTrackersFromMagnet(magnet),
 				CreatedAt: time.Now(),
 			}
 			cacheBytes, _ := database.EncodeGob(cacheRecord)
@@ -431,7 +426,6 @@ func autoMatchHandler(c *gin.Context) {
 				return
 			}
 
-			// Validate titles prior to auto-matching metadata targets [report.md]
 			if parsed.Title == "" || len(parsed.Title) <= 1 || isAllNumbers(parsed.Title) || (isAllUppercase(parsed.Title) && len(parsed.Title) > 3) {
 				mu.Lock()
 				failCount++
@@ -533,7 +527,6 @@ func autoMatchHandler(c *gin.Context) {
 				res.Thread.Year = &res.Result.Year
 			}
 
-			// Enforce tracker-stripping on autoMatch paths to resolve Risk 1 [report.md]
 			var cleanedMagnets []string
 			for _, m := range res.Thread.MagnetURIs {
 				cleanedMagnets = append(cleanedMagnets, parser.StripTrackersFromMagnet(m))
@@ -554,7 +547,7 @@ func autoMatchHandler(c *gin.Context) {
 
 				cacheRecord := database.MagnetCache{
 					Infohash:  parsedMagnet.Infohash,
-					Magnet:    parser.StripTrackersFromMagnet(magnet), // Save tracker-stripped variants cleanly [report.md]
+					Magnet:    parser.StripTrackersFromMagnet(magnet),
 					CreatedAt: time.Now(),
 				}
 				cacheBytes, _ := database.EncodeGob(cacheRecord)
@@ -901,7 +894,6 @@ func purgeLookupHandler(c *gin.Context) {
 		return
 	}
 
-	// Search for all linked threads
 	type threadInfo struct {
 		ID       uint   `json:"id"`
 		RawTitle string `json:"rawTitle"`
@@ -937,7 +929,6 @@ func purgeLookupHandler(c *gin.Context) {
 		title = "Unknown Linked Title"
 	}
 
-	// Query stream count
 	var streams []database.Stream
 	_ = database.DB.View(func(tx *bolt.Tx) error {
 		sb := tx.Bucket([]byte("streams"))
@@ -1014,12 +1005,10 @@ func purgeConfirmHandler(c *gin.Context) {
 		}
 	}
 
-	// Direct stream and metadata cleanup guarantee
 	_ = database.DB.Update(func(tx *bolt.Tx) error {
 		_ = tx.Bucket([]byte("streams")).Delete([]byte(meta.TmdbID))
 		_ = tx.Bucket([]byte("tmdb_thread_index")).Delete([]byte(meta.TmdbID))
 		
-		// Clean up the IMDb ID and TMDB ID keys from tmdb_metadata
 		metaB := tx.Bucket([]byte("tmdb_metadata"))
 		_ = metaB.Delete([]byte(meta.TmdbID))
 		if meta.ImdbID != nil && *meta.ImdbID != "" {
