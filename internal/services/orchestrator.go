@@ -1,5 +1,5 @@
-// Version: 1.7.1
-// Change log: Updated isValidParsedTitle to allow ALL-CAPS and numeric titles while rejecting metadata-only word ratio noise.
+// Version: 1.7.2
+// Change log: Removed local duplicate isMetadataWord and delegated word ratio checking directly to parser.IsMetadataWord.
 
 package orchestrator
 
@@ -8,7 +8,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unicode"
 
 	"github.com/kiskey/stremio-mvshows-go/internal/config"
 	"github.com/kiskey/stremio-mvshows-go/internal/database"
@@ -210,7 +209,7 @@ func isValidParsedTitle(parsed *parser.ParseResult) bool {
 	words := strings.Fields(strings.ToLower(title))
 	metadataCount := 0
 	for _, w := range words {
-		if isMetadataWord(w) {
+		if parser.IsMetadataWord(w) {
 			metadataCount++
 		}
 	}
@@ -219,45 +218,6 @@ func isValidParsedTitle(parsed *parser.ParseResult) bool {
 	}
 
 	return true
-}
-
-func isAllNumbers(s string) bool {
-	for _, r := range s {
-		if !unicode.IsDigit(r) && !unicode.IsSpace(r) {
-			return false
-		}
-	}
-	return true
-}
-
-func isAllUppercase(s string) bool {
-	hasLetter := false
-	for _, r := range s {
-		if unicode.IsLetter(r) {
-			hasLetter = true
-			if unicode.IsLower(r) {
-				return false
-			}
-		}
-	}
-	return hasLetter
-}
-
-func isMetadataWord(s string) bool {
-	metadataWords := []string{
-		"proper", "repack", "extended", "unrated", "remastered",
-		"x264", "x265", "hevc", "avc", "aac", "ac3", "dts",
-		"720p", "1080p", "2160p", "480p", "4k", "uhd",
-		"webdl", "webrip", "bluray", "hdtv", "dvdrip",
-		"gb", "mb", "kb", "esub", "sub", "subs",
-	}
-	s = strings.ToLower(s)
-	for _, w := range metadataWords {
-		if s == w {
-			return true
-		}
-	}
-	return false
 }
 
 func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient, incremental bool) {
