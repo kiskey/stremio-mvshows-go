@@ -190,7 +190,7 @@
     </style>
 </head>
 <body>
-    <h1>► MVSHOWS ADMIN TERMINAL v2.4.0 ◄</h1>
+    <h1>► MVSHOWS ADMIN TERMINAL v2.6.0 ◄</h1>
 
     <div class="dashboard-grid">
         
@@ -246,7 +246,7 @@
             </div>
 
             <!-- Tabbed Watchlist Filters -->
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; border-bottom: 1px dashed #333; padding-bottom: 10px; flex-wrap: wrap; gap: 10px;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; border-bottom: 1px dashed #333; padding-bottom: 10px; flex-wrap: wrap; gap: 10px;">
                 <div style="display: flex; gap: 8px;">
                     <button id="tabActiveBtn" style="border-color: #00ff66; color: #00ff66; background: #001100;">🟢 Active (<span id="countActive">0</span>)</button>
                     <button id="tabPausedBtn" style="border-color: #ff9900; color: #ff9900;">⏸️ Paused (<span id="countPaused">0</span>)</button>
@@ -255,11 +255,22 @@
                 <input type="text" id="watchlistFilterInput" placeholder="Filter active view..." style="width: 220px; border-color: #00e5ff; height: 32px;">
             </div>
 
+            <!-- Batch Operations Toolbar -->
+            <div style="display: flex; gap: 10px; align-items: center; margin-bottom: 15px; background: #08080c; border: 1px solid #00ff66; padding: 8px 12px; flex-wrap: wrap;">
+                <span style="font-size: 1.15rem; color: #00ff66; font-weight: bold;">BATCH COMMANDS:</span>
+                <button id="bulkActiveBtn" style="border-color: #00ff66; color: #00ff66; font-size: 1.05rem; padding: 2px 10px; margin: 0;">🟢 Bulk Activate</button>
+                <button id="bulkPauseBtn" style="border-color: #ff9900; color: #ff9900; font-size: 1.05rem; padding: 2px 10px; margin: 0;">⏸️ Bulk Pause</button>
+                <button id="bulkArchiveBtn" style="border-color: #888; color: #888; font-size: 1.05rem; padding: 2px 10px; margin: 0;">📁 Bulk Archive</button>
+                <button id="bulkRemoveBtn" style="border-color: #ff2a5f; color: #ff2a5f; font-size: 1.05rem; padding: 2px 10px; margin: 0;">🔥 Bulk Remove</button>
+                <span id="bulkSelectedCounter" style="color: #00e5ff; font-size: 1.15rem; margin-left: auto; font-weight: bold;">Selected: 0</span>
+            </div>
+
             <!-- Monitored Series Table -->
             <div style="max-height: 380px; overflow-y: auto; border: 1px dashed #333; background: #000;">
                 <table>
                     <thead>
                         <tr>
+                            <th style="width: 40px; text-align: center;"><input type="checkbox" id="selectAllMonitored" style="cursor: pointer;" title="Select/Deselect All Visible"></th>
                             <th>Series Title / Raw Thread Title</th>
                             <th>Status</th>
                             <th>Last Checked / Updated</th>
@@ -268,7 +279,7 @@
                         </tr>
                     </thead>
                     <tbody id="monitoredSeriesBody">
-                        <tr><td colspan="5" style="color: #666; text-align: center;">Loading monitored series watchlist...</td></tr>
+                        <tr><td colspan="6" style="color: #666; text-align: center;">Loading monitored series watchlist...</td></tr>
                     </tbody>
                 </table>
             </div>
@@ -627,6 +638,11 @@
                 }
             }
 
+            function updateSelectedCounter() {
+                const checked = document.querySelectorAll('.monitoredRowCheckbox:checked');
+                el('bulkSelectedCounter').textContent = `Selected: ${checked.length}`;
+            }
+
             function renderMonitoredTable() {
                 const tbody = el('monitoredSeriesBody');
                 const filterQuery = el('watchlistFilterInput').value.trim().toLowerCase();
@@ -641,8 +657,12 @@
                 });
 
                 tbody.innerHTML = '';
+                const selectAll = el('selectAllMonitored');
+                if (selectAll) selectAll.checked = false;
+                updateSelectedCounter();
+
                 if (filtered.length === 0) {
-                    tbody.innerHTML = `<tr><td colspan="5" style="color: #666; text-align: center;">No webseries currently in ${activeWatchlistTab.toUpperCase()} queue.</td></tr>`;
+                    tbody.innerHTML = `<tr><td colspan="6" style="color: #666; text-align: center;">No webseries currently in ${activeWatchlistTab.toUpperCase()} queue.</td></tr>`;
                     return;
                 }
 
@@ -653,6 +673,9 @@
                     const urlDisplay = s.url ? `<a href="${s.url}" target="_blank" style="color: #00e5ff;">Link 🔗</a>` : '<span style="color:#ff2a5f;">Missing URL</span>';
 
                     tr.innerHTML = `
+                        <td style="text-align: center;">
+                            <input type="checkbox" class="monitoredRowCheckbox" data-hash="${s.thread_hash}" style="cursor: pointer;">
+                        </td>
                         <td>
                             <strong style="color: #fff; font-size: 1.3rem;">${displayTitle}</strong><br>
                             <span style="color: #888; font-size: 1.05rem;">Raw: ${s.raw_title || '-'}</span>
@@ -661,13 +684,17 @@
                         <td style="font-size: 1.1rem; color: #aaa;">${s.last_updated ? new Date(s.last_updated).toLocaleString() : '-'}</td>
                         <td>${urlDisplay}</td>
                         <td>
-                            ${s.status === 'active' ? `<button class="toggleBtn" data-hash="${s.thread_hash}" data-status="paused" style="border-color:#ff9900; color:#ff9900;">Pause</button>` : ''}
-                            ${s.status === 'paused' ? `<button class="toggleBtn" data-hash="${s.thread_hash}" data-status="active" style="border-color:#00ff66; color:#00ff66;">Activate</button>` : ''}
-                            ${s.status !== 'archived' ? `<button class="toggleBtn" data-hash="${s.thread_hash}" data-status="archived" style="border-color:#888; color:#888;">Archive</button>` : ''}
-                            <button class="toggleBtn" data-hash="${s.thread_hash}" data-status="delete" style="border-color:#ff2a5f; color:#ff2a5f;">Remove</button>
+                            ${s.status !== 'active' ? `<button class="toggleBtn" data-hash="${s.thread_hash}" data-status="active" style="border-color:#00ff66; color:#00ff66; font-size:1.05rem; padding:2px 8px;">🟢 Activate</button>` : ''}
+                            ${s.status !== 'paused' ? `<button class="toggleBtn" data-hash="${s.thread_hash}" data-status="paused" style="border-color:#ff9900; color:#ff9900; font-size:1.05rem; padding:2px 8px;">⏸️ Pause</button>` : ''}
+                            ${s.status !== 'archived' ? `<button class="toggleBtn" data-hash="${s.thread_hash}" data-status="archived" style="border-color:#888; color:#888; font-size:1.05rem; padding:2px 8px;">📁 Archive</button>` : ''}
+                            <button class="toggleBtn" data-hash="${s.thread_hash}" data-status="delete" style="border-color:#ff2a5f; color:#ff2a5f; font-size:1.05rem; padding:2px 8px;">🔥 Remove</button>
                         </td>
                     `;
                     tbody.appendChild(tr);
+                });
+
+                tbody.querySelectorAll('.monitoredRowCheckbox').forEach(cb => {
+                    cb.addEventListener('change', updateSelectedCounter);
                 });
 
                 tbody.querySelectorAll('.toggleBtn').forEach(btn => {
@@ -683,6 +710,55 @@
                     });
                 });
             }
+
+            // Master Checkbox Toggle Handler
+            const selectAllMonitored = el('selectAllMonitored');
+            if (selectAllMonitored) {
+                selectAllMonitored.addEventListener('change', () => {
+                    const checkboxes = document.querySelectorAll('.monitoredRowCheckbox');
+                    checkboxes.forEach(cb => cb.checked = selectAllMonitored.checked);
+                    updateSelectedCounter();
+                });
+            }
+
+            // Bulk Status Action Handlers
+            async function executeBulkStatusChange(targetStatus) {
+                const checkedNodes = document.querySelectorAll('.monitoredRowCheckbox:checked');
+                const selectedHashes = Array.from(checkedNodes).map(cb => cb.getAttribute('data-hash'));
+
+                if (selectedHashes.length === 0) {
+                    alert('Please select at least one series using the checkboxes.');
+                    return;
+                }
+
+                if (targetStatus === 'delete') {
+                    if (!confirm(`Are you sure you want to remove ${selectedHashes.length} series from your monitored watchlist?`)) {
+                        return;
+                    }
+                }
+
+                try {
+                    const r = await fetch('/admin/api/monitored-series/bulk-toggle', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ threadHashes: selectedHashes, status: targetStatus })
+                    });
+                    const d = await r.json();
+                    if (r.ok) {
+                        alert(d.message || `Bulk update to '${targetStatus}' successful.`);
+                        loadMonitoredSeries();
+                    } else {
+                        alert('Bulk update failed: ' + (d.error || 'Unknown error'));
+                    }
+                } catch (err) {
+                    alert('Network error during bulk operation: ' + err.message);
+                }
+            }
+
+            el('bulkActiveBtn').addEventListener('click', () => executeBulkStatusChange('active'));
+            el('bulkPauseBtn').addEventListener('click', () => executeBulkStatusChange('paused'));
+            el('bulkArchiveBtn').addEventListener('click', () => executeBulkStatusChange('archived'));
+            el('bulkRemoveBtn').addEventListener('click', () => executeBulkStatusChange('delete'));
 
             // Tab Event Listeners
             el('tabActiveBtn').addEventListener('click', () => { activeWatchlistTab = 'active'; updateTabStyles(); renderMonitoredTable(); });
@@ -1372,7 +1448,7 @@
                         alert('Index failed: ' + (d.error || 'Unknown error'));
                     }
                 } catch (err) {
-                    recoupStatus.innerHTML += `<span class="glow-red">NETWORK ERROR: ${err.message}</span><br>`;
+                    recoupStatus.innerHTML += `<span class="glow-red">NETWORK ERROR: ${e.message}</span><br>`;
                     alert('Network error: ' + err.message);
                 } finally {
                     recoupStatus.scrollTop = recoupStatus.scrollHeight;
@@ -1390,7 +1466,7 @@
                         <td>${f.raw_title}</td>
                         <td class="glow-red">${f.reason}</td>
                         <td>${f.last_attempt}</td>
-                        <td><button onclick="retryParse('${f.thread_hash}')">Retry</button></td>
+                        <td><button onclick="retryParse('${f.thread_hash}')">Retry</button>
                     </tr>
                 `).join('');
             }
