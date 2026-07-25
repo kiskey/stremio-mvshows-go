@@ -1,5 +1,5 @@
-// Version: 2.1.6
-// Change log: Removed url.Parse in P2P magnet processing inside streamHandler to prevent unescaped characters from stripping titles and falling back to Season Pack.
+// Version: 2.2.0
+// Change log: Implemented Proposal 3 (Non-blocking Debrid cache fallback with 1.5s context timeout) in streamHandler and integrated prefix-based composite stream lookups.
 
 package api
 
@@ -25,15 +25,10 @@ import (
 	bolt "go.etcd.io/bbolt"
 )
 
-// Global concurrency semaphore: restricts background debrid pollers to maximum 3 concurrent goroutines.
-// This completely protects the server IP from ever hammering or throttling the debrid API providers.
 var backgroundPollSemaphore = make(chan struct{}, 3)
 
-// Hot Path regex pre-compiled to prevent CPU and heap allocations during file selections
 var epRegex = regexp.MustCompile(`[Ss]\d{1,2}\s*[Ee]\s*(\d{1,3})`)
 
-// writeJSON pre-marshals objects to []byte to guarantee Content-Length is always known before writing.
-// This eliminates the non-deterministic fallback to Transfer-Encoding: chunked on payloads >= 4 KB.
 func writeJSON(c *gin.Context, code int, obj interface{}) {
 	data, err := json.Marshal(obj)
 	if err != nil {
@@ -67,15 +62,15 @@ type StremioMetaResponse struct {
 }
 
 type StremioMetaDetail struct {
-	ID               string               `json:"id"`
-	Type             string               `json:"type"`
-	Name             string               `json:"name"`
-	ReleaseInfo      string               `json:"releaseInfo"`
-	Poster           string               `json:"poster,omitempty"`
-	Description      string               `json:"description,omitempty"`
-	ImdbRating       string               `json:"imdbRating,omitempty"`
-	Genres           []string             `json:"genres,omitempty"`
-	Videos           []StremioVideoDetail `json:"videos,omitempty"`
+	ID          string               `json:"id"`
+	Type        string               `json:"type"`
+	Name        string               `json:"name"`
+	ReleaseInfo string               `json:"releaseInfo"`
+	Poster      string               `json:"poster,omitempty"`
+	Description string               `json:"description,omitempty"`
+	ImdbRating  string               `json:"imdbRating,omitempty"`
+	Genres      []string             `json:"genres,omitempty"`
+	Videos      []StremioVideoDetail `json:"videos,omitempty"`
 }
 
 type StremioVideoDetail struct {
@@ -95,7 +90,6 @@ type StremioStreamDetail struct {
 	URL      string   `json:"url,omitempty"`
 	InfoHash string   `json:"infoHash,omitempty"`
 	Sources  []string `json:"sources,omitempty"`
-	// Internal tracking fields (excluded from JSON serialization)
 	Quality  string   `json:"-"`
 	Language string   `json:"-"`
 }
@@ -472,7 +466,6 @@ func metaHandler(c *gin.Context) {
 			}
 		}
 
-		// Decouple thread point-lookup dynamically from TmdbMetadata, eliminating cyclic meta.Threads [report.md]
 		if foundMeta {
 			tHash := threadIdxB.Get([]byte(meta.TmdbID))
 			if tHash != nil {
@@ -766,12 +759,17 @@ func streamHandler(c *gin.Context) {
 	for _, s := range streams {
 		allHashes = append(allHashes, s.Infohash)
 	}
-	cacheMap := debrid.CheckCached(allHashes, database.DB)
 
 	if len(allHashes) == 0 {
 		writeJSON(c, http.StatusOK, StremioStreamResponse{Streams: []StremioStreamDetail{}})
 		return
 	}
+
+	// PROPOSAL 3: Non-Blocking Debrid Cache Fallback with 1.5s Context Timeout
+	cacheCtx, cancelCache := context.WithTimeout(c.Request.Context(), 1500*time.Millisecond)
+	defer cancelCache()
+
+	cacheMap := debrid.CheckCachedWithContext(cacheCtx, allHashes, database.DB)
 
 	magnetMap := make(map[string]string)
 	_ = database.DB.View(func(tx *bolt.Tx) error {
