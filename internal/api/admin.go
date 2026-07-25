@@ -1,5 +1,5 @@
-// Version: 2.5.0
-// Change log: Updated Panel F and Targeted Crawl handlers to enforce canonical Topic ID URL formatting (parser.FormatCanonicalTopicURL) and Topic ID invariant hashing.
+// Version: 2.5.2
+// Change log: Refactored autoMatchHandler to consume parser.IsMetadataWord directly, eliminating local metadata dictionary duplication.
 
 package api
 
@@ -455,7 +455,22 @@ func autoMatchHandler(c *gin.Context) {
 				return
 			}
 
-			if parsed.Title == "" || len(parsed.Title) <= 1 || isAllNumbers(parsed.Title) || (isAllUppercase(parsed.Title) && len(parsed.Title) > 3) {
+			cleanTitle := strings.TrimSpace(parsed.Title)
+			if cleanTitle == "" || len(cleanTitle) < 1 {
+				mu.Lock()
+				failCount++
+				mu.Unlock()
+				return
+			}
+
+			words := strings.Fields(strings.ToLower(cleanTitle))
+			metadataCount := 0
+			for _, w := range words {
+				if parser.IsMetadataWord(w) {
+					metadataCount++
+				}
+			}
+			if len(words) > 0 && float64(metadataCount)/float64(len(words)) > 0.5 {
 				mu.Lock()
 				failCount++
 				mu.Unlock()
