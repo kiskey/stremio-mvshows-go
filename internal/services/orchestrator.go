@@ -1,5 +1,5 @@
-// Version: 1.7.0
-// Change log: Updated processThread to handle Topic ID invariant thread updates in-place, merging new magnet URIs, auto-healing thread URLs, and regenerating composite streams without creating duplicate thread entries.
+// Version: 1.7.1
+// Change log: Updated isValidParsedTitle to allow ALL-CAPS and numeric titles while rejecting metadata-only word ratio noise.
 
 package orchestrator
 
@@ -202,20 +202,12 @@ func isValidParsedTitle(parsed *parser.ParseResult) bool {
 	if parsed == nil {
 		return false
 	}
-	if strings.TrimSpace(parsed.Title) == "" {
-		return false
-	}
-	if len(parsed.Title) < 1 {
-		return false
-	}
-	if isAllNumbers(parsed.Title) {
-		return false
-	}
-	if isAllUppercase(parsed.Title) && len(parsed.Title) > 3 {
+	title := strings.TrimSpace(parsed.Title)
+	if title == "" || len(title) < 1 {
 		return false
 	}
 
-	words := strings.Fields(strings.ToLower(parsed.Title))
+	words := strings.Fields(strings.ToLower(title))
 	metadataCount := 0
 	for _, w := range words {
 		if isMetadataWord(w) {
