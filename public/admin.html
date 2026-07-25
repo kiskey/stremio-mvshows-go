@@ -190,7 +190,7 @@
     </style>
 </head>
 <body>
-    <h1>► MVSHOWS ADMIN TERMINAL v2.6.0 ◄</h1>
+    <h1>► MVSHOWS ADMIN TERMINAL v2.6.1 ◄</h1>
 
     <div class="dashboard-grid">
         
@@ -834,6 +834,10 @@
                                 alert(d.message || d.error);
                                 seriesSearchInput.value = '';
                                 seriesSearchDropdown.style.display = 'none';
+                                
+                                // Auto-switch view to Active tab so the newly monitored series is immediately visible
+                                activeWatchlistTab = 'active';
+                                updateTabStyles();
                                 loadMonitoredSeries();
                             });
 
@@ -1448,7 +1452,7 @@
                         alert('Index failed: ' + (d.error || 'Unknown error'));
                     }
                 } catch (err) {
-                    recoupStatus.innerHTML += `<span class="glow-red">NETWORK ERROR: ${e.message}</span><br>`;
+                    recoupStatus.innerHTML += `<span class="glow-red">NETWORK ERROR: ${err.message}</span><br>`;
                     alert('Network error: ' + err.message);
                 } finally {
                     recoupStatus.scrollTop = recoupStatus.scrollHeight;
@@ -1466,7 +1470,7 @@
                         <td>${f.raw_title}</td>
                         <td class="glow-red">${f.reason}</td>
                         <td>${f.last_attempt}</td>
-                        <td><button onclick="retryParse('${f.thread_hash}')">Retry</button>
+                        <td><button onclick="retryParse('${f.thread_hash}')">Retry</button></td>
                     </tr>
                 `).join('');
             }
