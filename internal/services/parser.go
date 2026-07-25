@@ -1,5 +1,5 @@
-// Version: 1.9.2
-// Change log: Exported ExtractTopicID, FormatCanonicalTopicURL, and GenerateThreadHashWithURL for clean package-level compilation across crawler and orchestrator modules.
+// Version: 1.9.3
+// Change log: Removed over-aggressive isAllNumbers and isAllUppercase title rejection rules from Validator, enabling accurate parsing of numeric titles and ALL-CAPS release names.
 
 package parser
 
@@ -2022,19 +2022,21 @@ func (v *Validator) ValidateParsedRelease(pr *ParsedRelease) bool {
 		pr.ValidationError = "Empty title after parsing"
 		return false
 	}
-	if len(pr.CleanTitle) <= 1 {
+	if len(pr.CleanTitle) < 1 {
 		pr.IsValid = false
 		pr.ValidationError = "Title too short"
 		return false
 	}
-	if isAllNumbers(pr.CleanTitle) {
-		pr.IsValid = false
-		pr.ValidationError = "Title is all numbers"
-		return false
+	words := strings.Fields(strings.ToLower(pr.CleanTitle))
+	metadataCount := 0
+	for _, w := range words {
+		if isMetadataWord(w) {
+			metadataCount++
+		}
 	}
-	if isAllUppercase(pr.CleanTitle) && len(pr.CleanTitle) > 3 {
+	if len(words) > 0 && float64(metadataCount)/float64(len(words)) > 0.5 {
 		pr.IsValid = false
-		pr.ValidationError = "Title appears to be metadata (all caps)"
+		pr.ValidationError = "Title consists predominantly of metadata keywords"
 		return false
 	}
 	if pr.Year != 0 && (pr.Year < 1900 || pr.Year > 2030) {
