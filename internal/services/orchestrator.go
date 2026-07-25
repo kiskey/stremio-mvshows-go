@@ -1,5 +1,5 @@
-// Version: 1.5.1
-// Change log: Removed unused "context" import from import block to resolve Go compiler unused import build error.
+// Version: 1.5.2
+// Change log: Integrated In-Thread Magnet Title Divergence Guardrail using metadata.OverlapCoefficient (<0.20 threshold) to filter out rogue magnet links during thread processing.
 
 package orchestrator
 
@@ -150,7 +150,6 @@ func RunFullWorkflow(cfg *config.Config) {
 
 	tmdbClient := metadata.NewTMDBClient(cfg)
 
-	// Worker Pool Concurrency Engine (5 parallel workers bounded by channel semaphore)
 	workerConcurrency := 5
 	sem := make(chan struct{}, workerConcurrency)
 	var wg sync.WaitGroup
@@ -403,9 +402,27 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 			}
 		}
 
+		// Enforce tracker-stripping AND In-Thread Title Divergence Filter (<0.20 threshold)
 		var cleanedMagnets []string
 		for _, m := range thread.MagnetURIs {
-			cleanedMagnets = append(cleanedMagnets, parser.StripTrackersFromMagnet(m))
+			cleanM := parser.StripTrackersFromMagnet(m)
+			dn := parser.ExtractMagnetDisplayName(m)
+			if dn != "" {
+				pmr := parser.ParseRelease(dn, thread.Type)
+				if pmr != nil && pmr.IsValid && pmr.CleanTitle != "" {
+					overlapParsed := metadata.OverlapCoefficient(parsed.Title, pmr.CleanTitle)
+					overlapClean := metadata.OverlapCoefficient(cleanTitle, pmr.CleanTitle)
+					if overlapParsed < 0.20 && overlapClean < 0.20 {
+						utils.Logger.Warn().
+							Str("thread_title", parsed.Title).
+							Str("magnet_title", pmr.CleanTitle).
+							Str("raw_dn", dn).
+							Msg("In-thread title divergence detected. Dropping rogue magnet link.")
+						continue
+					}
+				}
+			}
+			cleanedMagnets = append(cleanedMagnets, cleanM)
 		}
 
 		linkedThread := &database.Thread{
