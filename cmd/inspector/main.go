@@ -1,5 +1,5 @@
-// Version: 2.6.0
-// Change log: Upgraded audit and repair engine to group threads by Topic ID, consolidate legacy duplicate thread records, merge magnet URIs, and re-index monitored_series and thread_id_index buckets.
+// Version: 2.6.1
+// Change log: Fixed magnetB variable identifier in magnet_cache compaction loop and removed unused strconv import to resolve Go compilation errors.
 
 package main
 
@@ -11,7 +11,6 @@ import (
 	"log"
 	"os"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -260,7 +259,6 @@ func main() {
 
 			log.Printf("Processing & Compacting: %q (Hash: %s)\n", keptThread.RawTitle, targetNewHash)
 
-			// Consolidate all magnet URIs across all duplicate thread entries in this group
 			seenMags := make(map[string]bool)
 			var allMergedMags []string
 
@@ -381,7 +379,7 @@ func main() {
 		}
 		for _, mc := range magnetCacheToRewrite {
 			bytesData, _ := database.EncodeGob(mc)
-			_ = magnetBucket.Put([]byte(mc.Infohash), bytesData)
+			_ = magnetB.Put([]byte(mc.Infohash), bytesData)
 		}
 
 		log.Println("Regenerating and correcting all stream indices from raw magnets using composite keys...")
