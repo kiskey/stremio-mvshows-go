@@ -1,5 +1,5 @@
-// Version: 1.2.0
-// Change log: Added URL field to CrawledThread, enabled direct thread URL capture in OnHTML forum scraper, and populated URL in RunTargetedCrawler.
+// Version: 1.3.0
+// Change log: Integrated ExtractTopicID and FormatCanonicalTopicURL (/topic/<id>-a/ dummy slug) during forum traversal and enabled 301 redirect final URL capture.
 
 package crawler
 
@@ -31,7 +31,7 @@ type CrawledThread struct {
 	Type       string
 	PostedAt   *time.Time
 	CatalogID  string
-	URL        string // Direct Thread URL Address
+	URL        string // Canonical Thread URL
 }
 
 // RoundRobinProxySwitcher returns a thread-safe Colly ProxyFunc rotating through provided proxy strings.
@@ -214,16 +214,18 @@ func RunCrawler(cfg *config.Config, incremental bool) ([]CrawledThread, error) {
 
 		if link != "" && rawTitle != "" {
 			absURL := e.Request.AbsoluteURL(link)
+			canonicalURL := parser.FormatCanonicalTopicURL(absURL)
+
 			ctx := colly.NewContext()
 			ctx.Put("raw_title", rawTitle)
 			ctx.Put("type", e.Request.Ctx.Get("type"))
 			ctx.Put("catalog_id", e.Request.Ctx.Get("catalog_id"))
-			ctx.Put("thread_url", absURL) // Pass absolute thread URL
+			ctx.Put("thread_url", canonicalURL)
 			if postedAtStr != "" {
 				ctx.Put("posted_at", postedAtStr)
 			}
 
-			_ = c.Request("GET", absURL, nil, ctx, nil)
+			_ = c.Request("GET", canonicalURL, nil, ctx, nil)
 		}
 	})
 
@@ -237,7 +239,11 @@ func RunCrawler(cfg *config.Config, incremental bool) ([]CrawledThread, error) {
 		contentType := e.Request.Ctx.Get("type")
 		catalogID := e.Request.Ctx.Get("catalog_id")
 		postedAtStr := e.Request.Ctx.Get("posted_at")
-		threadURL := e.Request.Ctx.Get("thread_url") // Retrieve thread URL
+		threadURL := e.Request.Ctx.Get("thread_url")
+
+		if finalURL := e.Request.URL.String(); finalURL != "" {
+			threadURL = parser.FormatCanonicalTopicURL(finalURL)
+		}
 
 		var magnets []string
 		seenMags := make(map[string]bool)
@@ -266,7 +272,7 @@ func RunCrawler(cfg *config.Config, incremental bool) ([]CrawledThread, error) {
 		})
 
 		if len(magnets) > 0 {
-			hash := parser.GenerateThreadHash(rawTitle, magnets)
+			hash := parser.GenerateThreadHash(rawTitle, threadURL)
 			var postedAt *time.Time
 			if postedAtStr != "" {
 				if t, errDate := time.Parse(time.RFC3339, postedAtStr); errDate == nil {
@@ -390,6 +396,8 @@ func RunTargetedCrawler(cfg *config.Config, threadURL, contentType, catalogID st
 	var crawled []CrawledThread
 	var mu sync.Mutex
 
+	canonicalURL := parser.FormatCanonicalTopicURL(threadURL)
+
 	c := colly.NewCollector()
 
 	c.SetRequestTimeout(time.Duration(cfg.ScraperTimeoutSecs) * time.Second)
@@ -492,6 +500,11 @@ func RunTargetedCrawler(cfg *config.Config, threadURL, contentType, catalogID st
 			rawTitle = "Unknown Recouped Title"
 		}
 
+		finalTargetURL := canonicalURL
+		if finalURL := e.Request.URL.String(); finalURL != "" {
+			finalTargetURL = parser.FormatCanonicalTopicURL(finalURL)
+		}
+
 		var magnets []string
 		seenMags := make(map[string]bool)
 
@@ -519,7 +532,7 @@ func RunTargetedCrawler(cfg *config.Config, threadURL, contentType, catalogID st
 		})
 
 		if len(magnets) > 0 {
-			hash := parser.GenerateThreadHash(rawTitle, magnets)
+			hash := parser.GenerateThreadHash(rawTitle, finalTargetURL)
 			
 			var postedAt *time.Time
 			timeEl := e.DOM.ParentsUntil("html").Find("time[datetime]").First()
@@ -541,13 +554,13 @@ func RunTargetedCrawler(cfg *config.Config, threadURL, contentType, catalogID st
 				Type:       contentType,
 				PostedAt:   postedAt,
 				CatalogID:  catalogID,
-				URL:        threadURL, // Populate direct URL
+				URL:        finalTargetURL,
 			})
 			mu.Unlock()
 		}
 	})
 
-	_ = c.Visit(threadURL)
+	_ = c.Visit(canonicalURL)
 	c.Wait()
 
 	return crawled, nil
