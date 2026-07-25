@@ -1,5 +1,5 @@
-// Version: 1.9.3
-// Change log: Removed over-aggressive isAllNumbers and isAllUppercase title rejection rules from Validator, enabling accurate parsing of numeric titles and ALL-CAPS release names.
+// Version: 1.9.4
+// Change log: Exported IsMetadataWord to provide a central authoritative metadata dictionary across package boundaries, eliminating code duplication in orchestrator and admin packages.
 
 package parser
 
@@ -1820,7 +1820,7 @@ func (rgp *ReleaseGroupParser) ParseReleaseGroup(title string) string {
 func parseReleaseGroup(title string) string {
 	if m := trailingGroupRe.FindStringSubmatch(title); m != nil {
 		group := m[1]
-		if !isMetadataWord(group) {
+		if !IsMetadataWord(group) {
 			return group
 		}
 	}
@@ -2030,7 +2030,7 @@ func (v *Validator) ValidateParsedRelease(pr *ParsedRelease) bool {
 	words := strings.Fields(strings.ToLower(pr.CleanTitle))
 	metadataCount := 0
 	for _, w := range words {
-		if isMetadataWord(w) {
+		if IsMetadataWord(w) {
 			metadataCount++
 		}
 	}
@@ -2150,7 +2150,7 @@ func moveArticleToFront(s string) string {
 	return s
 }
 
-func isMetadataWord(s string) bool {
+func IsMetadataWord(s string) bool {
 	metadataWords := []string{
 		"proper", "repack", "extended", "unrated", "remastered",
 		"x264", "x265", "hevc", "avc", "aac", "ac3", "dts",
@@ -2165,6 +2165,10 @@ func isMetadataWord(s string) bool {
 		}
 	}
 	return false
+}
+
+func isMetadataWord(s string) bool {
+	return IsMetadataWord(s)
 }
 
 func isAllNumbers(s string) bool {
