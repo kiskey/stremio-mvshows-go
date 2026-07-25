@@ -1,5 +1,5 @@
-// Version: 2.3.4
-// Change log: Integrated In-Thread Magnet Title Divergence Guardrail (<0.20 threshold) into linkOfficialHandler and autoMatchHandler to drop rogue magnet links during manual and bulk admin operations.
+// Version: 2.4.0
+// Change log: Added Panel F Watchlist API endpoints (/monitored-series, /monitored-series/toggle, /monitored-series/add, /series-search) supporting autocomplete searching and status management.
 
 package api
 
@@ -45,6 +45,12 @@ func RegisterAdminRoutes(r *gin.RouterGroup) {
 	r.GET("/purge-lookup", purgeLookupHandler)
 	r.POST("/purge-confirm", purgeConfirmHandler)
 	r.POST("/trigger-targeted-crawl", triggerTargetedCrawlHandler)
+
+	// Panel F Monitored Series Watchlist Routes
+	r.GET("/monitored-series", monitoredSeriesHandler)
+	r.POST("/monitored-series/toggle", toggleMonitoredSeriesHandler)
+	r.POST("/monitored-series/add", addMonitoredSeriesHandler)
+	r.GET("/series-search", seriesSearchHandler)
 }
 
 func healthHandler(c *gin.Context) {
@@ -1088,4 +1094,162 @@ func triggerTargetedCrawlHandler(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "Thread crawled, metadata mapped, and streams indexed successfully!"})
+}
+
+// ── Panel F Monitored Series Handlers ──
+
+func monitoredSeriesHandler(c *gin.Context) {
+	setAntiCacheHeaders(c)
+	list, err := database.GetMonitoredSeriesList()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to retrieve monitored series list"})
+		return
+	}
+	c.JSON(http.StatusOK, list)
+}
+
+func toggleMonitoredSeriesHandler(c *gin.Context) {
+	var body struct {
+		ThreadHash string `json:"threadHash"`
+		Status     string `json:"status"` // "active", "paused", "archived", "delete"
+	}
+	if err := c.ShouldBindJSON(&body); err != nil || body.ThreadHash == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid thread hash parameter"})
+		return
+	}
+
+	if body.Status == "delete" {
+		_ = database.DeleteMonitoredSeries(nil, body.ThreadHash)
+		c.JSON(http.StatusOK, gin.H{"message": "Series removed from monitored watchlist."})
+		return
+	}
+
+	ms, errMs := database.GetMonitoredSeriesByHash(nil, body.ThreadHash)
+	if errMs != nil || ms == nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Monitored series record not found"})
+		return
+	}
+
+	ms.Status = body.Status
+	ms.LastUpdated = time.Now()
+	if errSave := database.SetMonitoredSeries(nil, ms); errSave != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to update series status"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Series status updated to " + body.Status})
+}
+
+func addMonitoredSeriesHandler(c *gin.Context) {
+	var body struct {
+		ThreadID   int    `json:"threadId"`
+		ThreadURL  string `json:"threadUrl"`
+		ThreadHash string `json:"threadHash"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid payload parameters"})
+		return
+	}
+
+	var targetThread *database.Thread
+
+	if body.ThreadHash != "" {
+		t, err := database.FindThreadByHash(nil, body.ThreadHash)
+		if err == nil && t != nil {
+			targetThread = t
+		}
+	} else if body.ThreadID > 0 {
+		t, err := database.FindThreadByID(uint(body.ThreadID))
+		if err == nil && t != nil {
+			targetThread = t
+		}
+	}
+
+	if targetThread != nil {
+		if body.ThreadURL != "" {
+			targetThread.URL = body.ThreadURL
+			_ = database.CreateOrUpdateThread(nil, targetThread)
+		}
+		_ = database.AutoEnrollSeries(nil, targetThread)
+		c.JSON(http.StatusOK, gin.H{"message": "Series enrolled into monitored watchlist successfully!"})
+		return
+	}
+
+	if body.ThreadURL != "" {
+		cfg := config.Load()
+		errCrawl := orchestrator.RunTargetedWorkflow(cfg, body.ThreadURL, "series", "top-series-from-forum")
+		if errCrawl != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Targeted crawl failed for URL: " + errCrawl.Error()})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{"message": "Thread crawled and enrolled into monitored watchlist successfully!"})
+		return
+	}
+
+	c.JSON(http.StatusBadRequest, gin.H{"error": "Provide either a valid Thread ID, Thread Hash, or Thread URL."})
+}
+
+func seriesSearchHandler(c *gin.Context) {
+	setAntiCacheHeaders(c)
+	query := strings.ToLower(strings.TrimSpace(c.Query("q")))
+	if query == "" {
+		c.JSON(http.StatusOK, []gin.H{})
+		return
+	}
+
+	type searchMatch struct {
+		ID         uint   `json:"id"`
+		ThreadHash string `json:"thread_hash"`
+		RawTitle   string `json:"raw_title"`
+		CleanTitle string `json:"clean_title"`
+		Status     string `json:"status"`
+		URL        string `json:"url"`
+		Monitored  string `json:"monitored_status"`
+	}
+
+	monitoredList, _ := database.GetMonitoredSeriesList()
+	monitoredMap := make(map[string]string)
+	for _, ms := range monitoredList {
+		monitoredMap[ms.ThreadHash] = ms.Status
+	}
+
+	var matches []searchMatch
+
+	_ = database.DB.View(func(tx *bolt.Tx) error {
+		tb := tx.Bucket([]byte("threads"))
+		if tb == nil {
+			return nil
+		}
+		c := tb.Cursor()
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			var t database.Thread
+			if err := database.DecodeGob(v, &t); err == nil {
+				if strings.ToLower(t.Type) == "series" {
+					cleanLower := strings.ToLower(t.CleanTitle)
+					rawLower := strings.ToLower(t.RawTitle)
+					if strings.Contains(cleanLower, query) || strings.Contains(rawLower, query) {
+						mStatus := "none"
+						if val, ok := monitoredMap[t.ThreadHash]; ok {
+							mStatus = val
+						}
+						matches = append(matches, searchMatch{
+							ID:         t.ID,
+							ThreadHash: t.ThreadHash,
+							RawTitle:   t.RawTitle,
+							CleanTitle: t.CleanTitle,
+							Status:     t.Status,
+							URL:        t.URL,
+							Monitored:  mStatus,
+						})
+						if len(matches) >= 15 {
+							break
+						}
+					}
+				}
+			}
+		}
+		return nil
+	})
+
+	c.JSON(http.StatusOK, matches)
 }
