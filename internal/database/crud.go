@@ -1,5 +1,5 @@
-// Version: 2.4.0
-// Change log: Updated CreateOrUpdateThread to handle in-place magnet URI merging, auto-healing of thread URL addresses, and preservation of existing sequence IDs.
+// Version: 2.5.0
+// Change log: Added BulkSetMonitoredSeriesStatus to perform atomic mass status updates (active, paused, archived, delete) within a single BoltDB transaction.
 
 package database
 
@@ -612,6 +612,50 @@ func SetMonitoredSeries(tx *bolt.Tx, ms *MonitoredSeries) error {
 		}
 		return b.Put([]byte(ms.ThreadHash), bytesData)
 	})
+}
+
+func BulkSetMonitoredSeriesStatus(tx *bolt.Tx, threadHashes []string, status string) (int, error) {
+	if len(threadHashes) == 0 {
+		return 0, nil
+	}
+	updatedCount := 0
+	err := runUpdate(tx, func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("monitored_series"))
+		if b == nil {
+			return bolt.ErrBucketNotFound
+		}
+
+		if status == "delete" {
+			for _, h := range threadHashes {
+				if h != "" {
+					_ = b.Delete([]byte(h))
+					updatedCount++
+				}
+			}
+			return nil
+		}
+
+		for _, h := range threadHashes {
+			if h == "" {
+				continue
+			}
+			existingData := b.Get([]byte(h))
+			if existingData != nil {
+				var ms MonitoredSeries
+				if errDec := DecodeGob(existingData, &ms); errDec == nil {
+					ms.Status = status
+					ms.LastUpdated = time.Now()
+					bytesData, errEnc := EncodeGob(ms)
+					if errEnc == nil {
+						_ = b.Put([]byte(h), bytesData)
+						updatedCount++
+					}
+				}
+			}
+		}
+		return nil
+	})
+	return updatedCount, err
 }
 
 func DeleteMonitoredSeries(tx *bolt.Tx, threadHash string) error {
