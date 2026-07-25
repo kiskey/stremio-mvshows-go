@@ -1,5 +1,5 @@
-// Version: 2.5.0
-// Change log: Added monitored_series bucket validation, orphaned watchlist key pruning, and auto-enrollment verification during database repair.
+// Version: 2.6.0
+// Change log: Upgraded audit and repair engine to group threads by Topic ID, consolidate legacy duplicate thread records, merge magnet URIs, and re-index monitored_series and thread_id_index buckets.
 
 package main
 
@@ -39,14 +39,6 @@ func sortStrings(slice []string) {
 	}
 }
 
-func newGenerateThreadHash(title string) string {
-	normalized := strings.ToLower(strings.TrimSpace(title))
-	words := strings.Fields(normalized)
-	normalized = strings.Join(words, " ")
-	h := sha256.Sum256([]byte(normalized))
-	return hex.EncodeToString(h[:])
-}
-
 func formatBytes(bytes int64) string {
 	if bytes < 1024 {
 		return fmt.Sprintf("%d B", bytes)
@@ -78,7 +70,7 @@ func main() {
 	}
 	defer db.Close()
 
-	log.Println("Auditing database records...")
+	log.Println("Auditing database records for Topic ID and title duplicates...")
 	duplicatesMap := make(map[string][]database.Thread)
 	legacyHashCount := 0
 
@@ -92,13 +84,13 @@ func main() {
 
 				if len(t.MagnetURIs) > 0 {
 					oldHash := oldGenerateThreadHash(t.RawTitle, t.MagnetURIs)
-					if string(k) == oldHash && oldHash != newGenerateThreadHash(t.RawTitle) {
+					if string(k) == oldHash && oldHash != parser.GenerateThreadHashWithURL(t.RawTitle, t.URL) {
 						legacyHashCount++
 					}
 				}
 
-				newHash := newGenerateThreadHash(t.RawTitle)
-				duplicatesMap[newHash] = append(duplicatesMap[newHash], t)
+				targetHash := parser.GenerateThreadHashWithURL(t.RawTitle, t.URL)
+				duplicatesMap[targetHash] = append(duplicatesMap[targetHash], t)
 			}
 		}
 		return nil
@@ -116,7 +108,7 @@ func main() {
 
 	log.Printf("Inspection Complete.\n")
 	log.Printf("  - Legacy Format Hashes Found: %d records\n", legacyHashCount)
-	log.Printf("  - Duplicate Title Groups Detected: %d groups (containing %d redundant rows)\n", len(duplicateTitles), totalRedundantCount)
+	log.Printf("  - Duplicate Title/Topic ID Groups Detected: %d groups (containing %d redundant rows)\n", len(duplicateTitles), totalRedundantCount)
 
 	var orphanedIndexKeys [][]byte
 	_ = db.View(func(tx *bolt.Tx) error {
@@ -266,7 +258,26 @@ func main() {
 
 			keptThread := list[0]
 
-			log.Printf("Processing & Compacting: %q\n", keptThread.RawTitle)
+			log.Printf("Processing & Compacting: %q (Hash: %s)\n", keptThread.RawTitle, targetNewHash)
+
+			// Consolidate all magnet URIs across all duplicate thread entries in this group
+			seenMags := make(map[string]bool)
+			var allMergedMags []string
+
+			for _, item := range list {
+				for _, m := range item.MagnetURIs {
+					cleanM := parser.StripTrackersFromMagnet(m)
+					if cleanM != "" && !seenMags[cleanM] {
+						seenMags[cleanM] = true
+						allMergedMags = append(allMergedMags, cleanM)
+					}
+				}
+			}
+			keptThread.MagnetURIs = allMergedMags
+
+			if keptThread.URL != "" {
+				keptThread.URL = parser.FormatCanonicalTopicURL(keptThread.URL)
+			}
 
 			if keptThread.ThreadHash != targetNewHash {
 				_ = tb.Delete([]byte(keptThread.ThreadHash))
@@ -276,12 +287,6 @@ func main() {
 			if prTitle.IsValid && prTitle.CleanTitle != "" {
 				keptThread.CleanTitle = prTitle.CleanTitle
 			}
-
-			var cleanMags []string
-			for _, m := range keptThread.MagnetURIs {
-				cleanMags = append(cleanMags, parser.StripTrackersFromMagnet(m))
-			}
-			keptThread.MagnetURIs = cleanMags
 
 			if keptThread.ID == 0 {
 				seq, errSeq := tb.NextSequence()
@@ -319,10 +324,9 @@ func main() {
 			for i := 1; i < len(list); i++ {
 				trashThread := list[i]
 
-				log.Printf("  [PRUNING DUPLICATE] Hash=%s (Last Updated: %v)\n", trashThread.ThreadHash, trashThread.UpdatedAt)
+				log.Printf("  [PRUNING DUPLICATE THREAD] Hash=%s Title=%q\n", trashThread.ThreadHash, trashThread.RawTitle)
 
 				_ = tb.Delete([]byte(trashThread.ThreadHash))
-				_ = tb.Delete([]byte(targetNewHash + "_" + strconv.Itoa(i)))
 
 				if trashThread.ID > 0 && idB != nil {
 					_ = idB.Delete([]byte(fmt.Sprintf("%d", trashThread.ID)))
@@ -330,11 +334,6 @@ func main() {
 
 				if monitoredB != nil {
 					_ = monitoredB.Delete([]byte(trashThread.ThreadHash))
-				}
-
-				if trashThread.TmdbID != nil {
-					_ = database.DeleteStreamsByTmdbID(tx, *trashThread.TmdbID)
-					_ = threadIdxB.Delete([]byte(*trashThread.TmdbID))
 				}
 
 				var indexKeysPrune [][]byte
@@ -382,7 +381,7 @@ func main() {
 		}
 		for _, mc := range magnetCacheToRewrite {
 			bytesData, _ := database.EncodeGob(mc)
-			_ = magnetB.Put([]byte(mc.Infohash), bytesData)
+			_ = magnetBucket.Put([]byte(mc.Infohash), bytesData)
 		}
 
 		log.Println("Regenerating and correcting all stream indices from raw magnets using composite keys...")
