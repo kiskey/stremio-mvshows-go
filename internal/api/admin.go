@@ -1,5 +1,5 @@
-// Version: 2.4.0
-// Change log: Added Panel F Watchlist API endpoints (/monitored-series, /monitored-series/toggle, /monitored-series/add, /series-search) supporting autocomplete searching and status management.
+// Version: 2.5.0
+// Change log: Updated Panel F and Targeted Crawl handlers to enforce canonical Topic ID URL formatting (parser.FormatCanonicalTopicURL) and Topic ID invariant hashing.
 
 package api
 
@@ -1087,7 +1087,8 @@ func triggerTargetedCrawlHandler(c *gin.Context) {
 	}
 
 	cfg := config.Load()
-	err := orchestrator.RunTargetedWorkflow(cfg, body.ThreadURL, body.ContentType, body.CatalogID)
+	canonicalURL := parser.FormatCanonicalTopicURL(body.ThreadURL)
+	err := orchestrator.RunTargetedWorkflow(cfg, canonicalURL, body.ContentType, body.CatalogID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Targeted crawl failed: " + err.Error()})
 		return
@@ -1151,6 +1152,8 @@ func addMonitoredSeriesHandler(c *gin.Context) {
 		return
 	}
 
+	canonicalURL := parser.FormatCanonicalTopicURL(body.ThreadURL)
+
 	var targetThread *database.Thread
 
 	if body.ThreadHash != "" {
@@ -1166,8 +1169,8 @@ func addMonitoredSeriesHandler(c *gin.Context) {
 	}
 
 	if targetThread != nil {
-		if body.ThreadURL != "" {
-			targetThread.URL = body.ThreadURL
+		if canonicalURL != "" {
+			targetThread.URL = canonicalURL
 			_ = database.CreateOrUpdateThread(nil, targetThread)
 		}
 		_ = database.AutoEnrollSeries(nil, targetThread)
@@ -1175,9 +1178,9 @@ func addMonitoredSeriesHandler(c *gin.Context) {
 		return
 	}
 
-	if body.ThreadURL != "" {
+	if canonicalURL != "" {
 		cfg := config.Load()
-		errCrawl := orchestrator.RunTargetedWorkflow(cfg, body.ThreadURL, "series", "top-series-from-forum")
+		errCrawl := orchestrator.RunTargetedWorkflow(cfg, canonicalURL, "series", "top-series-from-forum")
 		if errCrawl != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Targeted crawl failed for URL: " + errCrawl.Error()})
 			return
