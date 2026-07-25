@@ -1,5 +1,5 @@
-// Version: 2.6.1
-// Change log: Fixed magnetB variable identifier in magnet_cache compaction loop and removed unused strconv import to resolve Go compilation errors.
+// Version: 2.7.0
+// Change log: Implemented getThreadInvariantGroupKey using type_year_cleantitle fallback for legacy entries missing URLs, enabling full consolidation of historical duplicate threads.
 
 package main
 
@@ -48,6 +48,40 @@ func formatBytes(bytes int64) string {
 	return fmt.Sprintf("%.2f MB", float64(bytes)/1024/1024)
 }
 
+// getThreadInvariantGroupKey constructs an invariant grouping key:
+// 1. Primary: Topic ID if URL is available (topic_<id>)
+// 2. Fallback: type_year_cleantitle (e.g. series_2025_lbw love beyond wicket)
+func getThreadInvariantGroupKey(t *database.Thread) string {
+	if t.URL != "" {
+		topicID := parser.ExtractTopicID(t.URL)
+		if topicID != "" {
+			h := sha256.Sum256([]byte("topic_" + topicID))
+			return hex.EncodeToString(h[:])
+		}
+	}
+
+	cleanTitle := t.CleanTitle
+	yearVal := 0
+	if t.Year != nil {
+		yearVal = *t.Year
+	}
+
+	pr := parser.ParseRelease(t.RawTitle, t.Type)
+	if pr != nil && pr.IsValid && pr.CleanTitle != "" {
+		cleanTitle = pr.CleanTitle
+		if yearVal == 0 && pr.Year > 0 {
+			yearVal = pr.Year
+		}
+	}
+
+	cleanNorm := strings.ToLower(strings.TrimSpace(cleanTitle))
+	cleanNorm = strings.Join(strings.Fields(cleanNorm), " ")
+
+	keyStr := fmt.Sprintf("%s_%d_%s", strings.ToLower(t.Type), yearVal, cleanNorm)
+	h := sha256.Sum256([]byte(keyStr))
+	return hex.EncodeToString(h[:])
+}
+
 func main() {
 	dbPath := flag.String("db", "/data/stremio_addon.db.bolt", "Path to the active Bbolt database")
 	repair := flag.Bool("repair", false, "Execute automatic hash migration, duplicate pruning, stream regenerator, and index repair")
@@ -69,7 +103,7 @@ func main() {
 	}
 	defer db.Close()
 
-	log.Println("Auditing database records for Topic ID and title duplicates...")
+	log.Println("Auditing database records for Topic ID and Clean Title invariant duplicates...")
 	duplicatesMap := make(map[string][]database.Thread)
 	legacyHashCount := 0
 
@@ -83,12 +117,12 @@ func main() {
 
 				if len(t.MagnetURIs) > 0 {
 					oldHash := oldGenerateThreadHash(t.RawTitle, t.MagnetURIs)
-					if string(k) == oldHash && oldHash != parser.GenerateThreadHashWithURL(t.RawTitle, t.URL) {
+					if string(k) == oldHash && oldHash != getThreadInvariantGroupKey(&t) {
 						legacyHashCount++
 					}
 				}
 
-				targetHash := parser.GenerateThreadHashWithURL(t.RawTitle, t.URL)
+				targetHash := getThreadInvariantGroupKey(&t)
 				duplicatesMap[targetHash] = append(duplicatesMap[targetHash], t)
 			}
 		}
@@ -257,7 +291,7 @@ func main() {
 
 			keptThread := list[0]
 
-			log.Printf("Processing & Compacting: %q (Hash: %s)\n", keptThread.RawTitle, targetNewHash)
+			log.Printf("Processing & Compacting Group: %q (Hash: %s)\n", keptThread.RawTitle, targetNewHash)
 
 			seenMags := make(map[string]bool)
 			var allMergedMags []string
@@ -269,6 +303,9 @@ func main() {
 						seenMags[cleanM] = true
 						allMergedMags = append(allMergedMags, cleanM)
 					}
+				}
+				if keptThread.URL == "" && item.URL != "" {
+					keptThread.URL = item.URL
 				}
 			}
 			keptThread.MagnetURIs = allMergedMags
