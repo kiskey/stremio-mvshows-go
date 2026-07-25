@@ -1,5 +1,5 @@
-// Version: 1.5.2
-// Change log: Integrated In-Thread Magnet Title Divergence Guardrail using metadata.OverlapCoefficient (<0.20 threshold) to filter out rogue magnet links during thread processing.
+// Version: 1.6.0
+// Change log: Integrated active monitored series polling and 30-day auto-archiving sweep into RunFullWorkflow, ensuring un-bumped webseries updates are captured on every cron cycle.
 
 package orchestrator
 
@@ -138,10 +138,29 @@ func RunFullWorkflow(cfg *config.Config) {
 			Msg("Database is empty or force-override is active. Running in Full Sync Mode.")
 	}
 
+	// 1. Standard Forum Index Crawl
 	scraped, err := crawler.RunCrawler(cfg, incremental)
 	if err != nil {
 		utils.Logger.Error().Err(err).Msg("Crawler execution failed catastrophically.")
 		return
+	}
+
+	// 2. Poll Active Monitored Series URLs directly to catch un-bumped thread edits
+	activeMonitored, errMon := database.GetActiveMonitoredSeries()
+	if errMon == nil && len(activeMonitored) > 0 {
+		utils.Logger.Info().
+			Int("active_monitored_count", len(activeMonitored)).
+			Msg("Polling active watched webseries URLs directly to catch un-bumped episode updates...")
+
+		for _, ms := range activeMonitored {
+			if ms.URL == "" {
+				continue
+			}
+			targetedScraped, errT := crawler.RunTargetedCrawler(cfg, ms.URL, "series", "top-series-from-forum")
+			if errT == nil && len(targetedScraped) > 0 {
+				scraped = append(scraped, targetedScraped...)
+			}
+		}
 	}
 
 	utils.Logger.Info().
@@ -150,6 +169,7 @@ func RunFullWorkflow(cfg *config.Config) {
 
 	tmdbClient := metadata.NewTMDBClient(cfg)
 
+	// Worker Pool Concurrency Engine (5 parallel workers bounded by channel semaphore)
 	workerConcurrency := 5
 	sem := make(chan struct{}, workerConcurrency)
 	var wg sync.WaitGroup
@@ -169,6 +189,11 @@ func RunFullWorkflow(cfg *config.Config) {
 	}
 
 	wg.Wait()
+
+	// 3. Auto-Archive dormant monitored series older than 30 days without updates
+	if archivedCount, errArch := database.AutoArchiveInactiveSeries(nil, 30); errArch == nil && archivedCount > 0 {
+		utils.Logger.Info().Int("archived_count", archivedCount).Msg("Dormant webseries auto-archived after 30 days of inactivity.")
+	}
 
 	utils.Logger.Info().Int("total_scraped", len(scraped)).Msg("Workflow thread processing complete.")
 }
@@ -329,6 +354,7 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 			PostedAt:          thread.PostedAt,
 			Catalog:           thread.CatalogID,
 			MagnetURIs:        thread.MagnetURIs,
+			URL:               thread.URL, // Preserve thread URL
 			CustomDescription: nil,
 			CustomPoster:      nil,
 		}
@@ -435,6 +461,7 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 			PostedAt:   thread.PostedAt,
 			Catalog:    thread.CatalogID,
 			MagnetURIs: cleanedMagnets,
+			URL:        thread.URL, // Retain direct thread address
 			CreatedAt:  time.Now(),
 			UpdatedAt:  time.Now(),
 		}
