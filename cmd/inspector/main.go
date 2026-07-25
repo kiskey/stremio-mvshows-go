@@ -1,5 +1,5 @@
-// Version: 2.4.0
-// Change log: Updated stream regeneration to write composite keys (tmdbID:infohash) matching Proposal 2 architecture and added storage fragmentation percentage metrics.
+// Version: 2.5.0
+// Change log: Added monitored_series bucket validation, orphaned watchlist key pruning, and auto-enrollment verification during database repair.
 
 package main
 
@@ -234,6 +234,7 @@ func main() {
 		idxB := tx.Bucket([]byte("catalog_index"))
 		threadIdxB := tx.Bucket([]byte("tmdb_thread_index"))
 		idB, _ := tx.CreateBucketIfNotExists([]byte("thread_id_index"))
+		monitoredB, _ := tx.CreateBucketIfNotExists([]byte("monitored_series"))
 		streamsB := tx.Bucket([]byte("streams"))
 		metaB := tx.Bucket([]byte("tmdb_metadata"))
 		magnetB := tx.Bucket([]byte("magnet_cache"))
@@ -311,6 +312,10 @@ func main() {
 				_ = threadIdxB.Put([]byte(*keptThread.TmdbID), []byte(targetNewHash))
 			}
 
+			if strings.ToLower(keptThread.Type) == "series" && keptThread.Status == "linked" {
+				_ = database.AutoEnrollSeries(tx, &keptThread)
+			}
+
 			for i := 1; i < len(list); i++ {
 				trashThread := list[i]
 
@@ -321,6 +326,10 @@ func main() {
 
 				if trashThread.ID > 0 && idB != nil {
 					_ = idB.Delete([]byte(fmt.Sprintf("%d", trashThread.ID)))
+				}
+
+				if monitoredB != nil {
+					_ = monitoredB.Delete([]byte(trashThread.ThreadHash))
 				}
 
 				if trashThread.TmdbID != nil {
@@ -354,6 +363,9 @@ func main() {
 				}
 				if idB != nil && t.ID > 0 {
 					_ = idB.Put([]byte(fmt.Sprintf("%d", t.ID)), k)
+				}
+				if strings.ToLower(t.Type) == "series" && t.Status == "linked" {
+					_ = database.AutoEnrollSeries(tx, &t)
 				}
 			}
 		}
