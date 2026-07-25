@@ -1,5 +1,5 @@
-// Version: 2.3.1
-// Change log: Added thread_id_index validation and repair sequence during database maintenance.
+// Version: 2.4.0
+// Change log: Updated stream regeneration to write composite keys (tmdbID:infohash) matching Proposal 2 architecture and added storage fragmentation percentage metrics.
 
 package main
 
@@ -173,11 +173,18 @@ func main() {
 		diskSize = stat.Size()
 	}
 
+	var fragmentationPct float64
+	if totalAllocatedBytes > 0 {
+		fillRatio := (float64(totalInuseBytes) / float64(totalAllocatedBytes)) * 100.0
+		fragmentationPct = 100.0 - fillRatio
+	}
+
 	log.Println("--------------------------------------------------")
 	log.Printf("NATIVE PERFORMANCE SUMMARY:\n")
 	log.Printf("  - Overall Keys Tracked:         %d entries\n", totalKeys)
 	log.Printf("  - Logical Content In-Use:       %s\n", formatBytes(totalInuseBytes))
 	log.Printf("  - Virtual Mapped Allocations:   %s\n", formatBytes(totalAllocatedBytes))
+	log.Printf("  - Storage Page Fragmentation:   %.1f%%\n", fragmentationPct)
 	log.Printf("  - Physical File Size on Disk:   %s\n", formatBytes(diskSize))
 	if diskSize > 0 {
 		log.Printf("  - Total Storage Efficiency:     %.1f%%\n", (float64(totalInuseBytes)/float64(diskSize))*100)
@@ -317,7 +324,7 @@ func main() {
 				}
 
 				if trashThread.TmdbID != nil {
-					_ = streamsB.Delete([]byte(*trashThread.TmdbID))
+					_ = database.DeleteStreamsByTmdbID(tx, *trashThread.TmdbID)
 					_ = threadIdxB.Delete([]byte(*trashThread.TmdbID))
 				}
 
@@ -366,7 +373,7 @@ func main() {
 			_ = magnetB.Put([]byte(mc.Infohash), bytesData)
 		}
 
-		log.Println("Regenerating and correcting all stream indices from raw magnets...")
+		log.Println("Regenerating and correcting all stream indices from raw magnets using composite keys...")
 		var streamKeysToDelete [][]byte
 		streamsCursor := streamsB.Cursor()
 		for k, _ := streamsCursor.First(); k != nil; k, _ = streamsCursor.Next() {
@@ -435,17 +442,14 @@ func main() {
 		}
 
 		if len(allRegenStreams) > 0 {
-			log.Printf("Successfully generated %d repaired stream pointers. Writing to Bbolt streams bucket...\n", len(allRegenStreams))
-			byTMDB := make(map[string][]database.Stream)
+			log.Printf("Successfully generated %d repaired stream pointers. Writing composite keys (tmdbID:infohash) to Bbolt streams bucket...\n", len(allRegenStreams))
 			streamIDCounter := uint(0)
 			for _, s := range allRegenStreams {
 				streamIDCounter++
 				s.ID = streamIDCounter
-				byTMDB[s.TmdbID] = append(byTMDB[s.TmdbID], s)
-			}
-			for tmdbID, list := range byTMDB {
-				bytesData, _ := database.EncodeGob(list)
-				_ = streamsB.Put([]byte(tmdbID), bytesData)
+				compositeKey := fmt.Sprintf("%s:%s", s.TmdbID, strings.ToLower(s.Infohash))
+				bytesData, _ := database.EncodeGob(s)
+				_ = streamsB.Put([]byte(compositeKey), bytesData)
 			}
 		}
 
