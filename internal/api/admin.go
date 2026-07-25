@@ -1,5 +1,5 @@
-// Version: 2.6.0
-// Change log: Registered /monitored-series/bulk-toggle route and implemented bulkToggleMonitoredSeriesHandler for batch watchlist state transitions.
+// Version: 2.6.1
+// Change log: Updated addMonitoredSeriesHandler to explicitly force monitored series status = "active" upon re-enrollment from search or URL triggers.
 
 package api
 
@@ -1195,6 +1195,15 @@ func addMonitoredSeriesHandler(c *gin.Context) {
 			_ = database.CreateOrUpdateThread(nil, targetThread)
 		}
 		_ = database.AutoEnrollSeries(nil, targetThread)
+
+		// Explicitly force status to "active" upon manual re-enrollment
+		ms, errMs := database.GetMonitoredSeriesByHash(nil, targetThread.ThreadHash)
+		if errMs == nil && ms != nil {
+			ms.Status = "active"
+			ms.LastUpdated = time.Now()
+			_ = database.SetMonitoredSeries(nil, ms)
+		}
+
 		c.JSON(http.StatusOK, gin.H{"message": "Series enrolled into monitored watchlist successfully!"})
 		return
 	}
@@ -1206,6 +1215,19 @@ func addMonitoredSeriesHandler(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "Targeted crawl failed for URL: " + errCrawl.Error()})
 			return
 		}
+
+		// Ensure crawled thread gets explicitly activated in monitored watchlist
+		scrapedThread, errTr := database.FindThreadByRawTitle(nil, canonicalURL)
+		if errTr == nil && scrapedThread != nil {
+			_ = database.AutoEnrollSeries(nil, scrapedThread)
+			ms, errMs := database.GetMonitoredSeriesByHash(nil, scrapedThread.ThreadHash)
+			if errMs == nil && ms != nil {
+				ms.Status = "active"
+				ms.LastUpdated = time.Now()
+				_ = database.SetMonitoredSeries(nil, ms)
+			}
+		}
+
 		c.JSON(http.StatusOK, gin.H{"message": "Thread crawled and enrolled into monitored watchlist successfully!"})
 		return
 	}
