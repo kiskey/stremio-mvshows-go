@@ -1,5 +1,5 @@
-// Version: 1.3.0
-// Change log: Integrated ExtractTopicID and FormatCanonicalTopicURL (/topic/<id>-a/ dummy slug) during forum traversal and enabled 301 redirect final URL capture.
+// Version: 1.3.1
+// Change log: Updated parser.GenerateThreadHashWithURL calls in crawler handlers to resolve Go compiler type and symbol mismatch errors.
 
 package crawler
 
@@ -31,10 +31,9 @@ type CrawledThread struct {
 	Type       string
 	PostedAt   *time.Time
 	CatalogID  string
-	URL        string // Canonical Thread URL
+	URL        string
 }
 
-// RoundRobinProxySwitcher returns a thread-safe Colly ProxyFunc rotating through provided proxy strings.
 func RoundRobinProxySwitcher(proxies []string) (colly.ProxyFunc, error) {
 	if len(proxies) == 0 {
 		return nil, fmt.Errorf("proxy list is empty")
@@ -272,7 +271,7 @@ func RunCrawler(cfg *config.Config, incremental bool) ([]CrawledThread, error) {
 		})
 
 		if len(magnets) > 0 {
-			hash := parser.GenerateThreadHash(rawTitle, threadURL)
+			hash := parser.GenerateThreadHashWithURL(rawTitle, threadURL)
 			var postedAt *time.Time
 			if postedAtStr != "" {
 				if t, errDate := time.Parse(time.RFC3339, postedAtStr); errDate == nil {
@@ -532,7 +531,7 @@ func RunTargetedCrawler(cfg *config.Config, threadURL, contentType, catalogID st
 		})
 
 		if len(magnets) > 0 {
-			hash := parser.GenerateThreadHash(rawTitle, finalTargetURL)
+			hash := parser.GenerateThreadHashWithURL(rawTitle, finalTargetURL)
 			
 			var postedAt *time.Time
 			timeEl := e.DOM.ParentsUntil("html").Find("time[datetime]").First()
