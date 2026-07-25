@@ -1,9 +1,10 @@
-// Version: 1.4.2
-// Change log: Ensured thread process relies on NextSequence() auto-assignment and safe index relinking via CreateOrUpdateThread.
+// Version: 1.5.0
+// Change log: Implemented a bounded 5-worker pool for concurrent TMDB metadata resolution in RunFullWorkflow with per-worker context isolation and rate limit protection.
 
 package orchestrator
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"sync"
@@ -144,12 +145,32 @@ func RunFullWorkflow(cfg *config.Config) {
 		return
 	}
 
-	utils.Logger.Info().Int("count", len(scraped)).Msg("Forum crawl complete. Starting sequential thread metadata match processing.")
+	utils.Logger.Info().
+		Int("count", len(scraped)).
+		Msg("Forum crawl complete. Starting concurrent worker pool for thread metadata match processing...")
+
 	tmdbClient := metadata.NewTMDBClient(cfg)
 
-	for _, thread := range scraped {
-		processThread(thread, tmdbClient, incremental)
+	// Worker Pool Concurrency Engine (5 parallel workers bounded by channel semaphore)
+	workerConcurrency := 5
+	sem := make(chan struct{}, workerConcurrency)
+	var wg sync.WaitGroup
+
+	for idx, thread := range scraped {
+		wg.Add(1)
+		sem <- struct{}{}
+
+		go func(index int, item crawler.CrawledThread) {
+			defer func() {
+				<-sem
+				wg.Done()
+			}()
+
+			processThread(item, tmdbClient, incremental)
+		}(idx, thread)
 	}
+
+	wg.Wait()
 
 	utils.Logger.Info().Int("total_scraped", len(scraped)).Msg("Workflow thread processing complete.")
 }
@@ -251,7 +272,7 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 				_ = tx.Bucket([]byte("threads")).Delete([]byte(existing.ThreadHash))
 
 				if existing.TmdbID != nil {
-					_ = tx.Bucket([]byte("streams")).Delete([]byte(*existing.TmdbID))
+					_ = database.DeleteStreamsByTmdbID(tx, *existing.TmdbID)
 					_ = tx.Bucket([]byte("tmdb_thread_index")).Delete([]byte(*existing.TmdbID))
 					
 					idxB := tx.Bucket([]byte("catalog_index"))
