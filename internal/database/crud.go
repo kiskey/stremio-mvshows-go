@@ -1,5 +1,5 @@
-// Version: 2.5.0
-// Change log: Added BulkSetMonitoredSeriesStatus to perform atomic mass status updates (active, paused, archived, delete) within a single BoltDB transaction.
+// Version: 2.5.1
+// Change log: Fixed AutoEnrollSeries to explicitly reset ms.Status = "active" on existing records when re-enrolled into monitored watchlist.
 
 package database
 
@@ -689,6 +689,7 @@ func AutoEnrollSeries(tx *bolt.Tx, t *Thread) error {
 			if errDec := DecodeGob(existingData, &ms); errDec == nil {
 				ms.Title = title
 				ms.RawTitle = t.RawTitle
+				ms.Status = "active" // Explicitly reset status to active upon re-enrollment
 				if t.URL != "" {
 					ms.URL = t.URL
 				}
