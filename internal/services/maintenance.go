@@ -1,5 +1,5 @@
-// Version: 2.0.3
-// Change log: Integrated Debrid provider cloud account stale download purge into maintenance cycle.
+// Version: 2.0.4
+// Change log: Implemented Proposal 4 fragmentation-based compaction guardrails (checking >50MB size and >40% fragmentation) before executing BoltDB file compaction.
 
 package maintenance
 
@@ -16,7 +16,6 @@ import (
 	bolt "go.etcd.io/bbolt"
 )
 
-// PerformMaintenance removes expired cache keys and runs memory-mapped file compaction.
 func PerformMaintenance() {
 	utils.Logger.Info().Msg("Starting BoltDB database maintenance routines...")
 
@@ -35,6 +34,9 @@ func PerformMaintenance() {
 		var expiredHashes []string
 		_ = database.DB.View(func(tx *bolt.Tx) error {
 			b := tx.Bucket([]byte("debrid_torrents"))
+			if b == nil {
+				return nil
+			}
 			c := b.Cursor()
 			for k, v := c.First(); k != nil; k, v = c.Next() {
 				var dt database.DebridTorrent
@@ -50,8 +52,10 @@ func PerformMaintenance() {
 		if len(expiredHashes) > 0 {
 			_ = database.DB.Update(func(tx *bolt.Tx) error {
 				b := tx.Bucket([]byte("debrid_torrents"))
-				for _, h := range expiredHashes {
-					_ = b.Delete([]byte(h))
+				if b != nil {
+					for _, h := range expiredHashes {
+						_ = b.Delete([]byte(h))
+					}
 				}
 				return nil
 			})
@@ -65,6 +69,9 @@ func PerformMaintenance() {
 	var expiredFailedKeys [][]byte
 	_ = database.DB.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte("failed_threads"))
+		if b == nil {
+			return nil
+		}
 		c := b.Cursor()
 		for k, v := c.First(); k != nil; k, v = c.Next() {
 			var ft database.FailedThread
@@ -79,8 +86,10 @@ func PerformMaintenance() {
 	if len(expiredFailedKeys) > 0 {
 		_ = database.DB.Update(func(tx *bolt.Tx) error {
 			b := tx.Bucket([]byte("failed_threads"))
-			for _, k := range expiredFailedKeys {
-				_ = b.Delete(k)
+			if b != nil {
+				for _, k := range expiredFailedKeys {
+					_ = b.Delete(k)
+				}
 			}
 			return nil
 		})
@@ -93,6 +102,9 @@ func PerformMaintenance() {
 	var expiredMagnetKeys [][]byte
 	_ = database.DB.View(func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte("magnet_cache"))
+		if b == nil {
+			return nil
+		}
 		c := b.Cursor()
 		for k, v := c.First(); k != nil; k, v = c.Next() {
 			var mc database.MagnetCache
@@ -107,15 +119,17 @@ func PerformMaintenance() {
 	if len(expiredMagnetKeys) > 0 {
 		_ = database.DB.Update(func(tx *bolt.Tx) error {
 			b := tx.Bucket([]byte("magnet_cache"))
-			for _, k := range expiredMagnetKeys {
-				_ = b.Delete(k)
+			if b != nil {
+				for _, k := range expiredMagnetKeys {
+					_ = b.Delete(k)
+				}
 			}
 			return nil
 		})
 		utils.Logger.Info().Int("cleared_count", len(expiredMagnetKeys)).Msg("Expired magnet cache entries pruned.")
 	}
 
-	// 4. Trigger Debrid Provider Stale Torrent Cleanup (Torbox cloud account purge)
+	// 4. Trigger Debrid Provider Stale Torrent Cleanup
 	utils.Logger.Info().Msg("Executing Debrid provider cloud account stale torrent cleanup...")
 	provider := debrid.GetProvider(cfg)
 	if provider.IsEnabled() {
@@ -128,13 +142,50 @@ func PerformMaintenance() {
 		}
 	}
 
-	// 5. Database Compaction
+	// 5. Proposal 4: Dynamic Fragmentation-Based Database Compaction Guardrail
 	dbPath := "/data/stremio_addon.db.bolt"
 	tempPath := dbPath + ".compact"
 
 	var dbSize int64
 	if stat, err := os.Stat(dbPath); err == nil {
 		dbSize = stat.Size()
+	}
+
+	var totalInuseBytes int64
+	var totalAllocatedBytes int64
+
+	_ = database.DB.View(func(tx *bolt.Tx) error {
+		return tx.ForEach(func(name []byte, b *bolt.Bucket) error {
+			stats := b.Stats()
+			inuse := int64(stats.BranchInuse) + int64(stats.LeafInuse)
+			allocated := int64(stats.BranchAlloc) + int64(stats.LeafAlloc)
+			totalInuseBytes += inuse
+			totalAllocatedBytes += allocated
+			return nil
+		})
+	})
+
+	var fragmentationPct float64
+	if totalAllocatedBytes > 0 {
+		fillRatio := (float64(totalInuseBytes) / float64(totalAllocatedBytes)) * 100.0
+		fragmentationPct = 100.0 - fillRatio
+	}
+
+	utils.Logger.Info().
+		Int64("db_size_bytes", dbSize).
+		Float64("fragmentation_pct", fragmentationPct).
+		Msg("Database storage fragmentation stats calculated.")
+
+	minCompactionSize := int64(50 * 1024 * 1024)
+	minFragmentationThreshold := 40.0
+
+	if dbSize < minCompactionSize && fragmentationPct < minFragmentationThreshold {
+		utils.Logger.Info().
+			Int64("db_size_bytes", dbSize).
+			Float64("fragmentation_pct", fragmentationPct).
+			Msg("Database compaction skipped: File size and fragmentation ratios are well within optimal bounds.")
+		utils.Logger.Info().Msg("Database maintenance routines completed successfully.")
+		return
 	}
 
 	requiredSpace := int64(float64(dbSize) * 2.5)
@@ -146,7 +197,7 @@ func PerformMaintenance() {
 		return
 	}
 
-	utils.Logger.Info().Msg("Compacting database file...")
+	utils.Logger.Info().Msg("Compacting database file under active threshold trigger...")
 	err := database.DB.View(func(tx *bolt.Tx) error {
 		return tx.CopyFile(tempPath, 0600)
 	})

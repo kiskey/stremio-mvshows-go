@@ -1,5 +1,5 @@
-// Version: 2.1.2
-// Change log: Auto-assign sequence IDs via NextSequence() when ID == 0, prune old streams and tmdb_thread_index during TMDB relinking, and keep thread_id_index synchronized.
+// Version: 2.2.0
+// Change log: Refactored streams bucket storage to O(1) composite keys (tmdbID:infohash), added DeleteStreamsByTmdbID prefix purge helper, and updated stream query methods to use Bbolt cursor prefix iteration.
 
 package database
 
@@ -26,8 +26,7 @@ func EncodeGob(val interface{}) ([]byte, error) {
 	return buf.Bytes(), nil
 }
 
-// DecodeGob implements a resilient, panic-recovering GOB decoder to insulate the application
-// from future struct changes without server crashes.
+// DecodeGob implements a resilient, panic-recovering GOB decoder.
 func DecodeGob(data []byte, val interface{}) (err error) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -64,7 +63,7 @@ func FindThreadByHash(tx *bolt.Tx, hash string) (*Thread, error) {
 		return DecodeGob(data, &t)
 	})
 	if err != nil {
-		return nil, nil // Parity mapping for RecordNotFound checks
+		return nil, nil
 	}
 	return &t, nil
 }
@@ -109,7 +108,6 @@ func FindThreadByID(id uint) (*Thread, error) {
 			}
 		}
 
-		// Fallback sweep
 		b := tx.Bucket([]byte("threads"))
 		c := b.Cursor()
 		for k, v := c.First(); k != nil; k, v = c.Next() {
@@ -160,7 +158,6 @@ func CreateOrUpdateThread(tx *bolt.Tx, data *Thread) error {
 			return errIdBucket
 		}
 
-		// Auto-assign unique sequence ID if ID is zero
 		if data.ID == 0 {
 			seq, errSeq := b.NextSequence()
 			if errSeq != nil {
@@ -169,8 +166,6 @@ func CreateOrUpdateThread(tx *bolt.Tx, data *Thread) error {
 			data.ID = uint(seq)
 		}
 
-		// 1. SELF-HEALING INDEX REGISTRY
-		// Locate and prune old index files if the thread's PostedAt timestamp, Catalog, or Type is updated
 		existingData := b.Get([]byte(data.ThreadHash))
 		if existingData != nil {
 			var oldThread Thread
@@ -184,10 +179,8 @@ func CreateOrUpdateThread(tx *bolt.Tx, data *Thread) error {
 					oldIndexKey := fmt.Sprintf("cat:%s:%s:%010d:%s", oldThread.Catalog, oldThread.Type, oldInverse, oldThread.ThreadHash)
 					_ = idxB.Delete([]byte(oldIndexKey))
 				}
-				// If TmdbID changed during relinking, clean up old tmdb_thread_index and streams
 				if oldThread.TmdbID != nil && (data.TmdbID == nil || *oldThread.TmdbID != *data.TmdbID) {
 					_ = tx.Bucket([]byte("tmdb_thread_index")).Delete([]byte(*oldThread.TmdbID))
-					// Verify no other thread shares oldTmdbID before wiping streams
 					hasShare := false
 					tCursor := b.Cursor()
 					for tk, tv := tCursor.First(); tk != nil; tk, tv = tCursor.Next() {
@@ -202,13 +195,12 @@ func CreateOrUpdateThread(tx *bolt.Tx, data *Thread) error {
 						}
 					}
 					if !hasShare {
-						_ = tx.Bucket([]byte("streams")).Delete([]byte(*oldThread.TmdbID))
+						_ = DeleteStreamsByTmdbID(tx, *oldThread.TmdbID)
 					}
 				}
 			}
 		}
 
-		// 2. Commit the updated Thread structure to the threads bucket
 		bytesData, err := EncodeGob(data)
 		if err != nil {
 			return err
@@ -218,7 +210,6 @@ func CreateOrUpdateThread(tx *bolt.Tx, data *Thread) error {
 			return err
 		}
 
-		// 3. Write new, sorted Catalog Index Key
 		if data.Status == "linked" && data.Catalog != "" {
 			postedTime := time.Unix(0, 0)
 			if data.PostedAt != nil {
@@ -229,13 +220,11 @@ func CreateOrUpdateThread(tx *bolt.Tx, data *Thread) error {
 			_ = idxB.Put([]byte(indexKey), []byte(data.ThreadHash))
 		}
 
-		// 4. Update the high-speed TMDB mapping index
 		if data.Status == "linked" && data.TmdbID != nil {
 			threadIdxB := tx.Bucket([]byte("tmdb_thread_index"))
 			_ = threadIdxB.Put([]byte(*data.TmdbID), []byte(data.ThreadHash))
 		}
 
-		// 5. Write sequential Thread ID lookup pointers dynamically
 		_ = idB.Put([]byte(fmt.Sprintf("%d", data.ID)), []byte(data.ThreadHash))
 
 		return nil
@@ -246,7 +235,6 @@ func DeleteThread(tx *bolt.Tx, t *Thread) error {
 	return runUpdate(tx, func(tx *bolt.Tx) error {
 		_ = tx.Bucket([]byte("threads")).Delete([]byte(t.ThreadHash))
 
-		// Clean up catalog indexes
 		idxB := tx.Bucket([]byte("catalog_index"))
 		c := idxB.Cursor()
 		for k, _ := c.First(); k != nil; k, _ = c.Next() {
@@ -274,7 +262,7 @@ func DeleteThread(tx *bolt.Tx, t *Thread) error {
 			}
 
 			if !hasShare {
-				_ = tx.Bucket([]byte("streams")).Delete([]byte(*t.TmdbID))
+				_ = DeleteStreamsByTmdbID(tx, *t.TmdbID)
 			}
 		}
 
@@ -365,7 +353,7 @@ func GetRecentLinkedThreadsPaginated(offset, limit int) ([]Thread, error) {
 	return list[offset:end], err
 }
 
-// ── Stream CRUD Operations ──
+// ── Stream CRUD Operations (Composite Key Architecture: tmdbID:infohash) ──
 
 var streamsQualityRank = map[string]int{
 	"4K":    1, "2160P": 1, "2160p": 1,
@@ -385,15 +373,48 @@ func sortStreamsByQuality(streams []Stream) {
 	})
 }
 
+// DeleteStreamsByTmdbID purges all composite key stream entries starting with prefix "tmdbID:"
+func DeleteStreamsByTmdbID(tx *bolt.Tx, tmdbID string) error {
+	return runUpdate(tx, func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("streams"))
+		if b == nil {
+			return nil
+		}
+		prefix := []byte(tmdbID + ":")
+		cursor := b.Cursor()
+		var keysToDelete [][]byte
+
+		for k, _ := cursor.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix); k, _ = cursor.Next() {
+			keyCopy := make([]byte, len(k))
+			copy(keyCopy, k)
+			keysToDelete = append(keysToDelete, keyCopy)
+		}
+
+		for _, k := range keysToDelete {
+			_ = b.Delete(k)
+		}
+		return nil
+	})
+}
+
+// FindSeriesStreams queries streams via Bbolt prefix cursor scan and filters by season/episode.
 func FindSeriesStreams(tx *bolt.Tx, tmdbID string, season, episode int) ([]Stream, error) {
 	var allStreams []Stream
 	err := runView(tx, func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte("streams"))
-		data := b.Get([]byte(tmdbID))
-		if data == nil {
+		if b == nil {
 			return nil
 		}
-		return DecodeGob(data, &allStreams)
+		prefix := []byte(tmdbID + ":")
+		cursor := b.Cursor()
+
+		for k, v := cursor.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix); k, v = cursor.Next() {
+			var s Stream
+			if errDec := DecodeGob(v, &s); errDec == nil {
+				allStreams = append(allStreams, s)
+			}
+		}
+		return nil
 	})
 	if err != nil {
 		return nil, err
@@ -429,15 +450,24 @@ func FindSeriesStreams(tx *bolt.Tx, tmdbID string, season, episode int) ([]Strea
 	return filtered, nil
 }
 
+// FindMovieStreams queries all streams for a TMDB ID via prefix cursor scan.
 func FindMovieStreams(tx *bolt.Tx, tmdbID string) ([]Stream, error) {
 	var allStreams []Stream
 	err := runView(tx, func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte("streams"))
-		data := b.Get([]byte(tmdbID))
-		if data == nil {
+		if b == nil {
 			return nil
 		}
-		return DecodeGob(data, &allStreams)
+		prefix := []byte(tmdbID + ":")
+		cursor := b.Cursor()
+
+		for k, v := cursor.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix); k, v = cursor.Next() {
+			var s Stream
+			if errDec := DecodeGob(v, &s); errDec == nil {
+				allStreams = append(allStreams, s)
+			}
+		}
+		return nil
 	})
 	if err != nil {
 		return nil, err
@@ -447,73 +477,33 @@ func FindMovieStreams(tx *bolt.Tx, tmdbID string) ([]Stream, error) {
 	return allStreams, nil
 }
 
-func streamsMatchUnique(a, b Stream) bool {
-	if a.TmdbID != b.TmdbID || a.Infohash != b.Infohash {
-		return false
-	}
-	if (a.Season == nil) != (b.Season == nil) {
-		return false
-	}
-	if a.Season != nil && *a.Season != *b.Season {
-		return false
-	}
-	if (a.Episode == nil) != (b.Episode == nil) {
-		return false
-	}
-	if a.Episode != nil && *a.Episode != *b.Episode {
-		return false
-	}
-	return true
-}
-
+// CreateStreams writes each stream under composite key "tmdbID:infohash" in O(1) time.
 func CreateStreams(tx *bolt.Tx, streams []Stream) error {
 	if len(streams) == 0 {
 		return nil
 	}
 	return runUpdate(tx, func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte("streams"))
-		
-		byTMDB := make(map[string][]Stream)
-		for _, s := range streams {
-			byTMDB[s.TmdbID] = append(byTMDB[s.TmdbID], s)
+		if b == nil {
+			return bolt.ErrBucketNotFound
 		}
 
-		for tmdbID, list := range byTMDB {
-			var existing []Stream
-			data := b.Get([]byte(tmdbID))
-			if data != nil {
-				_ = DecodeGob(data, &existing)
+		for _, s := range streams {
+			if s.TmdbID == "" || s.Infohash == "" {
+				continue
 			}
-
-			for _, s := range list {
-				duplicate := false
-				for i, ext := range existing {
-					if streamsMatchUnique(ext, s) {
-						existing[i] = s
-						duplicate = true
-						break
-					}
-				}
-				if !duplicate {
-					existing = append(existing, s)
-				}
-			}
-
-			if len(existing) > 2000 {
-				existing = existing[len(existing)-2000:]
-			}
-
-			encBytes, err := EncodeGob(existing)
+			compositeKey := fmt.Sprintf("%s:%s", s.TmdbID, strings.ToLower(s.Infohash))
+			encBytes, err := EncodeGob(s)
 			if err != nil {
 				return err
 			}
-			_ = b.Put([]byte(tmdbID), encBytes)
+			_ = b.Put([]byte(compositeKey), encBytes)
 		}
 		return nil
 	})
 }
 
-// ── FailedThread operations ──
+// ── FailedThread Operations ──
 
 func LogFailedThread(tx *bolt.Tx, hash, rawTitle, reason string) error {
 	return runUpdate(tx, func(tx *bolt.Tx) error {
@@ -584,7 +574,7 @@ func DeleteFailedThread(tx *bolt.Tx, hash string) error {
 	})
 }
 
-// ── Lock managers ──
+// ── Lock Managers ──
 
 func IsDebridCacheLocked(hash string) bool {
 	locked := false

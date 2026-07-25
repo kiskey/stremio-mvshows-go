@@ -1,5 +1,5 @@
-// Version: 2.2.0
-// Change log: Preserved full JSON metadata fields (migrated sm.Data verbatim instead of writing empty defaults) and routed insertion through database.CreateOrUpdateThread to avoid indices drifts [report.md].
+// Version: 2.3.0
+// Change log: Updated stream migration to write composite keys (tmdbID:infohash) directly into target BoltDB streams bucket.
 
 package main
 
@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/glebarez/sqlite"
@@ -225,7 +226,6 @@ func main() {
 					UpdatedAt:         st.UpdatedAt,
 				}
 
-				// Avoid index drift by utilizing unified database write pathways [report.md]
 				err = database.CreateOrUpdateThread(tx, &thread)
 				if err != nil {
 					return err
@@ -249,7 +249,7 @@ func main() {
 					TmdbID:    sm.TmdbID,
 					ImdbID:    sm.ImdbID,
 					Year:      sm.Year,
-					Data:      sm.Data, // FIXED: Migrates data instead of discarding [report.md]
+					Data:      sm.Data,
 					CreatedAt: sm.CreatedAt,
 					UpdatedAt: sm.UpdatedAt,
 				}
@@ -267,38 +267,36 @@ func main() {
 		}
 	}
 
-	log.Println("Migrating streams pointers arrays...")
+	log.Println("Migrating streams pointers array to composite key (tmdbID:infohash) storage...")
 	var sqliteStreams []SqliteStream
 	if err := sqlDB.Find(&sqliteStreams).Error; err == nil {
 		log.Printf("Loaded %d stream records.\n", len(sqliteStreams))
-		
-		byTMDB := make(map[string][]database.Stream)
-		for _, ss := range sqliteStreams {
-			stream := database.Stream{
-				ID:         ss.ID,
-				TmdbID:     ss.TmdbID,
-				Season:     ss.Season,
-				Episode:    ss.Episode,
-				EpisodeEnd: ss.EpisodeEnd,
-				Infohash:   ss.Infohash,
-				Quality:    ss.Quality,
-				Language:   ss.Language,
-				CreatedAt:  ss.CreatedAt,
-				UpdatedAt:  ss.UpdatedAt,
-			}
-			byTMDB[stream.TmdbID] = append(byTMDB[stream.TmdbID], stream)
-		}
 
 		errTx := boltDB.Update(func(tx *bolt.Tx) error {
 			streamsBucket := tx.Bucket([]byte("streams"))
-			for tmdbID, list := range byTMDB {
-				bytesData, _ := database.EncodeGob(list)
-				_ = streamsBucket.Put([]byte(tmdbID), bytesData)
+			for _, ss := range sqliteStreams {
+				stream := database.Stream{
+					ID:         ss.ID,
+					TmdbID:     ss.TmdbID,
+					Season:     ss.Season,
+					Episode:    ss.Episode,
+					EpisodeEnd: ss.EpisodeEnd,
+					Infohash:   ss.Infohash,
+					Quality:    ss.Quality,
+					Language:   ss.Language,
+					CreatedAt:  ss.CreatedAt,
+					UpdatedAt:  ss.UpdatedAt,
+				}
+				if stream.TmdbID != "" && stream.Infohash != "" {
+					compositeKey := fmt.Sprintf("%s:%s", stream.TmdbID, strings.ToLower(stream.Infohash))
+					bytesData, _ := database.EncodeGob(stream)
+					_ = streamsBucket.Put([]byte(compositeKey), bytesData)
+				}
 			}
 			return nil
 		})
 		if errTx != nil {
-			log.Fatalf("Streams array transactional write failed: %v\n", errTx)
+			log.Fatalf("Streams composite key transactional write failed: %v\n", errTx)
 		}
 	}
 

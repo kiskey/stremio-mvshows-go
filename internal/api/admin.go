@@ -1,5 +1,5 @@
-// Version: 2.3.2
-// Change log: Added HTTP anti-caching response headers (Cache-Control: no-cache, no-store, must-revalidate) to pending, recent, and failures endpoints to eliminate stale browser cache lag.
+// Version: 2.3.3
+// Change log: Integrated Proposal 2 composite key prefix stream purges (database.DeleteStreamsByTmdbID) into Admin Console handlers and purge confirm routes.
 
 package api
 
@@ -939,15 +939,7 @@ func purgeLookupHandler(c *gin.Context) {
 		title = "Unknown Linked Title"
 	}
 
-	var streams []database.Stream
-	_ = database.DB.View(func(tx *bolt.Tx) error {
-		sb := tx.Bucket([]byte("streams"))
-		data := sb.Get([]byte(meta.TmdbID))
-		if data != nil {
-			_ = database.DecodeGob(data, &streams)
-		}
-		return nil
-	})
+	streams, _ := database.FindMovieStreams(nil, meta.TmdbID)
 
 	c.JSON(http.StatusOK, gin.H{
 		"found":        true,
@@ -1016,7 +1008,7 @@ func purgeConfirmHandler(c *gin.Context) {
 	}
 
 	_ = database.DB.Update(func(tx *bolt.Tx) error {
-		_ = tx.Bucket([]byte("streams")).Delete([]byte(meta.TmdbID))
+		_ = database.DeleteStreamsByTmdbID(tx, meta.TmdbID)
 		_ = tx.Bucket([]byte("tmdb_thread_index")).Delete([]byte(meta.TmdbID))
 		
 		metaB := tx.Bucket([]byte("tmdb_metadata"))
