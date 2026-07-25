@@ -1,5 +1,5 @@
-// Version: 2.7.0
-// Change log: Implemented getThreadInvariantGroupKey using type_year_cleantitle fallback for legacy entries missing URLs, enabling full consolidation of historical duplicate threads.
+// Version: 2.8.0
+// Change log: Upgraded getThreadInvariantGroupKey with deep title normalization and year-agnostic fallback matching; added an old-key purge sweep during --repair to eliminate lingering raw title keys and restore true linked count.
 
 package main
 
@@ -48,9 +48,23 @@ func formatBytes(bytes int64) string {
 	return fmt.Sprintf("%.2f MB", float64(bytes)/1024/1024)
 }
 
+// cleanNormalizedTitle performs deep title cleaning, stripping parentheses, brackets, and extra punctuation.
+func cleanNormalizedTitle(title string) string {
+	s := strings.ReplaceAll(title, "&", "and")
+	s = strings.ReplaceAll(s, "(", " ")
+	s = strings.ReplaceAll(s, ")", " ")
+	s = strings.ReplaceAll(s, "[", " ")
+	s = strings.ReplaceAll(s, "]", " ")
+	s = strings.ReplaceAll(s, "-", " ")
+	s = strings.ReplaceAll(s, "_", " ")
+	s = strings.ToLower(s)
+	words := strings.Fields(s)
+	return strings.Join(words, " ")
+}
+
 // getThreadInvariantGroupKey constructs an invariant grouping key:
 // 1. Primary: Topic ID if URL is available (topic_<id>)
-// 2. Fallback: type_year_cleantitle (e.g. series_2025_lbw love beyond wicket)
+// 2. Fallback: Deep-cleaned title normalization with year-agnostic handling (type_cleantitle)
 func getThreadInvariantGroupKey(t *database.Thread) string {
 	if t.URL != "" {
 		topicID := parser.ExtractTopicID(t.URL)
@@ -61,23 +75,33 @@ func getThreadInvariantGroupKey(t *database.Thread) string {
 	}
 
 	cleanTitle := t.CleanTitle
-	yearVal := 0
-	if t.Year != nil {
-		yearVal = *t.Year
+	if cleanTitle == "" {
+		pr := parser.ParseRelease(t.RawTitle, t.Type)
+		if pr != nil && pr.CleanTitle != "" {
+			cleanTitle = pr.CleanTitle
+		} else {
+			cleanTitle = t.RawTitle
+		}
 	}
 
-	pr := parser.ParseRelease(t.RawTitle, t.Type)
-	if pr != nil && pr.IsValid && pr.CleanTitle != "" {
-		cleanTitle = pr.CleanTitle
-		if yearVal == 0 && pr.Year > 0 {
+	cleanNorm := cleanNormalizedTitle(cleanTitle)
+
+	// Year-agnostic grouping key: ignores year if 0 or nil to force merging legacy Year: 0 records
+	yearVal := 0
+	if t.Year != nil && *t.Year > 0 {
+		yearVal = *t.Year
+	} else {
+		pr := parser.ParseRelease(t.RawTitle, t.Type)
+		if pr != nil && pr.Year > 0 {
 			yearVal = pr.Year
 		}
 	}
 
-	cleanNorm := strings.ToLower(strings.TrimSpace(cleanTitle))
-	cleanNorm = strings.Join(strings.Fields(cleanNorm), " ")
-
 	keyStr := fmt.Sprintf("%s_%d_%s", strings.ToLower(t.Type), yearVal, cleanNorm)
+	if yearVal == 0 {
+		keyStr = fmt.Sprintf("%s_%s", strings.ToLower(t.Type), cleanNorm)
+	}
+
 	h := sha256.Sum256([]byte(keyStr))
 	return hex.EncodeToString(h[:])
 }
@@ -291,12 +315,15 @@ func main() {
 
 			keptThread := list[0]
 
-			log.Printf("Processing & Compacting Group: %q (Hash: %s)\n", keptThread.RawTitle, targetNewHash)
+			log.Printf("Processing & Consolidating Group: %q (Target Hash: %s, Records: %d)\n", keptThread.RawTitle, targetNewHash, len(list))
 
+			// Collect all physical keys in this group to execute complete old-key sweep
+			var physicalKeysInGroup []string
 			seenMags := make(map[string]bool)
 			var allMergedMags []string
 
 			for _, item := range list {
+				physicalKeysInGroup = append(physicalKeysInGroup, item.ThreadHash)
 				for _, m := range item.MagnetURIs {
 					cleanM := parser.StripTrackersFromMagnet(m)
 					if cleanM != "" && !seenMags[cleanM] {
@@ -314,10 +341,6 @@ func main() {
 				keptThread.URL = parser.FormatCanonicalTopicURL(keptThread.URL)
 			}
 
-			if keptThread.ThreadHash != targetNewHash {
-				_ = tb.Delete([]byte(keptThread.ThreadHash))
-			}
-
 			prTitle := parser.ParseRelease(keptThread.RawTitle, keptThread.Type)
 			if prTitle.IsValid && prTitle.CleanTitle != "" {
 				keptThread.CleanTitle = prTitle.CleanTitle
@@ -330,6 +353,7 @@ func main() {
 				}
 			}
 
+			// Save kept thread under targetNewHash
 			keptThread.ThreadHash = targetNewHash
 			bytesData, _ := database.EncodeGob(keptThread)
 			_ = tb.Put([]byte(targetNewHash), bytesData)
@@ -356,18 +380,23 @@ func main() {
 				_ = database.AutoEnrollSeries(tx, &keptThread)
 			}
 
+			// OLD-KEY PURGE SWEEP: Delete all historical raw physical keys except targetNewHash
+			for _, oldKey := range physicalKeysInGroup {
+				if oldKey != targetNewHash {
+					_ = tb.Delete([]byte(oldKey))
+				}
+			}
+
 			for i := 1; i < len(list); i++ {
 				trashThread := list[i]
 
-				log.Printf("  [PRUNING DUPLICATE THREAD] Hash=%s Title=%q\n", trashThread.ThreadHash, trashThread.RawTitle)
+				log.Printf("  [PURGED DUPLICATE RECORD] Hash=%s Title=%q (ID: %d)\n", trashThread.ThreadHash, trashThread.RawTitle, trashThread.ID)
 
-				_ = tb.Delete([]byte(trashThread.ThreadHash))
-
-				if trashThread.ID > 0 && idB != nil {
+				if trashThread.ID > 0 && trashThread.ID != keptThread.ID && idB != nil {
 					_ = idB.Delete([]byte(fmt.Sprintf("%d", trashThread.ID)))
 				}
 
-				if monitoredB != nil {
+				if monitoredB != nil && trashThread.ThreadHash != targetNewHash {
 					_ = monitoredB.Delete([]byte(trashThread.ThreadHash))
 				}
 
