@@ -1,5 +1,5 @@
-// Version: 2.5.2
-// Change log: Refactored autoMatchHandler to consume parser.IsMetadataWord directly, eliminating local metadata dictionary duplication.
+// Version: 2.6.0
+// Change log: Registered /monitored-series/bulk-toggle route and implemented bulkToggleMonitoredSeriesHandler for batch watchlist state transitions.
 
 package api
 
@@ -12,7 +12,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unicode"
 
 	"github.com/gin-gonic/gin"
 	"github.com/kiskey/stremio-mvshows-go/internal/config"
@@ -49,6 +48,7 @@ func RegisterAdminRoutes(r *gin.RouterGroup) {
 	// Panel F Monitored Series Watchlist Routes
 	r.GET("/monitored-series", monitoredSeriesHandler)
 	r.POST("/monitored-series/toggle", toggleMonitoredSeriesHandler)
+	r.POST("/monitored-series/bulk-toggle", bulkToggleMonitoredSeriesHandler)
 	r.POST("/monitored-series/add", addMonitoredSeriesHandler)
 	r.GET("/series-search", seriesSearchHandler)
 }
@@ -685,28 +685,6 @@ func autoMatchHandler(c *gin.Context) {
 	})
 }
 
-func isAllNumbers(s string) bool {
-	for _, r := range s {
-		if !unicode.IsDigit(r) && !unicode.IsSpace(r) {
-			return false
-		}
-	}
-	return true
-}
-
-func isAllUppercase(s string) bool {
-	hasLetter := false
-	for _, r := range s {
-		if unicode.IsLetter(r) {
-			hasLetter = true
-			if unicode.IsLower(r) {
-				return false
-			}
-		}
-	}
-	return hasLetter
-}
-
 func cinemetaSearchHandler(c *gin.Context) {
 	query := c.Query("query")
 	if query == "" {
@@ -1154,6 +1132,34 @@ func toggleMonitoredSeriesHandler(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{"message": "Series status updated to " + body.Status})
+}
+
+func bulkToggleMonitoredSeriesHandler(c *gin.Context) {
+	var body struct {
+		ThreadHashes []string `json:"threadHashes"`
+		Status       string   `json:"status"` // "active", "paused", "archived", "delete"
+	}
+	if err := c.ShouldBindJSON(&body); err != nil || len(body.ThreadHashes) == 0 || body.Status == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid payload parameters. Expected threadHashes array and target status."})
+		return
+	}
+
+	validStatuses := map[string]bool{"active": true, "paused": true, "archived": true, "delete": true}
+	if !validStatuses[body.Status] {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid target status parameter."})
+		return
+	}
+
+	count, err := database.BulkSetMonitoredSeriesStatus(nil, body.ThreadHashes, body.Status)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed bulk operation: " + err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": fmt.Sprintf("Successfully updated %d series to status '%s'.", count, body.Status),
+		"count":   count,
+	})
 }
 
 func addMonitoredSeriesHandler(c *gin.Context) {
