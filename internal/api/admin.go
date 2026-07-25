@@ -1,5 +1,5 @@
-// Version: 2.3.3
-// Change log: Integrated Proposal 2 composite key prefix stream purges (database.DeleteStreamsByTmdbID) into Admin Console handlers and purge confirm routes.
+// Version: 2.3.4
+// Change log: Integrated In-Thread Magnet Title Divergence Guardrail (<0.20 threshold) into linkOfficialHandler and autoMatchHandler to drop rogue magnet links during manual and bulk admin operations.
 
 package api
 
@@ -305,7 +305,22 @@ func linkOfficialHandler(c *gin.Context) {
 
 		var cleanedMagnets []string
 		for _, m := range t.MagnetURIs {
-			cleanedMagnets = append(cleanedMagnets, parser.StripTrackersFromMagnet(m))
+			cleanM := parser.StripTrackersFromMagnet(m)
+			dn := parser.ExtractMagnetDisplayName(m)
+			if dn != "" {
+				pmr := parser.ParseRelease(dn, t.Type)
+				if pmr != nil && pmr.IsValid && pmr.CleanTitle != "" {
+					overlapClean := metadata.OverlapCoefficient(cleanTitle, pmr.CleanTitle)
+					if overlapClean < 0.20 {
+						utils.Logger.Warn().
+							Str("clean_title", cleanTitle).
+							Str("magnet_title", pmr.CleanTitle).
+							Msg("In-thread title divergence detected during manual link. Dropping rogue magnet link.")
+						continue
+					}
+				}
+			}
+			cleanedMagnets = append(cleanedMagnets, cleanM)
 		}
 		t.MagnetURIs = cleanedMagnets
 
@@ -537,7 +552,22 @@ func autoMatchHandler(c *gin.Context) {
 
 			var cleanedMagnets []string
 			for _, m := range res.Thread.MagnetURIs {
-				cleanedMagnets = append(cleanedMagnets, parser.StripTrackersFromMagnet(m))
+				cleanM := parser.StripTrackersFromMagnet(m)
+				dn := parser.ExtractMagnetDisplayName(m)
+				if dn != "" {
+					pmr := parser.ParseRelease(dn, res.Thread.Type)
+					if pmr != nil && pmr.IsValid && pmr.CleanTitle != "" {
+						overlapClean := metadata.OverlapCoefficient(cleanTitle, pmr.CleanTitle)
+						if overlapClean < 0.20 {
+							utils.Logger.Warn().
+								Str("clean_title", cleanTitle).
+								Str("magnet_title", pmr.CleanTitle).
+								Msg("In-thread title divergence detected during auto-match. Dropping rogue magnet link.")
+							continue
+						}
+					}
+				}
+				cleanedMagnets = append(cleanedMagnets, cleanM)
 			}
 			res.Thread.MagnetURIs = cleanedMagnets
 
