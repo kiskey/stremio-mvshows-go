@@ -1,5 +1,5 @@
-// Version: 2.0.1
-// Change log: Removed cyclical Threads references in TmdbMetadata to insulate GOB encoders from serialization panics, decoupled Thread.TmdbMetadata from payload outputs, and added SceneName/EpisodeTitle fields for future Sonarr/Radarr feature expansions.
+// Version: 2.1.0
+// Change log: Added URL field to Thread struct and created MonitoredSeries model with GOB type registration to support the Monitored Series Watchlist Engine.
 
 package database
 
@@ -8,7 +8,7 @@ import (
 	"time"
 )
 
-// GOB Registration to ensure type safety inside Bbolt nested stream slices
+// GOB Registration to ensure type safety inside Bbolt nested storage
 func init() {
 	gob.Register(Thread{})
 	gob.Register(TmdbMetadata{})
@@ -18,6 +18,7 @@ func init() {
 	gob.Register(DebridCacheLock{})
 	gob.Register(MagnetCache{})
 	gob.Register(TorboxIdMap{})
+	gob.Register(MonitoredSeries{}) // Registered MonitoredSeries struct
 }
 
 type Thread struct {
@@ -37,7 +38,20 @@ type Thread struct {
 	LastSeen          time.Time      `json:"last_seen"`
 	CreatedAt         time.Time      `json:"created_at"`
 	UpdatedAt         time.Time      `json:"updated_at"`
-	TmdbMetadata      *TmdbMetadata  `json:"-"` // Omit pointer during serializations to avoid cyclic encoding loops [report.md]
+	URL               string         `json:"url,omitempty"` // Retains direct thread address
+	TmdbMetadata      *TmdbMetadata  `json:"-"`
+}
+
+type MonitoredSeries struct {
+	ThreadHash   string    `json:"thread_hash"`
+	URL          string    `json:"url"`
+	Title        string    `json:"title"`
+	RawTitle     string    `json:"raw_title"`
+	Status       string    `json:"status"` // "active", "paused", "archived"
+	EpisodeCount int       `json:"episode_count"`
+	LastChecked  time.Time `json:"last_checked"`
+	LastUpdated  time.Time `json:"last_updated"`
+	CreatedAt    time.Time `json:"created_at"`
 }
 
 type TmdbMetadata struct {
@@ -50,19 +64,18 @@ type TmdbMetadata struct {
 }
 
 type Stream struct {
-	ID         uint      `json:"id"` // Legacy ID maintained for SQLite sync parity [report.md]
-	TmdbID     string    `json:"tmdb_id"`
-	Season     *int      `json:"season"`
-	Episode    *int      `json:"episode"`
-	EpisodeEnd *int      `json:"episode_end"`
-	Infohash   string    `json:"infohash"`
-	Quality    string    `json:"quality"`
-	Language   string    `json:"language"`
-	CreatedAt  time.Time `json:"created_at"`
-	UpdatedAt  time.Time `json:"updated_at"`
-	// Parity placeholders for future Sonarr/Radarr indexer extensions [report.md]
-	SceneName    string `json:"scene_name,omitempty"`
-	EpisodeTitle string `json:"episode_title,omitempty"`
+	ID           uint      `json:"id"`
+	TmdbID       string    `json:"tmdb_id"`
+	Season       *int      `json:"season"`
+	Episode      *int      `json:"episode"`
+	EpisodeEnd   *int      `json:"episode_end"`
+	Infohash     string    `json:"infohash"`
+	Quality      string    `json:"quality"`
+	Language     string    `json:"language"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+	SceneName    string    `json:"scene_name,omitempty"`
+	EpisodeTitle string    `json:"episode_title,omitempty"`
 }
 
 type FailedThread struct {
