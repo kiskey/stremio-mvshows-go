@@ -1,5 +1,5 @@
-// Version: 2.3.1
-// Change log: Corrected slice return type in GetFailedThreadsPaginated from []Thread{} to []FailedThread{} to resolve Go compiler type mismatch build error.
+// Version: 2.4.0
+// Change log: Updated CreateOrUpdateThread to handle in-place magnet URI merging, auto-healing of thread URL addresses, and preservation of existing sequence IDs.
 
 package database
 
@@ -158,20 +158,35 @@ func CreateOrUpdateThread(tx *bolt.Tx, data *Thread) error {
 			return errIdBucket
 		}
 
-		if data.ID == 0 {
-			seq, errSeq := b.NextSequence()
-			if errSeq != nil {
-				return errSeq
-			}
-			data.ID = uint(seq)
-		}
-
 		existingData := b.Get([]byte(data.ThreadHash))
 		if existingData != nil {
 			var oldThread Thread
 			if errDec := DecodeGob(existingData, &oldThread); errDec == nil {
+				if data.ID == 0 && oldThread.ID > 0 {
+					data.ID = oldThread.ID
+				}
+
 				if data.URL == "" && oldThread.URL != "" {
 					data.URL = oldThread.URL
+				}
+
+				// Merge and deduplicate magnet URIs on thread updates
+				if len(oldThread.MagnetURIs) > 0 {
+					seenMags := make(map[string]bool)
+					var merged []string
+					for _, m := range data.MagnetURIs {
+						if m != "" && !seenMags[m] {
+							seenMags[m] = true
+							merged = append(merged, m)
+						}
+					}
+					for _, m := range oldThread.MagnetURIs {
+						if m != "" && !seenMags[m] {
+							seenMags[m] = true
+							merged = append(merged, m)
+						}
+					}
+					data.MagnetURIs = merged
 				}
 
 				if oldThread.Catalog != "" {
@@ -203,6 +218,14 @@ func CreateOrUpdateThread(tx *bolt.Tx, data *Thread) error {
 					}
 				}
 			}
+		}
+
+		if data.ID == 0 {
+			seq, errSeq := b.NextSequence()
+			if errSeq != nil {
+				return errSeq
+			}
+			data.ID = uint(seq)
 		}
 
 		bytesData, err := EncodeGob(data)
