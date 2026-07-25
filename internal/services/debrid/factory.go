@@ -1,5 +1,5 @@
-// Version: 2.0.2
-// Change log: Updated disabledProvider stub to implement CleanupStaleTorrents.
+// Version: 2.0.3
+// Change log: Added CheckCachedWithContext to support non-blocking Debrid context timeouts in streamHandler.
 
 package debrid
 
@@ -151,7 +151,11 @@ func (d *disabledProvider) CleanupStaleTorrents(ctx context.Context) (int, error
 
 // ── Unified CheckCached Fallback Orchestrator ──
 
-func CheckCached(hashes []string, _ interface{}) map[string]bool {
+func CheckCached(hashes []string, db interface{}) map[string]bool {
+	return CheckCachedWithContext(context.Background(), hashes, db)
+}
+
+func CheckCachedWithContext(ctx context.Context, hashes []string, _ interface{}) map[string]bool {
 	cfg := config.Load()
 	p := GetProvider(cfg)
 
@@ -161,19 +165,22 @@ func CheckCached(hashes []string, _ interface{}) map[string]bool {
 	}
 
 	if p.IsEnabled() {
-		result, err := p.CheckCached(context.Background(), hashes)
+		result, err := p.CheckCached(ctx, hashes)
 		if err == nil {
 			for h, info := range result {
 				normalized[h] = info.Cached
 			}
 		} else {
-			utils.Logger.Warn().Err(err).Msg("Provider CheckCached failed, falling back to local database status.")
+			utils.Logger.Warn().Err(err).Msg("Provider CheckCached failed or timed out, falling back to local database status.")
 		}
 	}
 
 	if database.DB != nil && len(hashes) > 0 {
 		_ = database.DB.View(func(tx *bolt.Tx) error {
 			b := tx.Bucket([]byte("debrid_torrents"))
+			if b == nil {
+				return nil
+			}
 			for _, h := range hashes {
 				hLower := strings.ToLower(h)
 				data := b.Get([]byte(hLower))
