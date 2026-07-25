@@ -1,5 +1,5 @@
-// Version: 1.6.0
-// Change log: Integrated active monitored series polling and 30-day auto-archiving sweep into RunFullWorkflow, ensuring un-bumped webseries updates are captured on every cron cycle.
+// Version: 1.7.0
+// Change log: Updated processThread to handle Topic ID invariant thread updates in-place, merging new magnet URIs, auto-healing thread URLs, and regenerating composite streams without creating duplicate thread entries.
 
 package orchestrator
 
@@ -281,39 +281,6 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 	existing, errEx := database.FindThreadByHash(nil, thread.ThreadHash)
 	hasExisting := (errEx == nil && existing != nil)
 
-	if hasExisting {
-		if existing.ThreadHash == thread.ThreadHash {
-			if existing.Status == "pending_tmdb" && !incremental {
-				// Retry lookup path
-			} else {
-				return
-			}
-		}
-
-		if existing.ThreadHash != thread.ThreadHash {
-			_ = database.DB.Update(func(tx *bolt.Tx) error {
-				_ = tx.Bucket([]byte("threads")).Delete([]byte(existing.ThreadHash))
-
-				if existing.TmdbID != nil {
-					_ = database.DeleteStreamsByTmdbID(tx, *existing.TmdbID)
-					_ = tx.Bucket([]byte("tmdb_thread_index")).Delete([]byte(*existing.TmdbID))
-					
-					idxB := tx.Bucket([]byte("catalog_index"))
-					if existing.Catalog != "" {
-						oldPosted := time.Unix(0, 0)
-						if existing.PostedAt != nil {
-							oldPosted = *existing.PostedAt
-						}
-						oldInverse := 9999999999 - oldPosted.Unix()
-						oldIndexKey := fmt.Sprintf("cat:%s:%s:%010d:%s", existing.Catalog, existing.Type, oldInverse, existing.ThreadHash)
-						_ = idxB.Delete([]byte(oldIndexKey))
-					}
-				}
-				return nil
-			})
-		}
-	}
-
 	prTitle := parser.ParseRelease(thread.RawTitle, thread.Type)
 	parsed := &parser.ParseResult{
 		Title:        prTitle.CleanTitle,
@@ -335,11 +302,120 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 		return
 	}
 
-	utils.Logger.Debug().
-		Str("raw", thread.RawTitle).
-		Str("clean", parsed.Title).
-		Int("year", parsed.Year).
-		Msg("Title parsed successfully")
+	// Topic ID Invariant In-Place Update Pathway:
+	// If existing thread has same ThreadHash (e.g. topic_198255) and is already linked, merge magnets and update streams in-place
+	if hasExisting && existing.Status == "linked" && existing.TmdbID != nil {
+		utils.Logger.Info().
+			Str("hash", thread.ThreadHash).
+			Str("raw_title", thread.RawTitle).
+			Str("tmdb_id", *existing.TmdbID).
+			Msg("Topic ID invariant match identified. Executing in-place thread update & magnet merging...")
+
+		errTx := database.DB.Update(func(tx *bolt.Tx) error {
+			magnetBucket := tx.Bucket([]byte("magnet_cache"))
+
+			cleanTitle := existing.CleanTitle
+			if cleanTitle == "" {
+				cleanTitle = parsed.Title
+			}
+
+			// Filter divergence on incoming magnets before merging
+			var cleanedMagnets []string
+			for _, m := range thread.MagnetURIs {
+				cleanM := parser.StripTrackersFromMagnet(m)
+				dn := parser.ExtractMagnetDisplayName(m)
+				if dn != "" {
+					pmr := parser.ParseRelease(dn, thread.Type)
+					if pmr != nil && pmr.IsValid && pmr.CleanTitle != "" {
+						overlapParsed := metadata.OverlapCoefficient(parsed.Title, pmr.CleanTitle)
+						overlapClean := metadata.OverlapCoefficient(cleanTitle, pmr.CleanTitle)
+						if overlapParsed < 0.20 && overlapClean < 0.20 {
+							utils.Logger.Warn().
+								Str("thread_title", parsed.Title).
+								Str("magnet_title", pmr.CleanTitle).
+								Msg("In-thread title divergence detected during update. Dropping rogue magnet.")
+							continue
+						}
+					}
+				}
+				cleanedMagnets = append(cleanedMagnets, cleanM)
+			}
+
+			// Merge magnets with existing thread magnets
+			existing.MagnetURIs = cleanedMagnets
+			existing.RawTitle = thread.RawTitle
+			if thread.URL != "" {
+				existing.URL = thread.URL // Auto-heal thread URL to fresh slug
+			}
+			existing.LastSeen = time.Now()
+			existing.UpdatedAt = time.Now()
+
+			errSave := database.CreateOrUpdateThread(tx, existing)
+			if errSave != nil {
+				return errSave
+			}
+
+			isSeries := strings.ToLower(thread.Type) == "series"
+			var newStreams []database.Stream
+
+			for _, magnet := range cleanedMagnets {
+				parsedMagnet := parser.ParseMagnet(magnet, thread.Type)
+				if parsedMagnet == nil {
+					continue
+				}
+
+				cacheRecord := database.MagnetCache{
+					Infohash:  parsedMagnet.Infohash,
+					Magnet:    magnet,
+					CreatedAt: time.Now(),
+				}
+				cacheBytes, _ := database.EncodeGob(cacheRecord)
+				_ = magnetBucket.Put([]byte(parsedMagnet.Infohash), cacheBytes)
+
+				stream := database.Stream{
+					TmdbID:    *existing.TmdbID,
+					Infohash:  parsedMagnet.Infohash,
+					Quality:   parsedMagnet.Quality,
+					Language:  parsedMagnet.Language,
+					CreatedAt: time.Now(),
+					UpdatedAt: time.Now(),
+				}
+
+				if isSeries {
+					seasonVal := parsedMagnet.Season
+					if seasonVal == 0 {
+						seasonVal = 1
+					}
+					stream.Season = &seasonVal
+
+					if parsedMagnet.Type == "SINGLE_EPISODE" {
+						epVal := parsedMagnet.Episode
+						stream.Episode = &epVal
+						stream.EpisodeEnd = &epVal
+					} else if parsedMagnet.Type == "EPISODE_PACK" {
+						startVal := parsedMagnet.EpisodeStart
+						endVal := parsedMagnet.EpisodeEnd
+						stream.Episode = &startVal
+						stream.EpisodeEnd = &endVal
+					}
+				}
+
+				newStreams = append(newStreams, stream)
+			}
+
+			if len(newStreams) > 0 {
+				_ = database.CreateStreams(tx, newStreams)
+			}
+
+			_ = database.DeleteFailedThread(tx, thread.ThreadHash)
+			return nil
+		})
+
+		if errTx == nil {
+			utils.Logger.Info().Str("title", thread.RawTitle).Msg("In-place thread update & stream merging completed successfully.")
+			return
+		}
+	}
 
 	tmdbResult, errTmdb := tmdbClient.SearchWithAliases(parsed.Title, parsed.Year, thread.Type)
 	if errTmdb != nil {
@@ -354,7 +430,7 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 			PostedAt:          thread.PostedAt,
 			Catalog:           thread.CatalogID,
 			MagnetURIs:        thread.MagnetURIs,
-			URL:               thread.URL, // Preserve thread URL
+			URL:               thread.URL,
 			CustomDescription: nil,
 			CustomPoster:      nil,
 		}
@@ -428,7 +504,6 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 			}
 		}
 
-		// Enforce tracker-stripping AND In-Thread Title Divergence Filter (<0.20 threshold)
 		var cleanedMagnets []string
 		for _, m := range thread.MagnetURIs {
 			cleanM := parser.StripTrackersFromMagnet(m)
@@ -461,7 +536,7 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 			PostedAt:   thread.PostedAt,
 			Catalog:    thread.CatalogID,
 			MagnetURIs: cleanedMagnets,
-			URL:        thread.URL, // Retain direct thread address
+			URL:        thread.URL,
 			CreatedAt:  time.Now(),
 			UpdatedAt:  time.Now(),
 		}
