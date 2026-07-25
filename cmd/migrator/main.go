@@ -1,5 +1,5 @@
-// Version: 2.3.0
-// Change log: Updated stream migration to write composite keys (tmdbID:infohash) directly into target BoltDB streams bucket.
+// Version: 2.4.0
+// Change log: Added URL field to SqliteThread mapping and integrated monitored_series key count reporting into the final diagnostic verification summary.
 
 package main
 
@@ -85,6 +85,7 @@ type SqliteThread struct {
 	MagnetURIs        JSONStringArray `gorm:"column:magnet_uris;type:text"`
 	CustomPoster      *string         `gorm:"column:custom_poster"`
 	CustomDescription *string         `gorm:"column:custom_description"`
+	URL               string          `gorm:"column:url"` // Map legacy URL column
 	LastSeen          time.Time       `gorm:"column:last_seen"`
 	CreatedAt         time.Time       `gorm:"column:created_at"`
 	UpdatedAt         time.Time       `gorm:"column:updated_at"`
@@ -221,6 +222,7 @@ func main() {
 					MagnetURIs:        cleanMags,
 					CustomPoster:      st.CustomPoster,
 					CustomDescription: st.CustomDescription,
+					URL:               st.URL, // Map legacy thread URL
 					LastSeen:          st.LastSeen,
 					CreatedAt:         st.CreatedAt,
 					UpdatedAt:         st.UpdatedAt,
@@ -408,17 +410,21 @@ func main() {
 	_ = sqlDB.Model(&SqliteThread{}).Count(&sqliteThreadCount)
 	_ = sqlDB.Model(&SqliteTmdbMetadata{}).Count(&sqliteMetaCount)
 
-	var boltThreadCount, boltMetaCount, boltIndexCount int
+	var boltThreadCount, boltMetaCount, boltIndexCount, boltMonitoredCount int
 	_ = boltDB.View(func(tx *bolt.Tx) error {
 		boltThreadCount = tx.Bucket([]byte("threads")).Stats().KeyN
 		boltMetaCount = tx.Bucket([]byte("tmdb_metadata")).Stats().KeyN
 		boltIndexCount = tx.Bucket([]byte("catalog_index")).Stats().KeyN
+		if monB := tx.Bucket([]byte("monitored_series")); monB != nil {
+			boltMonitoredCount = monB.Stats().KeyN
+		}
 		return nil
 	})
 
 	log.Printf("Source Threads: %d | Target Threads: %d\n", sqliteThreadCount, boltThreadCount)
 	log.Printf("Source Metadata: %d | Target Metadata: %d\n", sqliteMetaCount, boltMetaCount)
 	log.Printf("Generated Fast-Catalog Pre-Sorted Indices: %d keys\n", boltIndexCount)
+	log.Printf("Auto-Enrolled Monitored Series Watchlist: %d entries\n", boltMonitoredCount)
 
 	if int(sqliteThreadCount) == boltThreadCount {
 		log.Println("► VERDICT: [PASS] - Structural parity confirmed.")
