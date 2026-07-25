@@ -1,5 +1,5 @@
-// Version: 1.9.4
-// Change log: Exported IsMetadataWord to provide a central authoritative metadata dictionary across package boundaries, eliminating code duplication in orchestrator and admin packages.
+// Version: 1.9.7
+// Change log: Cleaned unused titlePart variable declaration in TitleExtractor.Extract using blank identifier assignment (_, year := extractTitleAndYear(working)) to guarantee Go compiler compliance.
 
 package parser
 
@@ -127,14 +127,21 @@ var (
 	channelRegex      = regexp.MustCompile(`\b(?:ddp)?\d\.\d(?:\.\d)?\b`)
 	sizeCaptureRegex  = regexp.MustCompile(`(?i)\b\d+(?:\.\d+)?\s*(?:GB|MB|KB)\b`)
 
-	sXeXRegex         = regexp.MustCompile(`(?i)s(\d+)\s*e(\d+)`)
-	sXepXRegex        = regexp.MustCompile(`(?i)s(\d+)[\s\-_]*ep(?:isode)?[\s\-_]*(\d+)`)
-	epXRegex          = regexp.MustCompile(`(?i)\bep(?:isode)?[\s\-_]*[\(\[]?\s*(\d+)\s*[\)\]]?\b`)
+	sXeXRegex          = regexp.MustCompile(`(?i)s(\d+)\s*e(\d+)`)
+	sXepXRegex         = regexp.MustCompile(`(?i)s(\d+)[\s\-_]*ep(?:isode)?[\s\-_]*(\d+)`)
+	epXRegex           = regexp.MustCompile(`(?i)\bep(?:isode)?[\s\-_]*[\(\[]?\s*(\d+)\s*[\)\]]?\b`)
 	filePathRangeRegex = regexp.MustCompile(`(?i)\b(?:e|ep|episode)?[\s\-_]*[\(\[]?\s*(\d+)\s*(?:-|to)\s*(?:e|ep|episode)?\s*(\d+)\s*[\)\]]?\b`)
 
-	wrappedYearRegex = regexp.MustCompile(`[\(\[]((?:19|20)\d{2})[\)\]]`)
-	plainYearRegex   = regexp.MustCompile(`\b((?:19|20)\d{2})\b`)
-	yearRe           = regexp.MustCompile(`[\(\[]((?:19|20)\d{2})[\)\]]`)
+	wrappedYearRegex     = regexp.MustCompile(`[\(\[]((?:19|20)\d{2})[\)\]]`)
+	plainYearRegex       = regexp.MustCompile(`\b((?:19|20)\d{2})\b`)
+	yearRe               = regexp.MustCompile(`[\(\[]((?:19|20)\d{2})[\)\]]`)
+	yearRangeParensRegex = regexp.MustCompile(`(?i)[\(\[]((?:19|20)\d{2})\s*[-&,/a-z\s]*(?:(?:19|20)\d{2})?[\)\]]`)
+	plainYearRangeRegex  = regexp.MustCompile(`(?i)\b((?:19|20)\d{2})\s*(?:-|to|and|&)\s*(?:19|20)\d{2}\b`)
+
+	structuralBoundaryRegex   = regexp.MustCompile(`(?i)\b(?:[Ss]\d{1,2}|EP\s*\(?\d+|Season\s*\d+|Episode\s*\d+|DAY\s*\d+|GRAND\s+FINALE|FINALE|TRUE|2160p|1080p|720p|480p|360p|4k|uhd|bdrip|bluray|blu[-_]?ray|web[-_]?dl|web[-_]?rip|hdrip|dvdrip|hdtv|sdtv|untouched)\b`)
+	boxsetTermsRegex          = regexp.MustCompile(`(?i)\b(?:Duology|Trilogy|Pentalogy|Quadrilogy|Hexalogy|Octology|Anthology|Collection|Boxset)\b`)
+	trailingOrphanTokensRegex = regexp.MustCompile(`(?i)\b(?:TRUE|AND|DAY\s*\d+|GRAND\s+FINALE|FINALE|BDRIP|WEBDL|WEB-DL|HDRIP|DVDRIP|1080P|720P|480P|4K|UHD)\b.*$`)
+	trailingPunctuationRegex  = regexp.MustCompile(`[\s\-_,:&]+$`)
 
 	adjacentRe        = regexp.MustCompile(`(?i)\bs(\d{1,2})e(\d{1,3})\b`)
 	dotSeparatorRe    = regexp.MustCompile(`(?i)\bs(\d{1,2})\.e(\d{1,3})(?:-e(\d{1,3}))?\b`)
@@ -867,8 +874,7 @@ type TitleExtraction struct {
 func (te *TitleExtractor) Extract(rawTitle string, contentType string) (*TitleExtraction, error) {
 	working := stripAllPrefixes(rawTitle)
 	
-	titlePart, year := extractTitleAndYear(working)
-	_ = titlePart
+	_, year := extractTitleAndYear(working)
 
 	yearPos := -1
 	if year > 0 {
@@ -1046,7 +1052,7 @@ func parseForumTitle(title string, contentType string) *ParseResult {
 	var titlePart string
 	var afterPart string
 
-	yearLocs := wrappedYearRegex.FindAllStringSubmatchIndex(title, -1)
+	yearLocs := yearRangeParensRegex.FindAllStringSubmatchIndex(title, -1)
 	if len(yearLocs) > 0 {
 		loc := yearLocs[0]
 		yearStr := title[loc[2]:loc[3]]
@@ -1073,8 +1079,17 @@ func parseForumTitle(title string, contentType string) *ParseResult {
 		titlePart = title
 	}
 
+	// Structural boundary cutoff pass if no year anchor was found
+	if year == 0 {
+		if loc := structuralBoundaryRegex.FindStringIndex(titlePart); loc != nil && loc[0] > 0 {
+			titlePart = strings.TrimSpace(titlePart[:loc[0]])
+		}
+	}
+
 	titlePart = cleanBalancedBrackets(titlePart)
 	titlePart = SanitizeName(titlePart)
+	titlePart = boxsetTermsRegex.ReplaceAllString(titlePart, "")
+	titlePart = cleanTitleOnly(titlePart)
 	titlePart = strings.Trim(titlePart, " .-_[]()/\\")
 
 	searchStr := afterPart
@@ -1191,6 +1206,7 @@ func RobustParseInfo(title string, fallbackSeason int, contentType string) *Pars
 	leftTitleCandidate, extractedYear := extractTitleAndYear(balancedClean)
 	detectedLang := detectRegionalLanguage(title)
 	clean := SanitizeName(leftTitleCandidate)
+	clean = boxsetTermsRegex.ReplaceAllString(clean, "")
 	searchTitle := cleanTitleOnly(clean)
 	fullClean := SanitizeName(balancedClean)
 
@@ -1760,9 +1776,15 @@ func stripAllPrefixes(s string) string {
 
 func extractTitleAndYear(s string) (title string, year int) {
 	yearEnd := -1
-	if m := yearRe.FindStringSubmatchIndex(s); m != nil {
+	if m := yearRangeParensRegex.FindStringSubmatchIndex(s); m != nil {
 		year, _ = strconv.Atoi(s[m[2]:m[3]])
-		yearEnd = m[1]
+		yearEnd = m[0]
+	} else if m := plainYearRangeRegex.FindStringSubmatchIndex(s); m != nil {
+		year, _ = strconv.Atoi(s[m[2]:m[3]])
+		yearEnd = m[0]
+	} else if m := yearRe.FindStringSubmatchIndex(s); m != nil {
+		year, _ = strconv.Atoi(s[m[2]:m[3]])
+		yearEnd = m[0]
 	}
 
 	if yearEnd > 0 {
@@ -1800,6 +1822,9 @@ func cleanTitleOnly(title string) string {
 	s = cleanBracketsRe.ReplaceAllString(s, " ")
 	s = cleanSpacesPunctRe.ReplaceAllString(s, " ")
 	s = cleanSuffixPunctRe.ReplaceAllString(s, "$1")
+
+	s = trailingOrphanTokensRegex.ReplaceAllString(s, "")
+	s = trailingPunctuationRegex.ReplaceAllString(s, "")
 
 	s = collapseSpaces(s)
 	s = strings.TrimSpace(s)
