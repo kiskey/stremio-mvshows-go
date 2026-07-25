@@ -1,5 +1,5 @@
-// Version: 2.3.0
-// Change log: Added MonitoredSeries CRUD operations, auto-enrollment for active series, 30-day inactivity auto-archiving, and URL field preservation in CreateOrUpdateThread.
+// Version: 2.3.1
+// Change log: Corrected slice return type in GetFailedThreadsPaginated from []Thread{} to []FailedThread{} to resolve Go compiler type mismatch build error.
 
 package database
 
@@ -170,7 +170,6 @@ func CreateOrUpdateThread(tx *bolt.Tx, data *Thread) error {
 		if existingData != nil {
 			var oldThread Thread
 			if errDec := DecodeGob(existingData, &oldThread); errDec == nil {
-				// Preserve URL if new payload omitted it
 				if data.URL == "" && oldThread.URL != "" {
 					data.URL = oldThread.URL
 				}
@@ -232,7 +231,6 @@ func CreateOrUpdateThread(tx *bolt.Tx, data *Thread) error {
 
 		_ = idB.Put([]byte(fmt.Sprintf("%d", data.ID)), []byte(data.ThreadHash))
 
-		// Auto-enroll webseries threads into monitored_series bucket
 		if strings.ToLower(data.Type) == "series" && data.Status == "linked" {
 			_ = AutoEnrollSeries(tx, data)
 		}
@@ -733,7 +731,7 @@ func GetFailedThreadsPaginated(offset, limit int) ([]FailedThread, error) {
 		return list[i].LastAttempt.After(list[j].LastAttempt)
 	})
 	if offset >= len(list) {
-		return []Thread{}, nil
+		return []FailedThread{}, nil
 	}
 	end := offset + limit
 	if end > len(list) {
