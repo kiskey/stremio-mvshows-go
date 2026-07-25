@@ -1,5 +1,5 @@
-// Version: 1.7.2
-// Change log: Removed local duplicate isMetadataWord and delegated word ratio checking directly to parser.IsMetadataWord.
+// Version: 1.7.3
+// Change log: Integrated zero-disk-wear dirty state short-circuit (isThreadUnchanged) to bypass BoltDB write transactions when thread title, URL, and magnet URIs are unchanged.
 
 package orchestrator
 
@@ -220,6 +220,37 @@ func isValidParsedTitle(parsed *parser.ParseResult) bool {
 	return true
 }
 
+func isThreadUnchanged(existing *database.Thread, incomingMagnets []string, rawTitle, threadURL string) bool {
+	if existing == nil {
+		return false
+	}
+
+	if existing.RawTitle != rawTitle {
+		return false
+	}
+
+	if threadURL != "" && existing.URL != "" && existing.URL != threadURL {
+		return false
+	}
+
+	if len(incomingMagnets) != len(existing.MagnetURIs) {
+		return false
+	}
+
+	existingMags := make(map[string]bool, len(existing.MagnetURIs))
+	for _, m := range existing.MagnetURIs {
+		existingMags[m] = true
+	}
+
+	for _, m := range incomingMagnets {
+		if !existingMags[m] {
+			return false
+		}
+	}
+
+	return true
+}
+
 func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient, incremental bool) {
 	defer func() {
 		if r := recover(); r != nil {
@@ -257,41 +288,51 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 	// Topic ID Invariant In-Place Update Pathway:
 	// If existing thread has same ThreadHash (e.g. topic_198255) and is already linked, merge magnets and update streams in-place
 	if hasExisting && existing.Status == "linked" && existing.TmdbID != nil {
+		cleanTitle := existing.CleanTitle
+		if cleanTitle == "" {
+			cleanTitle = parsed.Title
+		}
+
+		// Filter divergence on incoming magnets before merging
+		var cleanedMagnets []string
+		for _, m := range thread.MagnetURIs {
+			cleanM := parser.StripTrackersFromMagnet(m)
+			dn := parser.ExtractMagnetDisplayName(m)
+			if dn != "" {
+				pmr := parser.ParseRelease(dn, thread.Type)
+				if pmr != nil && pmr.IsValid && pmr.CleanTitle != "" {
+					overlapParsed := metadata.OverlapCoefficient(parsed.Title, pmr.CleanTitle)
+					overlapClean := metadata.OverlapCoefficient(cleanTitle, pmr.CleanTitle)
+					if overlapParsed < 0.20 && overlapClean < 0.20 {
+						utils.Logger.Warn().
+							Str("thread_title", parsed.Title).
+							Str("magnet_title", pmr.CleanTitle).
+							Msg("In-thread title divergence detected during update. Dropping rogue magnet.")
+						continue
+					}
+				}
+			}
+			cleanedMagnets = append(cleanedMagnets, cleanM)
+		}
+
+		// ── ZERO DISK WEAR SHORT-CIRCUIT DIRTY CHECK ──
+		if isThreadUnchanged(existing, cleanedMagnets, thread.RawTitle, thread.URL) {
+			utils.Logger.Debug().
+				Str("hash", thread.ThreadHash).
+				Str("title", thread.RawTitle).
+				Msg("Thread content, magnets, and URL are identical to stored database record. Bypassing disk write transaction (0 disk wear).")
+			_ = database.DeleteFailedThread(nil, thread.ThreadHash)
+			return
+		}
+
 		utils.Logger.Info().
 			Str("hash", thread.ThreadHash).
 			Str("raw_title", thread.RawTitle).
 			Str("tmdb_id", *existing.TmdbID).
-			Msg("Topic ID invariant match identified. Executing in-place thread update & magnet merging...")
+			Msg("Topic ID invariant match identified with updated content. Executing in-place thread update & magnet merging...")
 
 		errTx := database.DB.Update(func(tx *bolt.Tx) error {
 			magnetBucket := tx.Bucket([]byte("magnet_cache"))
-
-			cleanTitle := existing.CleanTitle
-			if cleanTitle == "" {
-				cleanTitle = parsed.Title
-			}
-
-			// Filter divergence on incoming magnets before merging
-			var cleanedMagnets []string
-			for _, m := range thread.MagnetURIs {
-				cleanM := parser.StripTrackersFromMagnet(m)
-				dn := parser.ExtractMagnetDisplayName(m)
-				if dn != "" {
-					pmr := parser.ParseRelease(dn, thread.Type)
-					if pmr != nil && pmr.IsValid && pmr.CleanTitle != "" {
-						overlapParsed := metadata.OverlapCoefficient(parsed.Title, pmr.CleanTitle)
-						overlapClean := metadata.OverlapCoefficient(cleanTitle, pmr.CleanTitle)
-						if overlapParsed < 0.20 && overlapClean < 0.20 {
-							utils.Logger.Warn().
-								Str("thread_title", parsed.Title).
-								Str("magnet_title", pmr.CleanTitle).
-								Msg("In-thread title divergence detected during update. Dropping rogue magnet.")
-							continue
-						}
-					}
-				}
-				cleanedMagnets = append(cleanedMagnets, cleanM)
-			}
 
 			// Merge magnets with existing thread magnets
 			existing.MagnetURIs = cleanedMagnets
