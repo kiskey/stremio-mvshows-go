@@ -1,5 +1,5 @@
-// Version: 2.8.0
-// Change log: Upgraded getThreadInvariantGroupKey with deep title normalization and year-agnostic fallback matching; added an old-key purge sweep during --repair to eliminate lingering raw title keys and restore true linked count.
+// Version: 2.8.1
+// Change log: Added Proxy URL Purge Sweep during --repair to strip stale proxy worker endpoints from stored t.URL and ms.URL fields.
 
 package main
 
@@ -338,7 +338,12 @@ func main() {
 			keptThread.MagnetURIs = allMergedMags
 
 			if keptThread.URL != "" {
-				keptThread.URL = parser.FormatCanonicalTopicURL(keptThread.URL)
+				// Proxy URL Purge Sweep: If URL lacks topic/ ID or points to a proxy endpoint, format or purge
+				if parser.ExtractTopicID(keptThread.URL) != "" {
+					keptThread.URL = parser.FormatCanonicalTopicURL(keptThread.URL)
+				} else {
+					keptThread.URL = "" // Clear stale proxy endpoint URL so next crawl populates clean forum URL
+				}
 			}
 
 			prTitle := parser.ParseRelease(keptThread.RawTitle, keptThread.Type)
@@ -416,11 +421,18 @@ func main() {
 			}
 		}
 
-		log.Println("Populating high-speed Thread index pointers bucket...")
+		log.Println("Populating high-speed Thread index pointers bucket & Purging Stale Proxy URLs...")
 		threadCursor := tb.Cursor()
 		for k, v := threadCursor.First(); k != nil; k, v = threadCursor.Next() {
 			var t database.Thread
 			if errDec := database.DecodeGob(v, &t); errDec == nil {
+				// Proxy URL Purge Sweep on standalone threads
+				if t.URL != "" && parser.ExtractTopicID(t.URL) == "" {
+					t.URL = ""
+					bytesData, _ := database.EncodeGob(t)
+					_ = tb.Put(k, bytesData)
+				}
+
 				if t.Status == "linked" && t.TmdbID != nil {
 					_ = threadIdxB.Put([]byte(*t.TmdbID), k)
 				}
@@ -429,6 +441,21 @@ func main() {
 				}
 				if strings.ToLower(t.Type) == "series" && t.Status == "linked" {
 					_ = database.AutoEnrollSeries(tx, &t)
+				}
+			}
+		}
+
+		log.Println("Purging Stale Proxy URLs from monitored_series bucket...")
+		if monitoredB != nil {
+			monCursor := monitoredB.Cursor()
+			for k, v := monCursor.First(); k != nil; k, v = monCursor.Next() {
+				var ms database.MonitoredSeries
+				if errDec := database.DecodeGob(v, &ms); errDec == nil {
+					if ms.URL != "" && parser.ExtractTopicID(ms.URL) == "" {
+						ms.URL = ""
+						bytesData, _ := database.EncodeGob(ms)
+						_ = monitoredB.Put(k, bytesData)
+					}
 				}
 			}
 		}
