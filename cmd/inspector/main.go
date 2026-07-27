@@ -1,5 +1,5 @@
-// Version: 2.8.1
-// Change log: Added Proxy URL Purge Sweep during --repair to strip stale proxy worker endpoints from stored t.URL and ms.URL fields.
+// Version: 2.8.2
+// Change log: Updated getThreadInvariantGroupKey to delegate directly to parser.GenerateThreadHashWithURLAndType, enforcing 100% hash parity with live scraper routines.
 
 package main
 
@@ -48,62 +48,8 @@ func formatBytes(bytes int64) string {
 	return fmt.Sprintf("%.2f MB", float64(bytes)/1024/1024)
 }
 
-// cleanNormalizedTitle performs deep title cleaning, stripping parentheses, brackets, and extra punctuation.
-func cleanNormalizedTitle(title string) string {
-	s := strings.ReplaceAll(title, "&", "and")
-	s = strings.ReplaceAll(s, "(", " ")
-	s = strings.ReplaceAll(s, ")", " ")
-	s = strings.ReplaceAll(s, "[", " ")
-	s = strings.ReplaceAll(s, "]", " ")
-	s = strings.ReplaceAll(s, "-", " ")
-	s = strings.ReplaceAll(s, "_", " ")
-	s = strings.ToLower(s)
-	words := strings.Fields(s)
-	return strings.Join(words, " ")
-}
-
-// getThreadInvariantGroupKey constructs an invariant grouping key:
-// 1. Primary: Topic ID if URL is available (topic_<id>)
-// 2. Fallback: Deep-cleaned title normalization with year-agnostic handling (type_cleantitle)
 func getThreadInvariantGroupKey(t *database.Thread) string {
-	if t.URL != "" {
-		topicID := parser.ExtractTopicID(t.URL)
-		if topicID != "" {
-			h := sha256.Sum256([]byte("topic_" + topicID))
-			return hex.EncodeToString(h[:])
-		}
-	}
-
-	cleanTitle := t.CleanTitle
-	if cleanTitle == "" {
-		pr := parser.ParseRelease(t.RawTitle, t.Type)
-		if pr != nil && pr.CleanTitle != "" {
-			cleanTitle = pr.CleanTitle
-		} else {
-			cleanTitle = t.RawTitle
-		}
-	}
-
-	cleanNorm := cleanNormalizedTitle(cleanTitle)
-
-	// Year-agnostic grouping key: ignores year if 0 or nil to force merging legacy Year: 0 records
-	yearVal := 0
-	if t.Year != nil && *t.Year > 0 {
-		yearVal = *t.Year
-	} else {
-		pr := parser.ParseRelease(t.RawTitle, t.Type)
-		if pr != nil && pr.Year > 0 {
-			yearVal = pr.Year
-		}
-	}
-
-	keyStr := fmt.Sprintf("%s_%d_%s", strings.ToLower(t.Type), yearVal, cleanNorm)
-	if yearVal == 0 {
-		keyStr = fmt.Sprintf("%s_%s", strings.ToLower(t.Type), cleanNorm)
-	}
-
-	h := sha256.Sum256([]byte(keyStr))
-	return hex.EncodeToString(h[:])
+	return parser.GenerateThreadHashWithURLAndType(t.RawTitle, t.URL, t.Type)
 }
 
 func main() {
@@ -338,7 +284,6 @@ func main() {
 			keptThread.MagnetURIs = allMergedMags
 
 			if keptThread.URL != "" {
-				// Proxy URL Purge Sweep: If URL lacks topic/ ID or points to a proxy endpoint, format or purge
 				if parser.ExtractTopicID(keptThread.URL) != "" {
 					keptThread.URL = parser.FormatCanonicalTopicURL(keptThread.URL)
 				} else {
@@ -426,7 +371,6 @@ func main() {
 		for k, v := threadCursor.First(); k != nil; k, v = threadCursor.Next() {
 			var t database.Thread
 			if errDec := database.DecodeGob(v, &t); errDec == nil {
-				// Proxy URL Purge Sweep on standalone threads
 				if t.URL != "" && parser.ExtractTopicID(t.URL) == "" {
 					t.URL = ""
 					bytesData, _ := database.EncodeGob(t)
