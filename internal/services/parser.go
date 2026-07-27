@@ -1,5 +1,5 @@
-// Version: 1.9.7
-// Change log: Cleaned unused titlePart variable declaration in TitleExtractor.Extract using blank identifier assignment (_, year := extractTitleAndYear(working)) to guarantee Go compiler compliance.
+// Version: 1.9.8
+// Change log: Implemented unified 2-Tier Invariant Hash Hierarchy (GenerateThreadHashWithURLAndType) with Tier 1 Topic ID hashing and Tier 2 Clean Title + Year invariant fallback for 100% hash parity.
 
 package parser
 
@@ -293,14 +293,55 @@ func FormatCanonicalTopicURL(rawURL string) string {
 	return fmt.Sprintf("%s://%s/index.php?/forums/topic/%s-a/", u.Scheme, u.Host, topicID)
 }
 
-func GenerateThreadHashWithURL(title string, threadURL string) string {
+func CleanNormalizedTitle(title string) string {
+	s := strings.ReplaceAll(title, "&", "and")
+	s = strings.ReplaceAll(s, "(", " ")
+	s = strings.ReplaceAll(s, ")", " ")
+	s = strings.ReplaceAll(s, "[", " ")
+	s = strings.ReplaceAll(s, "]", " ")
+	s = strings.ReplaceAll(s, "-", " ")
+	s = strings.ReplaceAll(s, "_", " ")
+	s = strings.ToLower(s)
+	words := strings.Fields(s)
+	return strings.Join(words, " ")
+}
+
+// GenerateThreadHashWithURLAndType implements the unified 2-Tier Invariant Hash Hierarchy:
+// 1. Tier 1 Primary: Topic ID Hash (sha256("topic_" + topicID))
+// 2. Tier 2 Fallback: Clean Title + Year Invariant Hash (sha256("type_year_cleantitle"))
+func GenerateThreadHashWithURLAndType(rawTitle string, threadURL string, contentType string) string {
 	topicID := ExtractTopicID(threadURL)
 	if topicID != "" {
 		h := sha256.Sum256([]byte("topic_" + topicID))
 		return hex.EncodeToString(h[:])
 	}
 
-	return GenerateThreadHash(title, nil)
+	if contentType == "" {
+		contentType = "movie"
+	}
+
+	pr := ParseRelease(rawTitle, contentType)
+	cleanTitle := rawTitle
+	yearVal := 0
+
+	if pr != nil && pr.CleanTitle != "" {
+		cleanTitle = pr.CleanTitle
+		yearVal = pr.Year
+	}
+
+	cleanNorm := CleanNormalizedTitle(cleanTitle)
+
+	keyStr := fmt.Sprintf("%s_%d_%s", strings.ToLower(contentType), yearVal, cleanNorm)
+	if yearVal == 0 {
+		keyStr = fmt.Sprintf("%s_%s", strings.ToLower(contentType), cleanNorm)
+	}
+
+	h := sha256.Sum256([]byte(keyStr))
+	return hex.EncodeToString(h[:])
+}
+
+func GenerateThreadHashWithURL(title string, threadURL string) string {
+	return GenerateThreadHashWithURLAndType(title, threadURL, "movie")
 }
 
 // ── Complete Language Parser Mapping ──
