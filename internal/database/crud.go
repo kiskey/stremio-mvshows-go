@@ -1,5 +1,5 @@
-// Version: 2.5.2
-// Change log: Fixed AutoEnrollSeries to preserve existing ms.Status (archived/paused) when updating existing monitored series records during background crawls.
+// Version: 2.6.0
+// Change log: Implemented FindLinkedThreadByTitleYearType with 5-Factor Invariant Match Contract to enable contamination-free local database lookups for multi-site threads.
 
 package database
 
@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kiskey/stremio-mvshows-go/internal/services/metadata"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -66,6 +67,61 @@ func FindThreadByHash(tx *bolt.Tx, hash string) (*Thread, error) {
 		return nil, nil
 	}
 	return &t, nil
+}
+
+func FindLinkedThreadByTitleYearType(tx *bolt.Tx, title string, year int, mediaType string) (*Thread, error) {
+	if title == "" || year <= 0 || mediaType == "" {
+		return nil, nil
+	}
+
+	normTargetTitle := metadata.NormalizeTitleForMatching(title)
+	if normTargetTitle == "" {
+		return nil, nil
+	}
+
+	targetType := strings.ToLower(strings.TrimSpace(mediaType))
+	var found *Thread
+
+	err := runView(tx, func(tx *bolt.Tx) error {
+		tb := tx.Bucket([]byte("threads"))
+		if tb == nil {
+			return nil
+		}
+		c := tb.Cursor()
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			var t Thread
+			if errDec := DecodeGob(v, &t); errDec == nil {
+				// Factor 5: Status & TmdbID Prerequisite
+				if t.Status != "linked" || t.TmdbID == nil || *t.TmdbID == "" {
+					continue
+				}
+
+				// Factor 1: Strict Media Type Isolation
+				if strings.ToLower(strings.TrimSpace(t.Type)) != targetType {
+					continue
+				}
+
+				// Factor 2: Exact Year Alignment
+				if t.Year == nil || *t.Year != year {
+					continue
+				}
+
+				// Factor 3: Exact Normalized Title Match
+				normStoredTitle := metadata.NormalizeTitleForMatching(t.CleanTitle)
+				if normStoredTitle == "" {
+					normStoredTitle = metadata.NormalizeTitleForMatching(t.RawTitle)
+				}
+
+				if normStoredTitle == normTargetTitle {
+					found = &t
+					break
+				}
+			}
+		}
+		return nil
+	})
+
+	return found, err
 }
 
 func FindThreadByRawTitle(tx *bolt.Tx, rawTitle string) (*Thread, error) {
