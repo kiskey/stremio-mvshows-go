@@ -1,5 +1,5 @@
-// Version: 2.5.1
-// Change log: Fixed AutoEnrollSeries to explicitly reset ms.Status = "active" on existing records when re-enrolled into monitored watchlist.
+// Version: 2.5.2
+// Change log: Fixed AutoEnrollSeries to preserve existing ms.Status (archived/paused) when updating existing monitored series records during background crawls.
 
 package database
 
@@ -689,7 +689,7 @@ func AutoEnrollSeries(tx *bolt.Tx, t *Thread) error {
 			if errDec := DecodeGob(existingData, &ms); errDec == nil {
 				ms.Title = title
 				ms.RawTitle = t.RawTitle
-				ms.Status = "active" // Explicitly reset status to active upon re-enrollment
+				// Preserve user state choice (archived/paused). Do NOT force overwrite to active!
 				if t.URL != "" {
 					ms.URL = t.URL
 				}
@@ -704,7 +704,7 @@ func AutoEnrollSeries(tx *bolt.Tx, t *Thread) error {
 			URL:         t.URL,
 			Title:       title,
 			RawTitle:    t.RawTitle,
-			Status:      "active",
+			Status:      "active", // Initial default state ONLY for new webseries
 			LastChecked: time.Now(),
 			LastUpdated: time.Now(),
 			CreatedAt:   time.Now(),
