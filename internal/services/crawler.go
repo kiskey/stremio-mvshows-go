@@ -1,5 +1,5 @@
-// Version: 1.3.2
-// Change log: Fixed proxy endpoint URL leakage in RunCrawler and RunTargetedCrawler by preserving context thread_url and preventing e.Request.URL.String() from overwriting target forum URLs when ProxyTransport is active.
+// Version: 1.3.3
+// Change log: Updated hash generation calls to pass contentType to parser.GenerateThreadHashWithURLAndType, enforcing 2-Tier Invariant Hash Hierarchy across crawler passes.
 
 package crawler
 
@@ -274,7 +274,7 @@ func RunCrawler(cfg *config.Config, incremental bool) ([]CrawledThread, error) {
 		})
 
 		if len(magnets) > 0 {
-			hash := parser.GenerateThreadHashWithURL(rawTitle, threadURL)
+			hash := parser.GenerateThreadHashWithURLAndType(rawTitle, threadURL, contentType)
 			var postedAt *time.Time
 			if postedAtStr != "" {
 				if t, errDate := time.Parse(time.RFC3339, postedAtStr); errDate == nil {
@@ -537,7 +537,7 @@ func RunTargetedCrawler(cfg *config.Config, threadURL, contentType, catalogID st
 		})
 
 		if len(magnets) > 0 {
-			hash := parser.GenerateThreadHashWithURL(rawTitle, finalTargetURL)
+			hash := parser.GenerateThreadHashWithURLAndType(rawTitle, finalTargetURL, contentType)
 			
 			var postedAt *time.Time
 			timeEl := e.DOM.ParentsUntil("html").Find("time[datetime]").First()
