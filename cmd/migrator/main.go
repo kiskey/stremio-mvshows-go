@@ -1,5 +1,5 @@
-// Version: 2.5.0
-// Change log: Integrated Topic ID invariant thread hashing (GenerateThreadHashWithURL) and canonical URL formatting during SQLite migration to deduplicate threads on-the-fly.
+// Version: 2.5.1
+// Change log: Integrated GenerateThreadHashWithURLAndType with st.Type during SQLite to BoltDB transition for 100% hash parity.
 
 package main
 
@@ -209,7 +209,7 @@ func main() {
 				}
 
 				canonicalURL := parser.FormatCanonicalTopicURL(st.URL)
-				threadHash := parser.GenerateThreadHashWithURL(st.RawTitle, canonicalURL)
+				threadHash := parser.GenerateThreadHashWithURLAndType(st.RawTitle, canonicalURL, st.Type)
 				if threadHash == "" {
 					threadHash = st.ThreadHash
 				}
