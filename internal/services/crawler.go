@@ -1,5 +1,5 @@
-// Version: 1.3.1
-// Change log: Updated parser.GenerateThreadHashWithURL calls in crawler handlers to resolve Go compiler type and symbol mismatch errors.
+// Version: 1.3.2
+// Change log: Fixed proxy endpoint URL leakage in RunCrawler and RunTargetedCrawler by preserving context thread_url and preventing e.Request.URL.String() from overwriting target forum URLs when ProxyTransport is active.
 
 package crawler
 
@@ -240,8 +240,11 @@ func RunCrawler(cfg *config.Config, incremental bool) ([]CrawledThread, error) {
 		postedAtStr := e.Request.Ctx.Get("posted_at")
 		threadURL := e.Request.Ctx.Get("thread_url")
 
-		if finalURL := e.Request.URL.String(); finalURL != "" {
-			threadURL = parser.FormatCanonicalTopicURL(finalURL)
+		// Strictly preserve target canonical thread_url from request context
+		if threadURL == "" {
+			if finalURL := e.Request.URL.String(); finalURL != "" {
+				threadURL = parser.FormatCanonicalTopicURL(finalURL)
+			}
 		}
 
 		var magnets []string
@@ -499,9 +502,12 @@ func RunTargetedCrawler(cfg *config.Config, threadURL, contentType, catalogID st
 			rawTitle = "Unknown Recouped Title"
 		}
 
+		// Strictly preserve clean canonical forum URL and prevent proxy endpoint overwrite
 		finalTargetURL := canonicalURL
-		if finalURL := e.Request.URL.String(); finalURL != "" {
-			finalTargetURL = parser.FormatCanonicalTopicURL(finalURL)
+		if finalTargetURL == "" {
+			if finalURL := e.Request.URL.String(); finalURL != "" {
+				finalTargetURL = parser.FormatCanonicalTopicURL(finalURL)
+			}
 		}
 
 		var magnets []string
