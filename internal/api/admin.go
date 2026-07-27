@@ -1,5 +1,5 @@
-// Version: 2.6.1
-// Change log: Updated addMonitoredSeriesHandler to explicitly force monitored series status = "active" upon re-enrollment from search or URL triggers.
+// Version: 2.6.2
+// Change log: Updated addMonitoredSeriesHandler to explicitly force monitored series status = "active" upon user-initiated re-enrollment from search or URL triggers.
 
 package api
 
@@ -1196,7 +1196,7 @@ func addMonitoredSeriesHandler(c *gin.Context) {
 		}
 		_ = database.AutoEnrollSeries(nil, targetThread)
 
-		// Explicitly force status to "active" upon manual re-enrollment
+		// Explicitly force status = "active" on user re-enrollment request
 		ms, errMs := database.GetMonitoredSeriesByHash(nil, targetThread.ThreadHash)
 		if errMs == nil && ms != nil {
 			ms.Status = "active"
