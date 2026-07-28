@@ -187,10 +187,43 @@
         .autocomplete-item:hover .glow-cyan, .autocomplete-item:hover .glow-amber {
             color: #000;
         }
+
+        /* Panel G Graph Node Styling */
+        .graph-container {
+            display: flex;
+            flex-direction: column;
+            gap: 20px;
+            overflow-x: auto;
+            padding: 15px;
+            background: #000;
+            border: 1px dashed #00e5ff;
+            min-height: 250px;
+        }
+
+        .node-card {
+            border: 2px solid #00e5ff;
+            background: #08080c;
+            padding: 12px;
+            border-radius: 0;
+            box-shadow: 3px 3px 0 #003344;
+            transition: all 0.15s ease;
+        }
+        .node-card:hover {
+            border-color: #00ff66;
+            transform: translateY(-2px);
+        }
+
+        .tree-level {
+            display: flex;
+            gap: 15px;
+            flex-wrap: wrap;
+            justify-content: flex-start;
+            align-items: stretch;
+        }
     </style>
 </head>
 <body>
-    <h1>► MVSHOWS ADMIN TERMINAL v2.6.1 ◄</h1>
+    <h1>► MVSHOWS ADMIN TERMINAL v2.7.0 ◄</h1>
 
     <div class="dashboard-grid">
         
@@ -282,6 +315,28 @@
                         <tr><td colspan="6" style="color: #666; text-align: center;">Loading monitored series watchlist...</td></tr>
                     </tbody>
                 </table>
+            </div>
+        </div>
+
+        <!-- PANEL G: ENTITY RELATION GRAPH VISUALIZER -->
+        <div class="section span-12" style="border: 2px solid #00e5ff; box-shadow: 4px 4px 0 #003344;">
+            <div class="terminal-header" style="background: #00e5ff; color: #000;">
+                <span>► Panel G: Entity Relation Graph Visualizer</span>
+                <span>LIQUID_GRAPH_DECK</span>
+            </div>
+
+            <div style="display: flex; gap: 15px; margin-bottom: 15px; align-items: center; flex-wrap: wrap;">
+                <select id="graphTypeSelect" style="border-color: #00e5ff; height: 38px;">
+                    <option value="all">All Content Types</option>
+                    <option value="movie">Movies Only</option>
+                    <option value="series">TV Series Only</option>
+                </select>
+                <input type="text" id="graphSearchInput" placeholder="Type Title, IMDb ID (tt...), or TMDB ID..." style="flex: 1; border-color: #00e5ff; background: #000; height: 38px;">
+                <button id="graphSearchBtn" style="border-color: #00e5ff; color: #00e5ff; box-shadow: 2px 2px 0 #003344; height: 42px; margin: 0; padding: 0 20px;">🔍 Map Graph</button>
+            </div>
+
+            <div id="graphCanvas" class="graph-container">
+                <div style="color: #666; text-align: center; padding: 40px 0; font-size: 1.2rem;">Enter a Title, IMDb ID, or TMDB ID above to visualize entity linkages and gap analysis.</div>
             </div>
         </div>
 
@@ -855,6 +910,136 @@
                 if (!seriesSearchInput.contains(e.target) && !seriesSearchDropdown.contains(e.target)) {
                     seriesSearchDropdown.style.display = 'none';
                 }
+            });
+
+            // ── Panel G: Entity Relation Graph Visualizer Logic ──
+            const graphSearchInput = el('graphSearchInput');
+            const graphTypeSelect = el('graphTypeSelect');
+            const graphSearchBtn = el('graphSearchBtn');
+            const graphCanvas = el('graphCanvas');
+
+            async function renderEntityGraph() {
+                const query = graphSearchInput.value.trim();
+                const contentType = graphTypeSelect.value;
+
+                if (!query) {
+                    alert('Please enter a Title, IMDb ID (tt...), or TMDB ID to visualize.');
+                    return;
+                }
+
+                graphCanvas.innerHTML = '<div style="color: #00e5ff; text-align: center; padding: 40px 0; font-size: 1.3rem;">🔍 Traversing Bbolt database entity relationships...</div>';
+
+                try {
+                    const r = await fetch(`/admin/api/visualize-tree?q=${encodeURIComponent(query)}&type=${contentType}&_t=${Date.now()}`);
+                    const graph = await r.json();
+
+                    if (!r.ok || graph.error) {
+                        graphCanvas.innerHTML = `<div style="color:#ff2a5f; padding:20px; text-align:center;">Graph traversal error: ${graph.error || 'Unknown'}</div>`;
+                        return;
+                    }
+
+                    if (graph.meta.gap_status === 'NOT_FOUND') {
+                        graphCanvas.innerHTML = `<div style="color:#ff9900; padding:20px; text-align:center;">No matching entity records located in database for "${query}".</div>`;
+                        return;
+                    }
+
+                    let gapBadge = '<span class="glow-green">[🟢 HEALTHY LINKED]</span>';
+                    if (graph.meta.gap_status === 'MISSING_IMDB_GAP') gapBadge = '<span class="glow-amber">[⚠️ MISSING IMDb ID GAP]</span>';
+                    else if (graph.meta.gap_status === 'PENDING_MATCH') gapBadge = '<span class="glow-cyan">[⏳ PENDING MATCH]</span>';
+                    else if (graph.meta.gap_status === 'UNLINKED') gapBadge = '<span class="glow-red">[🔴 UNLINKED THREAD]</span>';
+
+                    let html = `
+                        <!-- LEVEL 1: ROOT METADATA CENTER -->
+                        <div style="border: 2px solid #00ff66; padding: 15px; background: #0a0a0c; margin-bottom: 20px;">
+                            <div style="font-weight: bold; color: #00ff66; font-size: 1.4rem; border-bottom: 1px dashed #00ff66; padding-bottom: 6px; margin-bottom: 10px; display: flex; justify-content: space-between;">
+                                <span>► METADATA CENTER NODE</span>
+                                <span>${gapBadge}</span>
+                            </div>
+                            <div style="display: flex; gap: 20px; flex-wrap: wrap; align-items: center;">
+                                <div style="font-size: 1.3rem;">
+                                    Title: <strong style="color: #fff;">${graph.meta.title || 'Unknown Title'}</strong> (${graph.meta.year || 'N/A'})<br>
+                                    TMDB ID: <strong style="color: #00e5ff;">${graph.meta.tmdb_id || 'None'}</strong> | 
+                                    IMDb ID: <strong style="color: #00e5ff;">${graph.meta.imdb_id || 'None'}</strong>
+                                </div>
+                                <div style="color: #aaa; font-size: 1.1rem; flex: 1; text-align: right;">
+                                    ${graph.meta.gap_reason}
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- LEVEL 2: PHYSICAL FORUM THREAD BRANCHES -->
+                        <div style="font-size: 1.25rem; color: #00e5ff; font-weight: bold; margin-bottom: 8px;">
+                            ► PHYSICAL FORUM THREAD NODES (${(graph.threads || []).length} Connected Threads):
+                        </div>
+                        <div class="tree-level" style="margin-bottom: 25px;">
+                    `;
+
+                    if (!graph.threads || graph.threads.length === 0) {
+                        html += '<div style="color: #888;">No physical thread records linked to this metadata node.</div>';
+                    } else {
+                        graph.threads.forEach(t => {
+                            const urlLink = t.url ? `<a href="${t.url}" target="_blank" style="color: #00e5ff;">Link 🔗</a>` : '<span style="color:#ff2a5f;">No URL</span>';
+                            html += `
+                                <div class="node-card" style="flex: 1; min-width: 300px;">
+                                    <div style="font-weight: bold; color: #fff; font-size: 1.2rem; margin-bottom: 4px;">[ID: ${t.id}] ${t.clean_title || t.raw_title}</div>
+                                    <div style="font-size: 1.05rem; color: #888; margin-bottom: 6px;">Raw: ${t.raw_title}</div>
+                                    <div style="display: flex; justify-content: space-between; font-size: 1.1rem;">
+                                        <span>Status: <strong class="${t.status === 'linked' ? 'glow-green' : 'glow-cyan'}">${t.status.toUpperCase()}</strong></span>
+                                        <span>Category: <strong style="color: #ff9900;">${t.catalog || t.type}</strong></span>
+                                    </div>
+                                    <div style="display: flex; justify-content: space-between; font-size: 1.1rem; margin-top: 6px; border-top: 1px dotted #333; padding-top: 6px;">
+                                        <span>Magnets: <strong style="color: #00ff66;">${t.magnet_count}</strong></span>
+                                        <span>Address: ${urlLink}</span>
+                                    </div>
+                                </div>
+                            `;
+                        });
+                    }
+
+                    html += `
+                        </div>
+
+                        <!-- LEVEL 3: COMPOSITE STREAM LEAF NODES -->
+                        <div style="font-size: 1.25rem; color: #ff9900; font-weight: bold; margin-bottom: 8px;">
+                            ► COMPOSITE STREAM LEAF NODES (${(graph.streams || []).length} Indexed Streams):
+                        </div>
+                        <div class="tree-level">
+                    `;
+
+                    if (!graph.streams || graph.streams.length === 0) {
+                        html += '<div style="color: #888;">No composite streams currently indexed for this TMDB ID.</div>';
+                    } else {
+                        graph.streams.forEach(s => {
+                            let epStr = 'Movie Stream';
+                            if (s.season !== null && s.episode !== null) {
+                                epStr = `S${String(s.season).padStart(2, '0')} E${String(s.episode).padStart(2, '0')}`;
+                            }
+                            html += `
+                                <div class="node-card" style="border-color: #ff9900; min-width: 240px; box-shadow: 3px 3px 0 #442200;">
+                                    <div style="font-weight: bold; color: #ff9900; font-size: 1.2rem;">${epStr}</div>
+                                    <div style="font-size: 1.1rem; color: #fff; margin: 4px 0;">Quality: ${s.quality || 'SD'} | Lang: ${(s.language || 'ta').toUpperCase()}</div>
+                                    <div style="font-size: 0.95rem; color: #aaa; word-break: break-all; font-family: monospace;">
+                                        Hash: ${s.infohash}
+                                    </div>
+                                    <div style="margin-top: 6px; font-size: 1.05rem;">
+                                        Cache Lock: <strong class="${s.is_locked ? 'glow-amber' : 'glow-green'}">${s.is_locked ? '🔒 LOCKED' : '🔓 OPEN'}</strong>
+                                    </div>
+                                </div>
+                            `;
+                        });
+                    }
+
+                    html += '</div>';
+                    graphCanvas.innerHTML = html;
+
+                } catch (err) {
+                    graphCanvas.innerHTML = `<div style="color:#ff2a5f; padding:20px; text-align:center;">Network error during graph retrieval: ${err.message}</div>`;
+                }
+            }
+
+            graphSearchBtn.addEventListener('click', renderEntityGraph);
+            graphSearchInput.addEventListener('keydown', (e) => {
+                if (e.key === 'Enter') renderEntityGraph();
             });
 
             // Synchronized Dual-List & Anti-Cache Refresh Implementation
