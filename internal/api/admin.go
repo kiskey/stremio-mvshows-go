@@ -1,5 +1,5 @@
-// Version: 2.6.2
-// Change log: Updated addMonitoredSeriesHandler to explicitly force monitored series status = "active" upon user-initiated re-enrollment from search or URL triggers.
+// Version: 2.7.0
+// Change log: Registered GET /admin/api/visualize-tree route and implemented visualizeTreeHandler for Panel G Entity Relation Visualizer.
 
 package api
 
@@ -51,6 +51,9 @@ func RegisterAdminRoutes(r *gin.RouterGroup) {
 	r.POST("/monitored-series/bulk-toggle", bulkToggleMonitoredSeriesHandler)
 	r.POST("/monitored-series/add", addMonitoredSeriesHandler)
 	r.GET("/series-search", seriesSearchHandler)
+
+	// Panel G Entity Relation Visualizer Route
+	r.GET("/visualize-tree", visualizeTreeHandler)
 }
 
 func healthHandler(c *gin.Context) {
@@ -1298,4 +1301,25 @@ func seriesSearchHandler(c *gin.Context) {
 	})
 
 	c.JSON(http.StatusOK, matches)
+}
+
+// ── Panel G: Entity Relation Visualizer Handler ──
+
+func visualizeTreeHandler(c *gin.Context) {
+	setAntiCacheHeaders(c)
+	query := strings.TrimSpace(c.Query("q"))
+	contentType := strings.TrimSpace(c.Query("type"))
+
+	if query == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Query parameter 'q' is required (Title, IMDb ID, or TMDB ID)."})
+		return
+	}
+
+	graph, err := database.GetEntityGraphData(nil, query, contentType)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to traverse entity graph: " + err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, graph)
 }
