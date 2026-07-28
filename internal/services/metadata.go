@@ -1,5 +1,5 @@
-// Version: 1.4.5
-// Change log: Overhauled matchingSpacesPunctRe string format with double-quoted, double-escaped strings to completely eliminate unescaped backtick lexical errors and Go compiler tokenization mismatches. Imposed a defensive Title Overlap threshold guardrail within calculateScore to prevent false-positive matching on unrelated same-year content.
+// Version: 1.5.0
+// Change log: Integrated Ingest-Time Cinemeta Fallback Engine in GetByID using 4-Factor Deterministic Selection Engine, firing if and only if TMDB external_ids returns null/empty imdb_id while reusing calculateScore and OverlapCoefficient.
 
 package metadata
 
@@ -77,7 +77,7 @@ type TMDBClient struct {
 	apiKey string
 }
 
-// Pre-compiled pure RE2-compliant punctuation patterns using double-escaped format to ensure clean lexing on all Go targets [report.md]
+// Pre-compiled pure RE2-compliant punctuation patterns using double-escaped format to ensure clean lexing on all Go targets
 var (
 	matchingBracketsRe    = regexp.MustCompile(`[()\[\]{}]`)
 	matchingSpacesPunctRe = regexp.MustCompile("\\s+[,<>\\/\\\\;:'\"|`~!?@$%^*\\_\\-=]\\s+")
@@ -465,6 +465,70 @@ func (t *TMDBClient) GetByID(id string, contentType string) (*TmdbResult, error)
 	year := 0
 	if len(dateStr) >= 4 {
 		year, _ = strconv.Atoi(dateStr[:4])
+	}
+
+	// ── INGEST-TIME CINEMETA FALLBACK ENGINE ──
+	// Executes IF AND ONLY IF TMDB external_ids returned null/empty imdb_id
+	if imdbID == "" && title != "" {
+		if cinemetaCandidates, errCine := t.SearchCinemeta(title); errCine == nil && len(cinemetaCandidates) > 0 {
+			targetType := strings.ToLower(strings.TrimSpace(contentType))
+			normTargetTitle := NormalizeTitleForMatching(title)
+
+			type scoredCand struct {
+				item  CinemetaSearchItem
+				score float64
+			}
+
+			var validCandidates []scoredCand
+
+			for _, item := range cinemetaCandidates {
+				// Factor 1: Strict Media Type Isolation
+				if targetType != "" && strings.ToLower(strings.TrimSpace(item.Type)) != targetType {
+					continue
+				}
+
+				candYear := 0
+				if len(item.ReleaseInfo) >= 4 {
+					candYear, _ = strconv.Atoi(item.ReleaseInfo[:4])
+				}
+
+				// Leverage existing calculateScore function
+				baseScore := calculateScore(title, year, item.Name, candYear)
+
+				// Factor 2: Exact Normalized Title Identity Bonus (+20.0)
+				normCandTitle := NormalizeTitleForMatching(item.Name)
+				if normTargetTitle != "" && normTargetTitle == normCandTitle {
+					baseScore += 20.0
+				}
+
+				validCandidates = append(validCandidates, scoredCand{item: item, score: baseScore})
+			}
+
+			if len(validCandidates) > 0 {
+				sort.Slice(validCandidates, func(i, j int) bool {
+					return validCandidates[i].score > validCandidates[j].score
+				})
+
+				topScore := validCandidates[0].score
+
+				// Factor 3: Dominant Winner Threshold (S1 >= 50.0)
+				if topScore >= 50.0 {
+					isWinner := true
+
+					// Factor 4: Score Delta Margin Guardrail (S1 - S2 >= 8.0)
+					if len(validCandidates) > 1 {
+						runnerUpScore := validCandidates[1].score
+						if (topScore - runnerUpScore) < 8.0 {
+							isWinner = false // Ambiguous/contested tie ➔ Reject to avoid mislinks
+						}
+					}
+
+					if isWinner {
+						imdbID = validCandidates[0].item.ID // Assigns official "tt..." ID
+					}
+				}
+			}
+		}
 	}
 
 	return &TmdbResult{
