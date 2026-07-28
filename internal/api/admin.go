@@ -1,5 +1,5 @@
-// Version: 2.7.0
-// Change log: Registered GET /admin/api/visualize-tree route and implemented visualizeTreeHandler for Panel G Entity Relation Visualizer.
+// Version: 2.8.0
+// Change log: Refactored linkOfficialHandler to preserve numeric TMDB ID and write secondary IMDb pointer keys during manual linking, enforcing dual-key index parity across standard, fallback, and manual linking scenarios.
 
 package api
 
@@ -219,7 +219,7 @@ func customMetaHandler(c *gin.Context) {
 func linkOfficialHandler(c *gin.Context) {
 	var body struct {
 		ThreadID   int    `json:"threadId"`
-		OfficialID string `json:"officialId"`
+		OfficialID string `json:"officialId"` // e.g. "tt13464516" or "series:282258" or "282258"
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid payload parameters"})
@@ -254,12 +254,25 @@ func linkOfficialHandler(c *gin.Context) {
 		metaBucket := tx.Bucket([]byte("tmdb_metadata"))
 		magnetBucket := tx.Bucket([]byte("magnet_cache"))
 
+		// ── DUAL-KEY PRESERVATION REFINEMENT ──
+		// Preserve existing numeric TMDB ID if present on thread
+		primaryTmdbID := tmdbResult.TmdbID
+		if t.TmdbID != nil && *t.TmdbID != "" && !strings.HasPrefix(*t.TmdbID, "tt") {
+			primaryTmdbID = *t.TmdbID
+		}
+
+		// Ensure secondary IMDb pointer is populated if linking via tt...
+		secondaryImdbID := tmdbResult.ImdbID
+		if strings.HasPrefix(idOnly, "tt") {
+			secondaryImdbID = idOnly
+		}
+
 		c := metaBucket.Cursor()
 		for k, v := c.First(); k != nil; k, v = c.Next() {
 			var metadataRecord database.TmdbMetadata
 			if errDec := database.DecodeGob(v, &metadataRecord); errDec == nil {
-				if metadataRecord.ImdbID != nil && *metadataRecord.ImdbID == tmdbResult.ImdbID {
-					tmdbResult.TmdbID = metadataRecord.TmdbID
+				if secondaryImdbID != "" && metadataRecord.ImdbID != nil && *metadataRecord.ImdbID == secondaryImdbID {
+					primaryTmdbID = metadataRecord.TmdbID
 					break
 				}
 			}
@@ -268,13 +281,13 @@ func linkOfficialHandler(c *gin.Context) {
 		rawDataBytes := []byte("{}")
 		
 		var imdbIDPtr *string
-		if tmdbResult.ImdbID != "" {
-			val := tmdbResult.ImdbID
+		if secondaryImdbID != "" {
+			val := secondaryImdbID
 			imdbIDPtr = &val
 		}
 
 		tmdbMetadata := database.TmdbMetadata{
-			TmdbID:    tmdbResult.TmdbID,
+			TmdbID:    primaryTmdbID,
 			ImdbID:    imdbIDPtr,
 			Data:      string(rawDataBytes),
 			CreatedAt: time.Now(),
@@ -288,13 +301,13 @@ func linkOfficialHandler(c *gin.Context) {
 		if err != nil {
 			return err
 		}
-		_ = metaBucket.Put([]byte(tmdbResult.TmdbID), metaBytes)
+		_ = metaBucket.Put([]byte(primaryTmdbID), metaBytes)
 		
 		if tmdbMetadata.ImdbID != nil && *tmdbMetadata.ImdbID != "" {
 			_ = metaBucket.Put([]byte(*tmdbMetadata.ImdbID), metaBytes)
 		}
 
-		t.TmdbID = &tmdbResult.TmdbID
+		t.TmdbID = &primaryTmdbID
 		
 		cleanTitle := tmdbResult.Title
 		if cleanTitle == "" || strings.Contains(cleanTitle, "[") || strings.Contains(cleanTitle, "]") || strings.Contains(strings.ToLower(cleanTitle), "1080p") || strings.Contains(strings.ToLower(cleanTitle), "720p") || strings.Contains(strings.ToLower(cleanTitle), "s0") {
@@ -354,7 +367,7 @@ func linkOfficialHandler(c *gin.Context) {
 			_ = magnetBucket.Put([]byte(parsedMagnet.Infohash), cacheBytes)
 
 			stream := database.Stream{
-				TmdbID:    tmdbResult.TmdbID,
+				TmdbID:    primaryTmdbID,
 				Infohash:  parsedMagnet.Infohash,
 				Quality:   parsedMagnet.Quality,
 				Language:  parsedMagnet.Language,
