@@ -223,7 +223,7 @@
     </style>
 </head>
 <body>
-    <h1>► MVSHOWS ADMIN TERMINAL v2.7.0 ◄</h1>
+    <h1>► MVSHOWS ADMIN TERMINAL v2.7.1 ◄</h1>
 
     <div class="dashboard-grid">
         
@@ -944,9 +944,17 @@
                     }
 
                     let gapBadge = '<span class="glow-green">[🟢 HEALTHY LINKED]</span>';
-                    if (graph.meta.gap_status === 'MISSING_IMDB_GAP') gapBadge = '<span class="glow-amber">[⚠️ MISSING IMDb ID GAP]</span>';
-                    else if (graph.meta.gap_status === 'PENDING_MATCH') gapBadge = '<span class="glow-cyan">[⏳ PENDING MATCH]</span>';
-                    else if (graph.meta.gap_status === 'UNLINKED') gapBadge = '<span class="glow-red">[🔴 UNLINKED THREAD]</span>';
+                    let showInlineResolver = false;
+                    if (graph.meta.gap_status === 'MISSING_IMDB_GAP') {
+                        gapBadge = '<span class="glow-amber">[⚠️ MISSING IMDb ID GAP]</span>';
+                        showInlineResolver = true;
+                    } else if (graph.meta.gap_status === 'PENDING_MATCH') {
+                        gapBadge = '<span class="glow-cyan">[⏳ PENDING MATCH]</span>';
+                        showInlineResolver = true;
+                    } else if (graph.meta.gap_status === 'UNLINKED') {
+                        gapBadge = '<span class="glow-red">[🔴 UNLINKED THREAD]</span>';
+                        showInlineResolver = true;
+                    }
 
                     let html = `
                         <!-- LEVEL 1: ROOT METADATA CENTER -->
@@ -965,6 +973,21 @@
                                     ${graph.meta.gap_reason}
                                 </div>
                             </div>
+                    `;
+
+                    // Inline Quick Gap Resolver Form
+                    if (showInlineResolver && graph.threads && graph.threads.length > 0) {
+                        const targetThreadId = graph.threads[0].id;
+                        html += `
+                            <div style="margin-top: 12px; padding-top: 10px; border-top: 1px dotted #ff9900; display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
+                                <span style="color: #ff9900; font-weight: bold; font-size: 1.15rem;">► QUICK GAP RESOLVER:</span>
+                                <input type="text" id="inlineGapInput" placeholder="Enter IMDb ID (e.g. tt11482184)..." style="width: 220px; border-color: #ff9900; color: #ff9900; background: #000; height: 32px;">
+                                <button id="inlineGapFixBtn" data-thread-id="${targetThreadId}" style="border-color: #00ff66; color: #00ff66; font-size: 1.1rem; padding: 2px 12px; margin: 0; box-shadow: 2px 2px 0 #004411;">🔗 Attach IMDb ID &amp; Sync Streams</button>
+                            </div>
+                        `;
+                    }
+
+                    html += `
                         </div>
 
                         <!-- LEVEL 2: PHYSICAL FORUM THREAD BRANCHES -->
@@ -1031,6 +1054,46 @@
 
                     html += '</div>';
                     graphCanvas.innerHTML = html;
+
+                    // Bind Inline Gap Fix Button Event Handler
+                    const inlineGapFixBtn = el('inlineGapFixBtn');
+                    if (inlineGapFixBtn) {
+                        inlineGapFixBtn.addEventListener('click', async () => {
+                            const threadId = parseInt(inlineGapFixBtn.getAttribute('data-thread-id'));
+                            const officialId = el('inlineGapInput').value.trim();
+
+                            if (!officialId) {
+                                alert('Please enter an IMDb ID (e.g. tt11482184) to attach.');
+                                return;
+                            }
+
+                            inlineGapFixBtn.disabled = true;
+                            inlineGapFixBtn.innerText = 'Linking...';
+
+                            try {
+                                const response = await fetch('/admin/api/link-official', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ threadId, officialId })
+                                });
+                                const d = await response.json();
+                                if (response.ok) {
+                                    alert(`Successfully attached ${officialId}! Re-rendering graph...`);
+                                    graphSearchInput.value = officialId;
+                                    await renderEntityGraph();
+                                    await fetchHealth();
+                                } else {
+                                    alert('Failed to attach IMDb ID: ' + (d.error || 'Unknown error'));
+                                    inlineGapFixBtn.disabled = false;
+                                    inlineGapFixBtn.innerText = '🔗 Attach IMDb ID & Sync Streams';
+                                }
+                            } catch (err) {
+                                alert('Network error during gap attachment: ' + err.message);
+                                inlineGapFixBtn.disabled = false;
+                                inlineGapFixBtn.innerText = '🔗 Attach IMDb ID & Sync Streams';
+                            }
+                        });
+                    }
 
                 } catch (err) {
                     graphCanvas.innerHTML = `<div style="color:#ff2a5f; padding:20px; text-align:center;">Network error during graph retrieval: ${err.message}</div>`;
