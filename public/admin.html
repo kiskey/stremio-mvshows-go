@@ -44,7 +44,6 @@
             text-transform: uppercase;
         }
 
-        /* Monospaced Retro Inputs and Buttons */
         button { 
             font-family: 'VT323', 'Courier New', monospace;
             font-size: 1.25rem;
@@ -94,7 +93,6 @@
             color: #ff9900;
         }
 
-        /* Command Line CRT Terminal Windows */
         .section { 
             border: 2px solid #e0e0e0;
             background-color: #0a0a0c;
@@ -116,7 +114,6 @@
             justify-content: space-between;
         }
 
-        /* Dashboard Flex Grid Layout */
         .dashboard-grid {
             display: grid;
             grid-template-columns: repeat(12, 1fr);
@@ -132,13 +129,11 @@
             .span-4, .span-6, .span-8 { grid-column: span 12; }
         }
 
-        /* Color Codes for Retro Statuses */
         .glow-green { color: #00ff66; text-shadow: 0 0 4px rgba(0, 255, 102, 0.3); }
         .glow-cyan { color: #00e5ff; text-shadow: 0 0 4px rgba(0, 229, 255, 0.3); }
         .glow-amber { color: #ff9900; text-shadow: 0 0 4px rgba(255, 153, 0, 0.3); }
         .glow-red { color: #ff2a5f; text-shadow: 0 0 4px rgba(255, 42, 95, 0.3); }
 
-        /* Enhanced Metadata Rescue Grid Layout */
         .rescue-grid {
             display: grid;
             grid-template-columns: repeat(12, 1fr);
@@ -158,10 +153,44 @@
                 grid-column: span 12;
             }
         }
+
+        /* Panel F Autocomplete Dropdown Styling */
+        .autocomplete-container {
+            position: relative;
+            flex: 1;
+        }
+        .autocomplete-dropdown {
+            position: absolute;
+            top: 100%;
+            left: 0;
+            right: 0;
+            background: #08080c;
+            border: 2px solid #00ff66;
+            z-index: 1000;
+            max-height: 250px;
+            overflow-y: auto;
+            display: none;
+            box-shadow: 4px 4px 0 #000;
+        }
+        .autocomplete-item {
+            padding: 8px 12px;
+            border-bottom: 1px dashed #333;
+            cursor: pointer;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .autocomplete-item:hover {
+            background: #00ff66;
+            color: #000;
+        }
+        .autocomplete-item:hover .glow-cyan, .autocomplete-item:hover .glow-amber {
+            color: #000;
+        }
     </style>
 </head>
 <body>
-    <h1>► MVSHOWS ADMIN TERMINAL v2.3.0 ◄</h1>
+    <h1>► MVSHOWS ADMIN TERMINAL v2.6.1 ◄</h1>
 
     <div class="dashboard-grid">
         
@@ -200,6 +229,62 @@
             </div>
         </div>
 
+        <!-- MONITORED WEBSERIES WATCHLIST COMMAND DECK (Panel F) -->
+        <div class="section span-12" style="border: 2px solid #00ff66; box-shadow: 4px 4px 0 #004411;">
+            <div class="terminal-header" style="background: #00ff66; color: #000;">
+                <span>► Panel F: Monitored WebSeries Watchlist Command Deck</span>
+                <span>DIRECT_UNBUMPED_POLLING</span>
+            </div>
+            
+            <!-- Quick Add & Autocomplete Search Bar -->
+            <div style="display: flex; gap: 15px; margin-bottom: 20px; align-items: center; flex-wrap: wrap;">
+                <div style="font-size: 1.35rem; color: #00ff66; min-width: 220px;">Search Existing Series DB:</div>
+                <div class="autocomplete-container">
+                    <input type="text" id="seriesSearchInput" placeholder="Type series name (e.g. Love Beyond Wicket)..." style="width: 100%; border-color: #00ff66; color: #00ff66; background: #000; height: 38px;">
+                    <div id="seriesSearchDropdown" class="autocomplete-dropdown"></div>
+                </div>
+            </div>
+
+            <!-- Tabbed Watchlist Filters -->
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; border-bottom: 1px dashed #333; padding-bottom: 10px; flex-wrap: wrap; gap: 10px;">
+                <div style="display: flex; gap: 8px;">
+                    <button id="tabActiveBtn" style="border-color: #00ff66; color: #00ff66; background: #001100;">🟢 Active (<span id="countActive">0</span>)</button>
+                    <button id="tabPausedBtn" style="border-color: #ff9900; color: #ff9900;">⏸️ Paused (<span id="countPaused">0</span>)</button>
+                    <button id="tabArchivedBtn" style="border-color: #888; color: #888;">📁 Archived (<span id="countArchived">0</span>)</button>
+                </div>
+                <input type="text" id="watchlistFilterInput" placeholder="Filter active view..." style="width: 220px; border-color: #00e5ff; height: 32px;">
+            </div>
+
+            <!-- Batch Operations Toolbar -->
+            <div style="display: flex; gap: 10px; align-items: center; margin-bottom: 15px; background: #08080c; border: 1px solid #00ff66; padding: 8px 12px; flex-wrap: wrap;">
+                <span style="font-size: 1.15rem; color: #00ff66; font-weight: bold;">BATCH COMMANDS:</span>
+                <button id="bulkActiveBtn" style="border-color: #00ff66; color: #00ff66; font-size: 1.05rem; padding: 2px 10px; margin: 0;">🟢 Bulk Activate</button>
+                <button id="bulkPauseBtn" style="border-color: #ff9900; color: #ff9900; font-size: 1.05rem; padding: 2px 10px; margin: 0;">⏸️ Bulk Pause</button>
+                <button id="bulkArchiveBtn" style="border-color: #888; color: #888; font-size: 1.05rem; padding: 2px 10px; margin: 0;">📁 Bulk Archive</button>
+                <button id="bulkRemoveBtn" style="border-color: #ff2a5f; color: #ff2a5f; font-size: 1.05rem; padding: 2px 10px; margin: 0;">🔥 Bulk Remove</button>
+                <span id="bulkSelectedCounter" style="color: #00e5ff; font-size: 1.15rem; margin-left: auto; font-weight: bold;">Selected: 0</span>
+            </div>
+
+            <!-- Monitored Series Table -->
+            <div style="max-height: 380px; overflow-y: auto; border: 1px dashed #333; background: #000;">
+                <table>
+                    <thead>
+                        <tr>
+                            <th style="width: 40px; text-align: center;"><input type="checkbox" id="selectAllMonitored" style="cursor: pointer;" title="Select/Deselect All Visible"></th>
+                            <th>Series Title / Raw Thread Title</th>
+                            <th>Status</th>
+                            <th>Last Checked / Updated</th>
+                            <th>Direct Thread Address</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody id="monitoredSeriesBody">
+                        <tr><td colspan="6" style="color: #666; text-align: center;">Loading monitored series watchlist...</td></tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
         <!-- METADATA RESCUE BAY MODULE -->
         <div class="section span-12">
             <div class="terminal-header">
@@ -207,7 +292,6 @@
                 <span>REGULAR_OVERRIDE</span>
             </div>
             
-            <!-- Contextual Flow Instructions -->
             <div style="background: #0d0d11; border: 1px dashed #00e5ff; padding: 12px; font-size: 1.15rem; margin-bottom: 20px; line-height: 1.4;">
                 <span class="glow-cyan" style="font-size: 1.3rem; font-weight: bold; text-transform: uppercase;">Workflow Directions:</span><br>
                 • <span class="glow-green">Single Tuning</span>: Click any item in the <span class="glow-cyan">Pending Pool</span> to focus on it. You can instantly inspect streams below, override poster/plot descriptions, or link it manually.<br>
@@ -215,7 +299,6 @@
             </div>
 
             <div class="rescue-grid">
-                <!-- Left Column: Queue Manager -->
                 <div class="rescue-manager">
                     <div style="display: flex; gap: 15px; align-items: stretch;">
                         <div style="flex: 1;">
@@ -241,9 +324,7 @@
                     </div>
                 </div>
 
-                <!-- Right Column: Action Consoles -->
                 <div class="rescue-actions">
-                    <!-- Panel A: Single Item Tuner -->
                     <div style="border: 1px solid #00e5ff; padding: 12px; background: #08080c;">
                         <div style="font-weight: bold; color: #00e5ff; border-bottom: 1px dashed #00e5ff; padding-bottom: 4px; margin-bottom: 10px; text-transform: uppercase;">
                             ► Panel A: Single Item Tuner
@@ -274,20 +355,17 @@
                         </div>
                     </div>
 
-                    <!-- Panel B: Group Batch Processor -->
                     <div style="border: 1px solid #ff9900; padding: 12px; background: #08080c;">
                         <div style="font-weight: bold; color: #ff9900; border-bottom: 1px dashed #ff9900; padding-bottom: 4px; margin-bottom: 10px; text-transform: uppercase;">
                             ► Panel B: Group Batch Processor
                         </div>
                         
                         <div style="display: flex; flex-direction: column; gap: 8px; font-size: 1.1rem;">
-                            <!-- Action 1: Bulk Auto Match -->
                             <div style="display: flex; align-items: center; justify-content: space-between;">
                                 <span style="color:#aaa;">Auto-Match Batch:</span>
                                 <button id="bulkAutoMatch" style="border-color: #2a69ac; color: #2a69ac; box-shadow: 2px 2px 0 #112b4b; padding: 2px 10px; font-size: 1.1rem;">🤖 Run Bulk Auto-Match</button>
                             </div>
 
-                            <!-- Action 2: Bulk Link to One ID -->
                             <div style="border-top: 1px dotted #333; padding-top: 8px;">
                                 <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px;">
                                     <span class="glow-amber">Link Batch to ONE ID:</span>
@@ -298,7 +376,6 @@
                                 </div>
                             </div>
 
-                            <!-- Action 3: Bulk Meta Override -->
                             <div style="border-top: 1px dotted #333; padding-top: 8px; display: flex; flex-direction: column; gap: 4px;">
                                 <div style="display: flex; align-items: center; justify-content: space-between;">
                                     <span style="color:#aaa;">Batch Poster:</span>
@@ -313,16 +390,14 @@
                                 </div>
                             </div>
 
-                            <!-- Status Terminal Monitor -->
                             <div style="font-size: 1.05rem; text-transform: uppercase; color: #888; margin-top: 5px; margin-bottom: -4px;">► Batch Output Monitor</div>
                             <div id="bulkStatus" class="glow-amber" style="border: 1px dashed #333; padding: 6px; height: 75px; overflow-y: auto; font-size: 1.05rem; background: #000; font-family: monospace; line-height: 1.2;">
                                 Idle... Ready for batch queue tasks.
                             </div>
                         </div>
                     </div>
-                </div> <!-- /rescue-actions -->
+                </div>
 
-                <!-- Panel C: Cinemeta Visual Matcher (Unified Full-Width Deck) -->
                 <div class="section span-12" style="border: 2px solid #00ff66; margin-top: 15px; box-shadow: 4px 4px 0 #004411;">
                     <div class="terminal-header" style="background: #00ff66; color: #000;">
                         <span>► Panel C: Cinemeta Visual Matcher (Unified Deck)</span>
@@ -337,14 +412,12 @@
                         </div>
                     </div>
 
-                    <!-- Scrollable Visual Cards Grid -->
                     <div id="visualCandidatesContainer" style="max-height: 480px; overflow-y: auto; display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 15px; border: 1px dashed #333; padding: 12px; background: #000;">
                         <div style="grid-column: 1 / -1; color: #666; text-align: center; font-size: 1.3rem; padding: 40px 0;">Select a pending item above to search visual candidates.</div>
                     </div>
                 </div>
-            </div> <!-- /rescue-grid -->
+            </div>
 
-            <!-- CHOOSE STREAM PANEL -->
             <div style="border-top: 2px solid #e0e0e0; margin-top: 25px; padding-top: 15px;">
                 <h3 class="glow-green">03. Debrid Caching Pipeline</h3>
                 <p style="color: #888; font-size: 1.1rem; margin: 0 0 10px 0;">Select a single stream below to push and cache into your configured Debrid provider cloud.</p>
@@ -489,6 +562,8 @@
 
             let focusedThreadId = null;
             let page = 1;
+            let activeWatchlistTab = 'active';
+            let allMonitoredSeries = [];
 
             function el(id) {
                 return document.getElementById(id);
@@ -539,6 +614,249 @@
                 fetchHealth();
             });
 
+            // ── Panel F: Monitored Series Watchlist Functions ──
+
+            async function loadMonitoredSeries() {
+                try {
+                    const r = await fetch('/admin/api/monitored-series?_t=' + Date.now());
+                    allMonitoredSeries = await r.json() || [];
+
+                    let countActive = 0, countPaused = 0, countArchived = 0;
+                    allMonitoredSeries.forEach(s => {
+                        if (s.status === 'active') countActive++;
+                        else if (s.status === 'paused') countPaused++;
+                        else if (s.status === 'archived') countArchived++;
+                    });
+
+                    el('countActive').textContent = countActive;
+                    el('countPaused').textContent = countPaused;
+                    el('countArchived').textContent = countArchived;
+
+                    renderMonitoredTable();
+                } catch (err) {
+                    console.error('Failed to load monitored series:', err);
+                }
+            }
+
+            function updateSelectedCounter() {
+                const checked = document.querySelectorAll('.monitoredRowCheckbox:checked');
+                el('bulkSelectedCounter').textContent = `Selected: ${checked.length}`;
+            }
+
+            function renderMonitoredTable() {
+                const tbody = el('monitoredSeriesBody');
+                const filterQuery = el('watchlistFilterInput').value.trim().toLowerCase();
+
+                const filtered = allMonitoredSeries.filter(s => {
+                    if (s.status !== activeWatchlistTab) return false;
+                    if (filterQuery) {
+                        return (s.title && s.title.toLowerCase().includes(filterQuery)) ||
+                               (s.raw_title && s.raw_title.toLowerCase().includes(filterQuery));
+                    }
+                    return true;
+                });
+
+                tbody.innerHTML = '';
+                const selectAll = el('selectAllMonitored');
+                if (selectAll) selectAll.checked = false;
+                updateSelectedCounter();
+
+                if (filtered.length === 0) {
+                    tbody.innerHTML = `<tr><td colspan="6" style="color: #666; text-align: center;">No webseries currently in ${activeWatchlistTab.toUpperCase()} queue.</td></tr>`;
+                    return;
+                }
+
+                filtered.forEach(s => {
+                    const tr = document.createElement('tr');
+                    const badgeClass = s.status === 'active' ? 'glow-green' : (s.status === 'paused' ? 'glow-amber' : 'glow-red');
+                    const displayTitle = s.title || s.raw_title;
+                    const urlDisplay = s.url ? `<a href="${s.url}" target="_blank" style="color: #00e5ff;">Link 🔗</a>` : '<span style="color:#ff2a5f;">Missing URL</span>';
+
+                    tr.innerHTML = `
+                        <td style="text-align: center;">
+                            <input type="checkbox" class="monitoredRowCheckbox" data-hash="${s.thread_hash}" style="cursor: pointer;">
+                        </td>
+                        <td>
+                            <strong style="color: #fff; font-size: 1.3rem;">${displayTitle}</strong><br>
+                            <span style="color: #888; font-size: 1.05rem;">Raw: ${s.raw_title || '-'}</span>
+                        </td>
+                        <td class="${badgeClass}" style="font-weight: bold;">${s.status.toUpperCase()}</td>
+                        <td style="font-size: 1.1rem; color: #aaa;">${s.last_updated ? new Date(s.last_updated).toLocaleString() : '-'}</td>
+                        <td>${urlDisplay}</td>
+                        <td>
+                            ${s.status !== 'active' ? `<button class="toggleBtn" data-hash="${s.thread_hash}" data-status="active" style="border-color:#00ff66; color:#00ff66; font-size:1.05rem; padding:2px 8px;">🟢 Activate</button>` : ''}
+                            ${s.status !== 'paused' ? `<button class="toggleBtn" data-hash="${s.thread_hash}" data-status="paused" style="border-color:#ff9900; color:#ff9900; font-size:1.05rem; padding:2px 8px;">⏸️ Pause</button>` : ''}
+                            ${s.status !== 'archived' ? `<button class="toggleBtn" data-hash="${s.thread_hash}" data-status="archived" style="border-color:#888; color:#888; font-size:1.05rem; padding:2px 8px;">📁 Archive</button>` : ''}
+                            <button class="toggleBtn" data-hash="${s.thread_hash}" data-status="delete" style="border-color:#ff2a5f; color:#ff2a5f; font-size:1.05rem; padding:2px 8px;">🔥 Remove</button>
+                        </td>
+                    `;
+                    tbody.appendChild(tr);
+                });
+
+                tbody.querySelectorAll('.monitoredRowCheckbox').forEach(cb => {
+                    cb.addEventListener('change', updateSelectedCounter);
+                });
+
+                tbody.querySelectorAll('.toggleBtn').forEach(btn => {
+                    btn.addEventListener('click', async () => {
+                        const hash = btn.getAttribute('data-hash');
+                        const status = btn.getAttribute('data-status');
+                        await fetch('/admin/api/monitored-series/toggle', {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ threadHash: hash, status })
+                        });
+                        loadMonitoredSeries();
+                    });
+                });
+            }
+
+            // Master Checkbox Toggle Handler
+            const selectAllMonitored = el('selectAllMonitored');
+            if (selectAllMonitored) {
+                selectAllMonitored.addEventListener('change', () => {
+                    const checkboxes = document.querySelectorAll('.monitoredRowCheckbox');
+                    checkboxes.forEach(cb => cb.checked = selectAllMonitored.checked);
+                    updateSelectedCounter();
+                });
+            }
+
+            // Bulk Status Action Handlers
+            async function executeBulkStatusChange(targetStatus) {
+                const checkedNodes = document.querySelectorAll('.monitoredRowCheckbox:checked');
+                const selectedHashes = Array.from(checkedNodes).map(cb => cb.getAttribute('data-hash'));
+
+                if (selectedHashes.length === 0) {
+                    alert('Please select at least one series using the checkboxes.');
+                    return;
+                }
+
+                if (targetStatus === 'delete') {
+                    if (!confirm(`Are you sure you want to remove ${selectedHashes.length} series from your monitored watchlist?`)) {
+                        return;
+                    }
+                }
+
+                try {
+                    const r = await fetch('/admin/api/monitored-series/bulk-toggle', {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ threadHashes: selectedHashes, status: targetStatus })
+                    });
+                    const d = await r.json();
+                    if (r.ok) {
+                        alert(d.message || `Bulk update to '${targetStatus}' successful.`);
+                        loadMonitoredSeries();
+                    } else {
+                        alert('Bulk update failed: ' + (d.error || 'Unknown error'));
+                    }
+                } catch (err) {
+                    alert('Network error during bulk operation: ' + err.message);
+                }
+            }
+
+            el('bulkActiveBtn').addEventListener('click', () => executeBulkStatusChange('active'));
+            el('bulkPauseBtn').addEventListener('click', () => executeBulkStatusChange('paused'));
+            el('bulkArchiveBtn').addEventListener('click', () => executeBulkStatusChange('archived'));
+            el('bulkRemoveBtn').addEventListener('click', () => executeBulkStatusChange('delete'));
+
+            // Tab Event Listeners
+            el('tabActiveBtn').addEventListener('click', () => { activeWatchlistTab = 'active'; updateTabStyles(); renderMonitoredTable(); });
+            el('tabPausedBtn').addEventListener('click', () => { activeWatchlistTab = 'paused'; updateTabStyles(); renderMonitoredTable(); });
+            el('tabArchivedBtn').addEventListener('click', () => { activeWatchlistTab = 'archived'; updateTabStyles(); renderMonitoredTable(); });
+            el('watchlistFilterInput').addEventListener('input', renderMonitoredTable);
+
+            function updateTabStyles() {
+                el('tabActiveBtn').style.background = activeWatchlistTab === 'active' ? '#003311' : '#000';
+                el('tabPausedBtn').style.background = activeWatchlistTab === 'paused' ? '#332200' : '#000';
+                el('tabArchivedBtn').style.background = activeWatchlistTab === 'archived' ? '#222' : '#000';
+            }
+
+            // ── Smart Autocomplete Search Handler ──
+            const seriesSearchInput = el('seriesSearchInput');
+            const seriesSearchDropdown = el('seriesSearchDropdown');
+            let searchTimeout = null;
+
+            seriesSearchInput.addEventListener('input', () => {
+                clearTimeout(searchTimeout);
+                const query = seriesSearchInput.value.trim();
+                if (!query) {
+                    seriesSearchDropdown.style.display = 'none';
+                    return;
+                }
+
+                searchTimeout = setTimeout(async () => {
+                    try {
+                        const r = await fetch(`/admin/api/series-search?q=${encodeURIComponent(query)}&_t=${Date.now()}`);
+                        const matches = await r.json();
+
+                        seriesSearchDropdown.innerHTML = '';
+                        if (!matches || matches.length === 0) {
+                            seriesSearchDropdown.innerHTML = '<div style="padding: 10px; color: #ff2a5f; text-align: center;">No matching webseries found in DB</div>';
+                            seriesSearchDropdown.style.display = 'block';
+                            return;
+                        }
+
+                        matches.forEach(m => {
+                            const item = document.createElement('div');
+                            item.className = 'autocomplete-item';
+
+                            let statusBadge = '<span class="glow-cyan">[Unmonitored]</span>';
+                            if (m.monitored_status === 'active') statusBadge = '<span class="glow-green">[🟢 Active]</span>';
+                            else if (m.monitored_status === 'paused') statusBadge = '<span class="glow-amber">[⏸️ Paused]</span>';
+                            else if (m.monitored_status === 'archived') statusBadge = '<span style="color:#888;">[📁 Archived]</span>';
+
+                            item.innerHTML = `
+                                <div>
+                                    <strong style="font-size: 1.25rem;">[ID: ${m.id}] ${m.clean_title || m.raw_title}</strong><br>
+                                    <span style="font-size: 1.05rem; color: #aaa;">Raw: ${m.raw_title}</span>
+                                </div>
+                                <div style="display:flex; align-items:center; gap:8px;">
+                                    ${statusBadge}
+                                    <button class="enrollBtn" style="font-size:1.05rem; padding:2px 8px; margin:0;">⚡ Monitor</button>
+                                </div>
+                            `;
+
+                            item.querySelector('.enrollBtn').addEventListener('click', async (e) => {
+                                e.stopPropagation();
+                                let targetUrl = m.url;
+                                if (!targetUrl) {
+                                    targetUrl = prompt(`Series "${m.clean_title || m.raw_title}" is missing a thread URL.\n\nPlease paste its forum thread URL once to lock monitoring:`, '');
+                                    if (!targetUrl) return;
+                                }
+
+                                const resp = await fetch('/admin/api/monitored-series/add', {
+                                    method: 'POST',
+                                    headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ threadId: m.id, threadUrl: targetUrl, threadHash: m.thread_hash })
+                                });
+                                const d = await resp.json();
+                                alert(d.message || d.error);
+                                seriesSearchInput.value = '';
+                                seriesSearchDropdown.style.display = 'none';
+                                
+                                // Auto-switch view to Active tab so the newly monitored series is immediately visible
+                                activeWatchlistTab = 'active';
+                                updateTabStyles();
+                                loadMonitoredSeries();
+                            });
+
+                            seriesSearchDropdown.appendChild(item);
+                        });
+
+                        seriesSearchDropdown.style.display = 'block';
+                    } catch (err) {
+                        console.error('Autocomplete query failed:', err);
+                    }
+                }, 250);
+            });
+
+            document.addEventListener('click', (e) => {
+                if (!seriesSearchInput.contains(e.target) && !seriesSearchDropdown.contains(e.target)) {
+                    seriesSearchDropdown.style.display = 'none';
+                }
+            });
+
             // Synchronized Dual-List & Anti-Cache Refresh Implementation
             async function loadPending() {
                 try {
@@ -550,7 +868,6 @@
                         pendingMap.set(String(t.id), t.clean_title || t.raw_title);
                     });
 
-                    // 1. Refresh Available List (#availableList)
                     const availSel = el('availableList');
                     const selectedBatchIds = new Set([...el('selectedList').options].map(opt => String(opt.value)));
                     
@@ -564,7 +881,6 @@
                         }
                     });
 
-                    // 2. Synchronize & Purge Batch List (#selectedList)
                     const batchSel = el('selectedList');
                     const currentBatchOpts = [...batchSel.options];
                     batchSel.innerHTML = '';
@@ -577,7 +893,6 @@
                         }
                     });
 
-                    // 3. Purge focused state if focused item was linked/removed
                     if (focusedThreadId && !pendingMap.has(String(focusedThreadId))) {
                         clearFocusState();
                     }
@@ -1175,6 +1490,7 @@
             document.addEventListener('DOMContentLoaded', () => {
                 fetchHealth();
                 loadPending();
+                loadMonitoredSeries();
                 loadFailures();
                 loadRecent(1);
                 setInterval(fetchHealth, 30000);

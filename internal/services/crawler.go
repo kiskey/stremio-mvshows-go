@@ -1,5 +1,5 @@
-// Version: 1.1.0
-// Change log: Fixed fragile Parent().Parent() selector with stable ancestor search containers and introduced deep magnet deduplication inside detail extraction rules. Added RunTargetedCrawler to perform safe proxy-aware single-page thread detail scrapes without affecting scheduling catalogs.
+// Version: 1.3.3
+// Change log: Updated hash generation calls to pass contentType to parser.GenerateThreadHashWithURLAndType, enforcing 2-Tier Invariant Hash Hierarchy across crawler passes.
 
 package crawler
 
@@ -31,9 +31,9 @@ type CrawledThread struct {
 	Type       string
 	PostedAt   *time.Time
 	CatalogID  string
+	URL        string
 }
 
-// RoundRobinProxySwitcher returns a thread-safe Colly ProxyFunc rotating through provided proxy strings.
 func RoundRobinProxySwitcher(proxies []string) (colly.ProxyFunc, error) {
 	if len(proxies) == 0 {
 		return nil, fmt.Errorf("proxy list is empty")
@@ -55,19 +55,18 @@ func RoundRobinProxySwitcher(proxies []string) (colly.ProxyFunc, error) {
 	}, nil
 }
 
-// createOptimizedScraperTransport configures an http.Transport optimized for low latency and high concurrency
 func createOptimizedScraperTransport() *http.Transport {
 	transport := &http.Transport{
 		DialContext: (&net.Dialer{
-			Timeout:   5 * time.Second,  // Faster connect timeout
-			KeepAlive: 30 * time.Second, // Consistent keep-alive
+			Timeout:   5 * time.Second,
+			KeepAlive: 30 * time.Second,
 		}).DialContext,
 		MaxIdleConns:          100,
-		MaxIdleConnsPerHost:   100,              // Critical for scraping multiple pages of same host concurrently
+		MaxIdleConnsPerHost:   100,
 		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:   3 * time.Second,  // Faster TLS handshakes
+		TLSHandshakeTimeout:   3 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
-		ForceAttemptHTTP2:     true,             // Force HTTP/2 attempt
+		ForceAttemptHTTP2:     true,
 		TLSClientConfig: &tls.Config{
 			MinVersion: tls.VersionTLS12,
 		},
@@ -76,8 +75,6 @@ func createOptimizedScraperTransport() *http.Transport {
 	return transport
 }
 
-// ProxyTransport wraps our optimized base transport, automatically transforming GET requests
-// into POST payloads pointing to rotated Netlify Cloudflare-bypass scraper endpoints.
 type ProxyTransport struct {
 	ProxyURLs []string
 	index     uint64
@@ -101,7 +98,6 @@ func (pt *ProxyTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	return pt.Base.RoundTrip(proxyReq)
 }
 
-// RunCrawler executes the asynchronous forum crawl based on the current configuration.
 func RunCrawler(cfg *config.Config, incremental bool) ([]CrawledThread, error) {
 	var crawled []CrawledThread
 	seenHashes := make(map[string]bool)
@@ -216,19 +212,22 @@ func RunCrawler(cfg *config.Config, incremental bool) ([]CrawledThread, error) {
 		postedAtStr, _ := timeEl.Attr("datetime")
 
 		if link != "" && rawTitle != "" {
+			absURL := e.Request.AbsoluteURL(link)
+			canonicalURL := parser.FormatCanonicalTopicURL(absURL)
+
 			ctx := colly.NewContext()
 			ctx.Put("raw_title", rawTitle)
 			ctx.Put("type", e.Request.Ctx.Get("type"))
 			ctx.Put("catalog_id", e.Request.Ctx.Get("catalog_id"))
+			ctx.Put("thread_url", canonicalURL)
 			if postedAtStr != "" {
 				ctx.Put("posted_at", postedAtStr)
 			}
 
-			_ = c.Request("GET", e.Request.AbsoluteURL(link), nil, ctx, nil)
+			_ = c.Request("GET", canonicalURL, nil, ctx, nil)
 		}
 	})
 
-	// Detail page magnet extraction handler.
 	c.OnHTML("a[href^=\"magnet:?\"]", func(e *colly.HTMLElement) {
 		if e.Request.Ctx.GetAny("detail_parsed") != nil {
 			return
@@ -239,11 +238,18 @@ func RunCrawler(cfg *config.Config, incremental bool) ([]CrawledThread, error) {
 		contentType := e.Request.Ctx.Get("type")
 		catalogID := e.Request.Ctx.Get("catalog_id")
 		postedAtStr := e.Request.Ctx.Get("posted_at")
+		threadURL := e.Request.Ctx.Get("thread_url")
+
+		// Strictly preserve target canonical thread_url from request context
+		if threadURL == "" {
+			if finalURL := e.Request.URL.String(); finalURL != "" {
+				threadURL = parser.FormatCanonicalTopicURL(finalURL)
+			}
+		}
 
 		var magnets []string
 		seenMags := make(map[string]bool)
 
-		// Rely on a stable ancestor container selector to dodge brittle layout assumptions [report.md]
 		container := e.DOM.Closest(".ipsPad")
 		if container.Length() == 0 {
 			container = e.DOM.Closest(".ipsType_normal")
@@ -260,7 +266,6 @@ func RunCrawler(cfg *config.Config, incremental bool) ([]CrawledThread, error) {
 
 		container.Find("a[href^=\"magnet:?\"]").Each(func(_ int, s *goquery.Selection) {
 			if href, ok := s.Attr("href"); ok {
-				// Deduplicate collected magnet links cleanly [report.md]
 				if href != "" && !seenMags[href] {
 					seenMags[href] = true
 					magnets = append(magnets, href)
@@ -269,7 +274,7 @@ func RunCrawler(cfg *config.Config, incremental bool) ([]CrawledThread, error) {
 		})
 
 		if len(magnets) > 0 {
-			hash := parser.GenerateThreadHash(rawTitle, magnets)
+			hash := parser.GenerateThreadHashWithURLAndType(rawTitle, threadURL, contentType)
 			var postedAt *time.Time
 			if postedAtStr != "" {
 				if t, errDate := time.Parse(time.RFC3339, postedAtStr); errDate == nil {
@@ -287,6 +292,7 @@ func RunCrawler(cfg *config.Config, incremental bool) ([]CrawledThread, error) {
 					Type:       contentType,
 					PostedAt:   postedAt,
 					CatalogID:  catalogID,
+					URL:        threadURL,
 				})
 			}
 			mu.Unlock()
@@ -388,10 +394,11 @@ func ConvertToProxyPostRequest(req *http.Request, proxyURL string) (*http.Reques
 	return newReq, nil
 }
 
-// RunTargetedCrawler executes a single-page target crawl on a specific thread URL, extracting its magnets and page title.
 func RunTargetedCrawler(cfg *config.Config, threadURL, contentType, catalogID string) ([]CrawledThread, error) {
 	var crawled []CrawledThread
 	var mu sync.Mutex
+
+	canonicalURL := parser.FormatCanonicalTopicURL(threadURL)
 
 	c := colly.NewCollector()
 
@@ -484,7 +491,6 @@ func RunTargetedCrawler(cfg *config.Config, threadURL, contentType, catalogID st
 		}
 		e.Request.Ctx.Put("detail_parsed", true)
 
-		// Find and extract clean title from h1 header or title tag
 		rawTitle := e.DOM.ParentsUntil("html").Find("h1.ipsType_pageTitle").Text()
 		rawTitle = strings.TrimSpace(rawTitle)
 		if rawTitle == "" {
@@ -494,6 +500,14 @@ func RunTargetedCrawler(cfg *config.Config, threadURL, contentType, catalogID st
 
 		if rawTitle == "" {
 			rawTitle = "Unknown Recouped Title"
+		}
+
+		// Strictly preserve clean canonical forum URL and prevent proxy endpoint overwrite
+		finalTargetURL := canonicalURL
+		if finalTargetURL == "" {
+			if finalURL := e.Request.URL.String(); finalURL != "" {
+				finalTargetURL = parser.FormatCanonicalTopicURL(finalURL)
+			}
 		}
 
 		var magnets []string
@@ -523,7 +537,7 @@ func RunTargetedCrawler(cfg *config.Config, threadURL, contentType, catalogID st
 		})
 
 		if len(magnets) > 0 {
-			hash := parser.GenerateThreadHash(rawTitle, magnets)
+			hash := parser.GenerateThreadHashWithURLAndType(rawTitle, finalTargetURL, contentType)
 			
 			var postedAt *time.Time
 			timeEl := e.DOM.ParentsUntil("html").Find("time[datetime]").First()
@@ -545,12 +559,13 @@ func RunTargetedCrawler(cfg *config.Config, threadURL, contentType, catalogID st
 				Type:       contentType,
 				PostedAt:   postedAt,
 				CatalogID:  catalogID,
+				URL:        finalTargetURL,
 			})
 			mu.Unlock()
 		}
 	})
 
-	_ = c.Visit(threadURL)
+	_ = c.Visit(canonicalURL)
 	c.Wait()
 
 	return crawled, nil

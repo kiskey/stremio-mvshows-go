@@ -1,5 +1,5 @@
-// Version: 2.0.3
-// Change log: Added thread_id_index bucket to manage fast ID lookup pointers and auto-repaired legacy ID=0 records on database startup.
+// Version: 2.0.4
+// Change log: Added monitored_series bucket initialization in Init(dbPath) for watching active webseries threads.
 
 package database
 
@@ -40,6 +40,7 @@ func Init(dbPath string) (*bolt.DB, error) {
 			"catalog_index",
 			"tmdb_thread_index", // High-speed point index bucket
 			"thread_id_index",   // High-speed thread ID lookup index bucket
+			"monitored_series",  // Monitored Series Watchlist Bucket
 		}
 		for _, bName := range buckets {
 			_, errBucket := tx.CreateBucketIfNotExists([]byte(bName))
@@ -69,7 +70,6 @@ func Init(dbPath string) (*bolt.DB, error) {
 							toUpdate = append(toUpdate, repairItem{key: k, thread: t})
 						}
 					} else {
-						// Ensure index pointer is populated
 						_ = idB.Put([]byte(fmt.Sprintf("%d", t.ID)), k)
 					}
 				}

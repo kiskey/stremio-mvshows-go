@@ -1,5 +1,5 @@
-// Version: 2.2.0
-// Change log: Refactored streams bucket storage to O(1) composite keys (tmdbID:infohash), added DeleteStreamsByTmdbID prefix purge helper, and updated stream query methods to use Bbolt cursor prefix iteration.
+// Version: 2.6.0
+// Change log: Implemented FindLinkedThreadByTitleYearType with 5-Factor Invariant Match Contract to enable contamination-free local database lookups for multi-site threads.
 
 package database
 
@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/kiskey/stremio-mvshows-go/internal/services/metadata"
 	bolt "go.etcd.io/bbolt"
 )
 
@@ -66,6 +67,61 @@ func FindThreadByHash(tx *bolt.Tx, hash string) (*Thread, error) {
 		return nil, nil
 	}
 	return &t, nil
+}
+
+func FindLinkedThreadByTitleYearType(tx *bolt.Tx, title string, year int, mediaType string) (*Thread, error) {
+	if title == "" || year <= 0 || mediaType == "" {
+		return nil, nil
+	}
+
+	normTargetTitle := metadata.NormalizeTitleForMatching(title)
+	if normTargetTitle == "" {
+		return nil, nil
+	}
+
+	targetType := strings.ToLower(strings.TrimSpace(mediaType))
+	var found *Thread
+
+	err := runView(tx, func(tx *bolt.Tx) error {
+		tb := tx.Bucket([]byte("threads"))
+		if tb == nil {
+			return nil
+		}
+		c := tb.Cursor()
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			var t Thread
+			if errDec := DecodeGob(v, &t); errDec == nil {
+				// Factor 5: Status & TmdbID Prerequisite
+				if t.Status != "linked" || t.TmdbID == nil || *t.TmdbID == "" {
+					continue
+				}
+
+				// Factor 1: Strict Media Type Isolation
+				if strings.ToLower(strings.TrimSpace(t.Type)) != targetType {
+					continue
+				}
+
+				// Factor 2: Exact Year Alignment
+				if t.Year == nil || *t.Year != year {
+					continue
+				}
+
+				// Factor 3: Exact Normalized Title Match
+				normStoredTitle := metadata.NormalizeTitleForMatching(t.CleanTitle)
+				if normStoredTitle == "" {
+					normStoredTitle = metadata.NormalizeTitleForMatching(t.RawTitle)
+				}
+
+				if normStoredTitle == normTargetTitle {
+					found = &t
+					break
+				}
+			}
+		}
+		return nil
+	})
+
+	return found, err
 }
 
 func FindThreadByRawTitle(tx *bolt.Tx, rawTitle string) (*Thread, error) {
@@ -158,18 +214,37 @@ func CreateOrUpdateThread(tx *bolt.Tx, data *Thread) error {
 			return errIdBucket
 		}
 
-		if data.ID == 0 {
-			seq, errSeq := b.NextSequence()
-			if errSeq != nil {
-				return errSeq
-			}
-			data.ID = uint(seq)
-		}
-
 		existingData := b.Get([]byte(data.ThreadHash))
 		if existingData != nil {
 			var oldThread Thread
 			if errDec := DecodeGob(existingData, &oldThread); errDec == nil {
+				if data.ID == 0 && oldThread.ID > 0 {
+					data.ID = oldThread.ID
+				}
+
+				if data.URL == "" && oldThread.URL != "" {
+					data.URL = oldThread.URL
+				}
+
+				// Merge and deduplicate magnet URIs on thread updates
+				if len(oldThread.MagnetURIs) > 0 {
+					seenMags := make(map[string]bool)
+					var merged []string
+					for _, m := range data.MagnetURIs {
+						if m != "" && !seenMags[m] {
+							seenMags[m] = true
+							merged = append(merged, m)
+						}
+					}
+					for _, m := range oldThread.MagnetURIs {
+						if m != "" && !seenMags[m] {
+							seenMags[m] = true
+							merged = append(merged, m)
+						}
+					}
+					data.MagnetURIs = merged
+				}
+
 				if oldThread.Catalog != "" {
 					oldPosted := time.Unix(0, 0)
 					if oldThread.PostedAt != nil {
@@ -201,6 +276,14 @@ func CreateOrUpdateThread(tx *bolt.Tx, data *Thread) error {
 			}
 		}
 
+		if data.ID == 0 {
+			seq, errSeq := b.NextSequence()
+			if errSeq != nil {
+				return errSeq
+			}
+			data.ID = uint(seq)
+		}
+
 		bytesData, err := EncodeGob(data)
 		if err != nil {
 			return err
@@ -226,6 +309,10 @@ func CreateOrUpdateThread(tx *bolt.Tx, data *Thread) error {
 		}
 
 		_ = idB.Put([]byte(fmt.Sprintf("%d", data.ID)), []byte(data.ThreadHash))
+
+		if strings.ToLower(data.Type) == "series" && data.Status == "linked" {
+			_ = AutoEnrollSeries(tx, data)
+		}
 
 		return nil
 	})
@@ -270,6 +357,8 @@ func DeleteThread(tx *bolt.Tx, t *Thread) error {
 		if idB != nil {
 			_ = idB.Delete([]byte(fmt.Sprintf("%d", t.ID)))
 		}
+
+		_ = DeleteMonitoredSeries(tx, t.ThreadHash)
 
 		return nil
 	})
@@ -373,7 +462,6 @@ func sortStreamsByQuality(streams []Stream) {
 	})
 }
 
-// DeleteStreamsByTmdbID purges all composite key stream entries starting with prefix "tmdbID:"
 func DeleteStreamsByTmdbID(tx *bolt.Tx, tmdbID string) error {
 	return runUpdate(tx, func(tx *bolt.Tx) error {
 		b := tx.Bucket([]byte("streams"))
@@ -397,7 +485,6 @@ func DeleteStreamsByTmdbID(tx *bolt.Tx, tmdbID string) error {
 	})
 }
 
-// FindSeriesStreams queries streams via Bbolt prefix cursor scan and filters by season/episode.
 func FindSeriesStreams(tx *bolt.Tx, tmdbID string, season, episode int) ([]Stream, error) {
 	var allStreams []Stream
 	err := runView(tx, func(tx *bolt.Tx) error {
@@ -450,7 +537,6 @@ func FindSeriesStreams(tx *bolt.Tx, tmdbID string, season, episode int) ([]Strea
 	return filtered, nil
 }
 
-// FindMovieStreams queries all streams for a TMDB ID via prefix cursor scan.
 func FindMovieStreams(tx *bolt.Tx, tmdbID string) ([]Stream, error) {
 	var allStreams []Stream
 	err := runView(tx, func(tx *bolt.Tx) error {
@@ -477,7 +563,6 @@ func FindMovieStreams(tx *bolt.Tx, tmdbID string) ([]Stream, error) {
 	return allStreams, nil
 }
 
-// CreateStreams writes each stream under composite key "tmdbID:infohash" in O(1) time.
 func CreateStreams(tx *bolt.Tx, streams []Stream) error {
 	if len(streams) == 0 {
 		return nil
@@ -501,6 +586,218 @@ func CreateStreams(tx *bolt.Tx, streams []Stream) error {
 		}
 		return nil
 	})
+}
+
+// ── MonitoredSeries CRUD Operations ──
+
+func GetMonitoredSeriesList() ([]MonitoredSeries, error) {
+	var list []MonitoredSeries
+	err := runView(nil, func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("monitored_series"))
+		if b == nil {
+			return nil
+		}
+		c := b.Cursor()
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			var ms MonitoredSeries
+			if errDec := DecodeGob(v, &ms); errDec == nil {
+				list = append(list, ms)
+			}
+		}
+		return nil
+	})
+	sort.Slice(list, func(i, j int) bool {
+		return list[i].LastUpdated.After(list[j].LastUpdated)
+	})
+	return list, err
+}
+
+func GetActiveMonitoredSeries() ([]MonitoredSeries, error) {
+	var list []MonitoredSeries
+	err := runView(nil, func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("monitored_series"))
+		if b == nil {
+			return nil
+		}
+		c := b.Cursor()
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			var ms MonitoredSeries
+			if errDec := DecodeGob(v, &ms); errDec == nil {
+				if ms.Status == "active" && ms.URL != "" {
+					list = append(list, ms)
+				}
+			}
+		}
+		return nil
+	})
+	return list, err
+}
+
+func GetMonitoredSeriesByHash(tx *bolt.Tx, threadHash string) (*MonitoredSeries, error) {
+	var ms MonitoredSeries
+	err := runView(tx, func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("monitored_series"))
+		if b == nil {
+			return bolt.ErrBucketNotFound
+		}
+		data := b.Get([]byte(threadHash))
+		if data == nil {
+			return bolt.ErrBucketNotFound
+		}
+		return DecodeGob(data, &ms)
+	})
+	if err != nil {
+		return nil, nil
+	}
+	return &ms, nil
+}
+
+func SetMonitoredSeries(tx *bolt.Tx, ms *MonitoredSeries) error {
+	return runUpdate(tx, func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("monitored_series"))
+		if b == nil {
+			return bolt.ErrBucketNotFound
+		}
+		if ms.CreatedAt.IsZero() {
+			ms.CreatedAt = time.Now()
+		}
+		ms.LastUpdated = time.Now()
+		bytesData, errEnc := EncodeGob(*ms)
+		if errEnc != nil {
+			return errEnc
+		}
+		return b.Put([]byte(ms.ThreadHash), bytesData)
+	})
+}
+
+func BulkSetMonitoredSeriesStatus(tx *bolt.Tx, threadHashes []string, status string) (int, error) {
+	if len(threadHashes) == 0 {
+		return 0, nil
+	}
+	updatedCount := 0
+	err := runUpdate(tx, func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("monitored_series"))
+		if b == nil {
+			return bolt.ErrBucketNotFound
+		}
+
+		if status == "delete" {
+			for _, h := range threadHashes {
+				if h != "" {
+					_ = b.Delete([]byte(h))
+					updatedCount++
+				}
+			}
+			return nil
+		}
+
+		for _, h := range threadHashes {
+			if h == "" {
+				continue
+			}
+			existingData := b.Get([]byte(h))
+			if existingData != nil {
+				var ms MonitoredSeries
+				if errDec := DecodeGob(existingData, &ms); errDec == nil {
+					ms.Status = status
+					ms.LastUpdated = time.Now()
+					bytesData, errEnc := EncodeGob(ms)
+					if errEnc == nil {
+						_ = b.Put([]byte(h), bytesData)
+						updatedCount++
+					}
+				}
+			}
+		}
+		return nil
+	})
+	return updatedCount, err
+}
+
+func DeleteMonitoredSeries(tx *bolt.Tx, threadHash string) error {
+	return runUpdate(tx, func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("monitored_series"))
+		if b == nil {
+			return nil
+		}
+		return b.Delete([]byte(threadHash))
+	})
+}
+
+func AutoEnrollSeries(tx *bolt.Tx, t *Thread) error {
+	if t == nil || strings.ToLower(t.Type) != "series" || t.ThreadHash == "" {
+		return nil
+	}
+	return runUpdate(tx, func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("monitored_series"))
+		if b == nil {
+			return nil
+		}
+
+		title := t.CleanTitle
+		if title == "" {
+			title = t.RawTitle
+		}
+
+		existingData := b.Get([]byte(t.ThreadHash))
+		if existingData != nil {
+			var ms MonitoredSeries
+			if errDec := DecodeGob(existingData, &ms); errDec == nil {
+				ms.Title = title
+				ms.RawTitle = t.RawTitle
+				// Preserve user state choice (archived/paused). Do NOT force overwrite to active!
+				if t.URL != "" {
+					ms.URL = t.URL
+				}
+				ms.LastUpdated = time.Now()
+				bytesData, _ := EncodeGob(ms)
+				return b.Put([]byte(t.ThreadHash), bytesData)
+			}
+		}
+
+		ms := MonitoredSeries{
+			ThreadHash:  t.ThreadHash,
+			URL:         t.URL,
+			Title:       title,
+			RawTitle:    t.RawTitle,
+			Status:      "active", // Initial default state ONLY for new webseries
+			LastChecked: time.Now(),
+			LastUpdated: time.Now(),
+			CreatedAt:   time.Now(),
+		}
+		bytesData, errEnc := EncodeGob(ms)
+		if errEnc != nil {
+			return errEnc
+		}
+		return b.Put([]byte(t.ThreadHash), bytesData)
+	})
+}
+
+func AutoArchiveInactiveSeries(tx *bolt.Tx, inactivityDays int) (int, error) {
+	archivedCount := 0
+	err := runUpdate(tx, func(tx *bolt.Tx) error {
+		b := tx.Bucket([]byte("monitored_series"))
+		if b == nil {
+			return nil
+		}
+		cutoff := time.Now().AddDate(0, 0, -inactivityDays)
+		c := b.Cursor()
+		for k, v := c.First(); k != nil; k, v = c.Next() {
+			var ms MonitoredSeries
+			if errDec := DecodeGob(v, &ms); errDec == nil {
+				if ms.Status == "active" && ms.LastUpdated.Before(cutoff) {
+					ms.Status = "archived"
+					bytesData, errEnc := EncodeGob(ms)
+					if errEnc == nil {
+						_ = b.Put(k, bytesData)
+						archivedCount++
+					}
+				}
+			}
+		}
+		return nil
+	})
+	return archivedCount, err
 }
 
 // ── FailedThread Operations ──

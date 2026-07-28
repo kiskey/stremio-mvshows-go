@@ -1,5 +1,5 @@
-// Version: 2.4.0
-// Change log: Updated stream regeneration to write composite keys (tmdbID:infohash) matching Proposal 2 architecture and added storage fragmentation percentage metrics.
+// Version: 2.8.2
+// Change log: Updated getThreadInvariantGroupKey to delegate directly to parser.GenerateThreadHashWithURLAndType, enforcing 100% hash parity with live scraper routines.
 
 package main
 
@@ -11,7 +11,6 @@ import (
 	"log"
 	"os"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -39,14 +38,6 @@ func sortStrings(slice []string) {
 	}
 }
 
-func newGenerateThreadHash(title string) string {
-	normalized := strings.ToLower(strings.TrimSpace(title))
-	words := strings.Fields(normalized)
-	normalized = strings.Join(words, " ")
-	h := sha256.Sum256([]byte(normalized))
-	return hex.EncodeToString(h[:])
-}
-
 func formatBytes(bytes int64) string {
 	if bytes < 1024 {
 		return fmt.Sprintf("%d B", bytes)
@@ -55,6 +46,10 @@ func formatBytes(bytes int64) string {
 		return fmt.Sprintf("%.2f KB", float64(bytes)/1024)
 	}
 	return fmt.Sprintf("%.2f MB", float64(bytes)/1024/1024)
+}
+
+func getThreadInvariantGroupKey(t *database.Thread) string {
+	return parser.GenerateThreadHashWithURLAndType(t.RawTitle, t.URL, t.Type)
 }
 
 func main() {
@@ -78,7 +73,7 @@ func main() {
 	}
 	defer db.Close()
 
-	log.Println("Auditing database records...")
+	log.Println("Auditing database records for Topic ID and Clean Title invariant duplicates...")
 	duplicatesMap := make(map[string][]database.Thread)
 	legacyHashCount := 0
 
@@ -92,13 +87,13 @@ func main() {
 
 				if len(t.MagnetURIs) > 0 {
 					oldHash := oldGenerateThreadHash(t.RawTitle, t.MagnetURIs)
-					if string(k) == oldHash && oldHash != newGenerateThreadHash(t.RawTitle) {
+					if string(k) == oldHash && oldHash != getThreadInvariantGroupKey(&t) {
 						legacyHashCount++
 					}
 				}
 
-				newHash := newGenerateThreadHash(t.RawTitle)
-				duplicatesMap[newHash] = append(duplicatesMap[newHash], t)
+				targetHash := getThreadInvariantGroupKey(&t)
+				duplicatesMap[targetHash] = append(duplicatesMap[targetHash], t)
 			}
 		}
 		return nil
@@ -116,7 +111,7 @@ func main() {
 
 	log.Printf("Inspection Complete.\n")
 	log.Printf("  - Legacy Format Hashes Found: %d records\n", legacyHashCount)
-	log.Printf("  - Duplicate Title Groups Detected: %d groups (containing %d redundant rows)\n", len(duplicateTitles), totalRedundantCount)
+	log.Printf("  - Duplicate Title/Topic ID Groups Detected: %d groups (containing %d redundant rows)\n", len(duplicateTitles), totalRedundantCount)
 
 	var orphanedIndexKeys [][]byte
 	_ = db.View(func(tx *bolt.Tx) error {
@@ -234,6 +229,7 @@ func main() {
 		idxB := tx.Bucket([]byte("catalog_index"))
 		threadIdxB := tx.Bucket([]byte("tmdb_thread_index"))
 		idB, _ := tx.CreateBucketIfNotExists([]byte("thread_id_index"))
+		monitoredB, _ := tx.CreateBucketIfNotExists([]byte("monitored_series"))
 		streamsB := tx.Bucket([]byte("streams"))
 		metaB := tx.Bucket([]byte("tmdb_metadata"))
 		magnetB := tx.Bucket([]byte("magnet_cache"))
@@ -265,22 +261,40 @@ func main() {
 
 			keptThread := list[0]
 
-			log.Printf("Processing & Compacting: %q\n", keptThread.RawTitle)
+			log.Printf("Processing & Consolidating Group: %q (Target Hash: %s, Records: %d)\n", keptThread.RawTitle, targetNewHash, len(list))
 
-			if keptThread.ThreadHash != targetNewHash {
-				_ = tb.Delete([]byte(keptThread.ThreadHash))
+			// Collect all physical keys in this group to execute complete old-key sweep
+			var physicalKeysInGroup []string
+			seenMags := make(map[string]bool)
+			var allMergedMags []string
+
+			for _, item := range list {
+				physicalKeysInGroup = append(physicalKeysInGroup, item.ThreadHash)
+				for _, m := range item.MagnetURIs {
+					cleanM := parser.StripTrackersFromMagnet(m)
+					if cleanM != "" && !seenMags[cleanM] {
+						seenMags[cleanM] = true
+						allMergedMags = append(allMergedMags, cleanM)
+					}
+				}
+				if keptThread.URL == "" && item.URL != "" {
+					keptThread.URL = item.URL
+				}
+			}
+			keptThread.MagnetURIs = allMergedMags
+
+			if keptThread.URL != "" {
+				if parser.ExtractTopicID(keptThread.URL) != "" {
+					keptThread.URL = parser.FormatCanonicalTopicURL(keptThread.URL)
+				} else {
+					keptThread.URL = "" // Clear stale proxy endpoint URL so next crawl populates clean forum URL
+				}
 			}
 
 			prTitle := parser.ParseRelease(keptThread.RawTitle, keptThread.Type)
 			if prTitle.IsValid && prTitle.CleanTitle != "" {
 				keptThread.CleanTitle = prTitle.CleanTitle
 			}
-
-			var cleanMags []string
-			for _, m := range keptThread.MagnetURIs {
-				cleanMags = append(cleanMags, parser.StripTrackersFromMagnet(m))
-			}
-			keptThread.MagnetURIs = cleanMags
 
 			if keptThread.ID == 0 {
 				seq, errSeq := tb.NextSequence()
@@ -289,6 +303,7 @@ func main() {
 				}
 			}
 
+			// Save kept thread under targetNewHash
 			keptThread.ThreadHash = targetNewHash
 			bytesData, _ := database.EncodeGob(keptThread)
 			_ = tb.Put([]byte(targetNewHash), bytesData)
@@ -311,21 +326,28 @@ func main() {
 				_ = threadIdxB.Put([]byte(*keptThread.TmdbID), []byte(targetNewHash))
 			}
 
+			if strings.ToLower(keptThread.Type) == "series" && keptThread.Status == "linked" {
+				_ = database.AutoEnrollSeries(tx, &keptThread)
+			}
+
+			// OLD-KEY PURGE SWEEP: Delete all historical raw physical keys except targetNewHash
+			for _, oldKey := range physicalKeysInGroup {
+				if oldKey != targetNewHash {
+					_ = tb.Delete([]byte(oldKey))
+				}
+			}
+
 			for i := 1; i < len(list); i++ {
 				trashThread := list[i]
 
-				log.Printf("  [PRUNING DUPLICATE] Hash=%s (Last Updated: %v)\n", trashThread.ThreadHash, trashThread.UpdatedAt)
+				log.Printf("  [PURGED DUPLICATE RECORD] Hash=%s Title=%q (ID: %d)\n", trashThread.ThreadHash, trashThread.RawTitle, trashThread.ID)
 
-				_ = tb.Delete([]byte(trashThread.ThreadHash))
-				_ = tb.Delete([]byte(targetNewHash + "_" + strconv.Itoa(i)))
-
-				if trashThread.ID > 0 && idB != nil {
+				if trashThread.ID > 0 && trashThread.ID != keptThread.ID && idB != nil {
 					_ = idB.Delete([]byte(fmt.Sprintf("%d", trashThread.ID)))
 				}
 
-				if trashThread.TmdbID != nil {
-					_ = database.DeleteStreamsByTmdbID(tx, *trashThread.TmdbID)
-					_ = threadIdxB.Delete([]byte(*trashThread.TmdbID))
+				if monitoredB != nil && trashThread.ThreadHash != targetNewHash {
+					_ = monitoredB.Delete([]byte(trashThread.ThreadHash))
 				}
 
 				var indexKeysPrune [][]byte
@@ -344,16 +366,40 @@ func main() {
 			}
 		}
 
-		log.Println("Populating high-speed Thread index pointers bucket...")
+		log.Println("Populating high-speed Thread index pointers bucket & Purging Stale Proxy URLs...")
 		threadCursor := tb.Cursor()
 		for k, v := threadCursor.First(); k != nil; k, v = threadCursor.Next() {
 			var t database.Thread
 			if errDec := database.DecodeGob(v, &t); errDec == nil {
+				if t.URL != "" && parser.ExtractTopicID(t.URL) == "" {
+					t.URL = ""
+					bytesData, _ := database.EncodeGob(t)
+					_ = tb.Put(k, bytesData)
+				}
+
 				if t.Status == "linked" && t.TmdbID != nil {
 					_ = threadIdxB.Put([]byte(*t.TmdbID), k)
 				}
 				if idB != nil && t.ID > 0 {
 					_ = idB.Put([]byte(fmt.Sprintf("%d", t.ID)), k)
+				}
+				if strings.ToLower(t.Type) == "series" && t.Status == "linked" {
+					_ = database.AutoEnrollSeries(tx, &t)
+				}
+			}
+		}
+
+		log.Println("Purging Stale Proxy URLs from monitored_series bucket...")
+		if monitoredB != nil {
+			monCursor := monitoredB.Cursor()
+			for k, v := monCursor.First(); k != nil; k, v = monCursor.Next() {
+				var ms database.MonitoredSeries
+				if errDec := database.DecodeGob(v, &ms); errDec == nil {
+					if ms.URL != "" && parser.ExtractTopicID(ms.URL) == "" {
+						ms.URL = ""
+						bytesData, _ := database.EncodeGob(ms)
+						_ = monitoredB.Put(k, bytesData)
+					}
 				}
 			}
 		}

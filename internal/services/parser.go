@@ -1,11 +1,12 @@
-// Version: 1.8.1
-// Change log: Restructured ParseFilePath to prioritize range matching and legacy formats; integrated HTML &nbsp; and Unicode non-breaking space cleanups; enforced strict Year guardrails (1900-2030) on absolute numbering matches; appended untouched/true/hq to parserJunkWords; cleanly removed unused truncateSeriesJunk function. Added a safe filter (isVideoFile and min-size threshold) inside FindBestSeriesFile to prevent non-video clutter assets from generating alphabetical index-shifts.
+// Version: 1.9.8
+// Change log: Implemented unified 2-Tier Invariant Hash Hierarchy (GenerateThreadHashWithURLAndType) with Tier 1 Topic ID hashing and Tier 2 Clean Title + Year invariant fallback for 100% hash parity.
 
 package parser
 
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"net/url"
 	"regexp"
 	"sort"
@@ -111,11 +112,10 @@ type EditionInfo struct {
 // ── Complete Package-Level Pre-compiled Regular Expressions (Zero Alloc Hot Loop) ──
 
 var (
-	// Foundational caching mechanism
 	parseCache   = make(map[string]*ParseResult)
 	parseCacheMu sync.RWMutex
 
-	// Anchor elements and foundational parsing regexes
+	topicIDRegex      = regexp.MustCompile(`(?i)topic\/(\d+)`)
 	epPatternRegex    = regexp.MustCompile(`(?i)(S\d+)?[\s\-_]*\bEP[\s\-_]*[\(\[]?\s*(\d+)\s*[\)\]]?\b`)
 	urlRegex          = regexp.MustCompile(`\b(https?://\S+|www\.\S+\.\w+|[\w.-]+@[\w.-]+)\b`)
 	bracketRegex      = regexp.MustCompile(`\[.*?[^\w\s-].*?\]`)
@@ -127,18 +127,22 @@ var (
 	channelRegex      = regexp.MustCompile(`\b(?:ddp)?\d\.\d(?:\.\d)?\b`)
 	sizeCaptureRegex  = regexp.MustCompile(`(?i)\b\d+(?:\.\d+)?\s*(?:GB|MB|KB)\b`)
 
-	// Custom robust regexes for file path parsing supporting multi-digit episode numbers
-	sXeXRegex         = regexp.MustCompile(`(?i)s(\d+)\s*e(\d+)`)
-	sXepXRegex        = regexp.MustCompile(`(?i)s(\d+)[\s\-_]*ep(?:isode)?[\s\-_]*(\d+)`)
-	epXRegex          = regexp.MustCompile(`(?i)\bep(?:isode)?[\s\-_]*[\(\[]?\s*(\d+)\s*[\)\]]?\b`)
+	sXeXRegex          = regexp.MustCompile(`(?i)s(\d+)\s*e(\d+)`)
+	sXepXRegex         = regexp.MustCompile(`(?i)s(\d+)[\s\-_]*ep(?:isode)?[\s\-_]*(\d+)`)
+	epXRegex           = regexp.MustCompile(`(?i)\bep(?:isode)?[\s\-_]*[\(\[]?\s*(\d+)\s*[\)\]]?\b`)
 	filePathRangeRegex = regexp.MustCompile(`(?i)\b(?:e|ep|episode)?[\s\-_]*[\(\[]?\s*(\d+)\s*(?:-|to)\s*(?:e|ep|episode)?\s*(\d+)\s*[\)\]]?\b`)
 
-	// Standard year limits & checks
-	wrappedYearRegex = regexp.MustCompile(`[\(\[]((?:19|20)\d{2})[\)\]]`)
-	plainYearRegex   = regexp.MustCompile(`\b((?:19|20)\d{2})\b`)
-	yearRe           = regexp.MustCompile(`[\(\[]((?:19|20)\d{2})[\)\]]`)
+	wrappedYearRegex     = regexp.MustCompile(`[\(\[]((?:19|20)\d{2})[\)\]]`)
+	plainYearRegex       = regexp.MustCompile(`\b((?:19|20)\d{2})\b`)
+	yearRe               = regexp.MustCompile(`[\(\[]((?:19|20)\d{2})[\)\]]`)
+	yearRangeParensRegex = regexp.MustCompile(`(?i)[\(\[]((?:19|20)\d{2})\s*[-&,/a-z\s]*(?:(?:19|20)\d{2})?[\)\]]`)
+	plainYearRangeRegex  = regexp.MustCompile(`(?i)\b((?:19|20)\d{2})\s*(?:-|to|and|&)\s*(?:19|20)\d{2}\b`)
 
-	// Sonarr/Radarr Naming Patterns (GAP-001, GAP-002, GAP-004)
+	structuralBoundaryRegex   = regexp.MustCompile(`(?i)\b(?:[Ss]\d{1,2}|EP\s*\(?\d+|Season\s*\d+|Episode\s*\d+|DAY\s*\d+|GRAND\s+FINALE|FINALE|TRUE|2160p|1080p|720p|480p|360p|4k|uhd|bdrip|bluray|blu[-_]?ray|web[-_]?dl|web[-_]?rip|hdrip|dvdrip|hdtv|sdtv|untouched)\b`)
+	boxsetTermsRegex          = regexp.MustCompile(`(?i)\b(?:Duology|Trilogy|Pentalogy|Quadrilogy|Hexalogy|Octology|Anthology|Collection|Boxset)\b`)
+	trailingOrphanTokensRegex = regexp.MustCompile(`(?i)\b(?:TRUE|AND|DAY\s*\d+|GRAND\s+FINALE|FINALE|BDRIP|WEBDL|WEB-DL|HDRIP|DVDRIP|1080P|720P|480P|4K|UHD)\b.*$`)
+	trailingPunctuationRegex  = regexp.MustCompile(`[\s\-_,:&]+$`)
+
 	adjacentRe        = regexp.MustCompile(`(?i)\bs(\d{1,2})e(\d{1,3})\b`)
 	dotSeparatorRe    = regexp.MustCompile(`(?i)\bs(\d{1,2})\.e(\d{1,3})(?:-e(\d{1,3}))?\b`)
 	legacyXRe         = regexp.MustCompile(`(?i)\b(\d{1,2})x(\d{1,3})(?:-(\d{1,3}))?\b`)
@@ -147,7 +151,6 @@ var (
 	absoluteEpRe      = regexp.MustCompile(`\b(\d{1,4})\b`)
 	adjacentRangeRe   = regexp.MustCompile(`(?i)\bs(\d{1,2})e(\d{1,3})-e(\d{1,3})\b`)
 
-	// Language models
 	regionalLanguagePatterns = []struct {
 		Lang string
 		Pat  *regexp.Regexp
@@ -160,7 +163,6 @@ var (
 		{"en", regexp.MustCompile(`(?i)\b(english|eng|en)\b`)},
 	}
 
-	// Boundary truncations
 	truncationRegexes = []*regexp.Regexp{
 		regexp.MustCompile(`(?i)\b(?:s|season|series)?[\s\-_]*\d+[\s\-_]*(?:e|ep|episode)?\s*[\(\[]?\s*\d+.*`),
 		regexp.MustCompile(`(?i)\b(?:s|season|series)[\s\-_]*\d+.*`),
@@ -169,17 +171,14 @@ var (
 		regexp.MustCompile(`[\s\-_]{2,}.*`),
 	}
 
-	// Prefix stripping patterns
 	prefixRe1 = regexp.MustCompile(`(?i)^\s*\[[\w.-]+\]\s*[-:]?\s*`)
 	prefixRe2 = regexp.MustCompile(`(?i)^\s*(?:www\.)?[a-zA-Z0-9-]+(?:\.[a-zA-Z]{2,})+\s*[-:]\s*`)
 	prefixRe3 = regexp.MustCompile(`(?i)^\s*(?:TamilMV|TamilBlasters|1TamilMV|TamilRockers|Isaimini|TamilGun|TamilYogi)\s*(?:\.\w+)?\s*[-:]\s*`)
 
-	// Additional tuning & metadata components
 	forumQualityRe  = regexp.MustCompile(`(?i)\b(2160p|1080p|720p|480p|360p|4k|uhd)\b`)
 	trailingGroupRe = regexp.MustCompile(`(?i)-([a-zA-Z0-9]+)(?:\])?$`)
 	leadingGroupRe  = regexp.MustCompile(`(?i)^\[([a-zA-Z0-9]+)\]`)
 
-	// Quality checks
 	qualityRemuxBDRe = regexp.MustCompile(`(?i)(?:bd|blu[-_]?ray)\s*remux`)
 	qualityRemuxRe   = regexp.MustCompile(`(?i)\bremux\b`)
 	qualityWebDLRe   = regexp.MustCompile(`(?i)\bweb[-_]?dl\b`)
@@ -193,7 +192,6 @@ var (
 	qualityTsRe      = regexp.MustCompile(`(?i)\bts\b`)
 	qualityTcRe      = regexp.MustCompile(`(?i)\b60p\b`)
 
-	// Resolutions
 	res2160pRe = regexp.MustCompile(`(?i)\b(?:2160p|4k|uhd)\b`)
 	res1080pRe = regexp.MustCompile(`(?i)\b1080p\b`)
 	res720pRe  = regexp.MustCompile(`(?i)\b720p\b`)
@@ -201,24 +199,20 @@ var (
 	res576pRe  = regexp.MustCompile(`(?i)\b576p\b`)
 	res360pRe  = regexp.MustCompile(`(?i)\b360p\b`)
 
-	// Modifiers
 	modDvHdr10Re = regexp.MustCompile(`(?i)\bdv\s*hdr10\b`)
 	modDolbyViRe = regexp.MustCompile(`(?i)\bdolby\s*vision\b`)
 	modHdr10PRe  = regexp.MustCompile(`(?i)\bhdr10plus\b`)
 	modHdr10Re   = regexp.MustCompile(`(?i)\bhdr10\b`)
 	modHdrRe     = regexp.MustCompile(`(?i)\bhdr\b`)
 
-	// Multilanguage indicators
 	langMultiRe = regexp.MustCompile(`(?i)\b(?:multi|dual[-_]?audio|multi[-_]?audio)\b`)
 
-	// Edition keywords
 	editionImaxRe      = regexp.MustCompile(`(?i)\bimax\b`)
 	editionExtendedRe  = regexp.MustCompile(`(?i)\bextended\b`)
 	editionDirectorsRe = regexp.MustCompile(`(?i)\bdirector['’]?s\s*cut\b`)
 	editionUnratedRe   = regexp.MustCompile(`(?i)\bunrated\b`)
 	editionRemasterRe  = regexp.MustCompile(`(?i)\bremastered\b`)
 
-	// Special tag patterns
 	specialTagPatterns = map[string]*regexp.Regexp{
 		"PROPER":   regexp.MustCompile(`(?i)\bproper\b`),
 		"REPACK":   regexp.MustCompile(`(?i)\brepack\b`),
@@ -228,39 +222,32 @@ var (
 		"LIMITED":  regexp.MustCompile(`(?i)\blimited\b`),
 	}
 
-	// Series parsing
 	metaSeasonRe   = regexp.MustCompile(`(?i)\b(?:s|season|series)[\s\-_]*(\d+)\b`)
 	metaEpRangeRe  = regexp.MustCompile(`(?i)(?:s\d+)?\s*(?:ep?|episode)[\s\-_]*[\(\[]?\s*(\d+)\s*(?:-|to)\s*(\d+)\s*[\)\]]?`)
 	metaDailyRe    = regexp.MustCompile(`\b(19|20)\d{2}\s*[\.-]?\s*(0[1-9]|1[0-2])\s*[\.-]?\s*(0[1-9]|[12]\d|3[01])\b`)
 	metaAnimeRe    = regexp.MustCompile(`\s+([0-9]{3,4})\s+`)
 	metaSingleEpRe = regexp.MustCompile(`(?i)\b(?:e|ep|episode)[\s\-_]*(\d+)\b`)
 
-	// Codecs
 	videoCodecHevcRe = regexp.MustCompile(`(?i)\b(?:x265|hevc|h\.265)\b`)
 	videoCodecAvcRe  = regexp.MustCompile(`(?i)\b(?:x264|avc|h\.264)\b`)
 	videoCodecAv1Re  = regexp.MustCompile(`(?i)\bav1\b`)
 
-	// Audio elements
 	audioCodecDdpRe    = regexp.MustCompile(`(?i)\b(?:ddp|dd\+|eac3)\b`)
 	audioCodecAc3Re    = regexp.MustCompile(`(?i)\b(?:ac3|dd)\b`)
 	audioCodecDtsRe    = regexp.MustCompile(`(?i)\b(?:dts)\b`)
 	audioCodecTrueHdRe = regexp.MustCompile(`(?i)\b(?:truehd)\b`)
 	audioCodecAacRe    = regexp.MustCompile(`(?i)\b(?:aac)\b`)
 
-	// Channels
 	audioChannels71Re = regexp.MustCompile(`\b7\.1\b`)
 	audioChannels51Re = regexp.MustCompile(`\b5\.1\b`)
 	audioChannels20Re = regexp.MustCompile(`\b2\.0\b`)
 
-	// Fallbacks
 	fallbackYearRegex = regexp.MustCompile(`\s*[\(\[]?\d{4}[\)\]]?`)
 
-	// Pure RE2-compliant punctuation patterns using double-escaped format
 	cleanBracketsRe    = regexp.MustCompile(`[()\[\]{}]`)
 	cleanSpacesPunctRe = regexp.MustCompile("\\s+[,<>\\/\\\\;:'\"|`~!?@$%^*\\_\\-=]\\s+")
 	cleanSuffixPunctRe = regexp.MustCompile(`[':\?,]([sm]\s|\s|$)`)
 
-	// Bound patterns indicators list
 	compiledBoundaryPatterns []*regexp.Regexp
 )
 
@@ -277,6 +264,84 @@ func init() {
 	for _, p := range boundaryPatterns {
 		compiledBoundaryPatterns = append(compiledBoundaryPatterns, regexp.MustCompile(`(?i)`+p))
 	}
+}
+
+// ── Topic ID & Canonical URL Helpers ──
+
+func ExtractTopicID(rawURL string) string {
+	if rawURL == "" {
+		return ""
+	}
+	m := topicIDRegex.FindStringSubmatch(rawURL)
+	if len(m) > 1 {
+		return m[1]
+	}
+	return ""
+}
+
+func FormatCanonicalTopicURL(rawURL string) string {
+	topicID := ExtractTopicID(rawURL)
+	if topicID == "" {
+		return rawURL
+	}
+
+	u, err := url.Parse(rawURL)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return fmt.Sprintf("https://www.1tamilmv.promo/index.php?/forums/topic/%s-a/", topicID)
+	}
+
+	return fmt.Sprintf("%s://%s/index.php?/forums/topic/%s-a/", u.Scheme, u.Host, topicID)
+}
+
+func CleanNormalizedTitle(title string) string {
+	s := strings.ReplaceAll(title, "&", "and")
+	s = strings.ReplaceAll(s, "(", " ")
+	s = strings.ReplaceAll(s, ")", " ")
+	s = strings.ReplaceAll(s, "[", " ")
+	s = strings.ReplaceAll(s, "]", " ")
+	s = strings.ReplaceAll(s, "-", " ")
+	s = strings.ReplaceAll(s, "_", " ")
+	s = strings.ToLower(s)
+	words := strings.Fields(s)
+	return strings.Join(words, " ")
+}
+
+// GenerateThreadHashWithURLAndType implements the unified 2-Tier Invariant Hash Hierarchy:
+// 1. Tier 1 Primary: Topic ID Hash (sha256("topic_" + topicID))
+// 2. Tier 2 Fallback: Clean Title + Year Invariant Hash (sha256("type_year_cleantitle"))
+func GenerateThreadHashWithURLAndType(rawTitle string, threadURL string, contentType string) string {
+	topicID := ExtractTopicID(threadURL)
+	if topicID != "" {
+		h := sha256.Sum256([]byte("topic_" + topicID))
+		return hex.EncodeToString(h[:])
+	}
+
+	if contentType == "" {
+		contentType = "movie"
+	}
+
+	pr := ParseRelease(rawTitle, contentType)
+	cleanTitle := rawTitle
+	yearVal := 0
+
+	if pr != nil && pr.CleanTitle != "" {
+		cleanTitle = pr.CleanTitle
+		yearVal = pr.Year
+	}
+
+	cleanNorm := CleanNormalizedTitle(cleanTitle)
+
+	keyStr := fmt.Sprintf("%s_%d_%s", strings.ToLower(contentType), yearVal, cleanNorm)
+	if yearVal == 0 {
+		keyStr = fmt.Sprintf("%s_%s", strings.ToLower(contentType), cleanNorm)
+	}
+
+	h := sha256.Sum256([]byte(keyStr))
+	return hex.EncodeToString(h[:])
+}
+
+func GenerateThreadHashWithURL(title string, threadURL string) string {
+	return GenerateThreadHashWithURLAndType(title, threadURL, "movie")
 }
 
 // ── Complete Language Parser Mapping ──
@@ -356,7 +421,6 @@ var filtersDef = []struct {
 	{ID: "2160p", GroupID: "quality", Name: "2160p", Positive: `(?i)\b(?:2160p|4k)\b`, Negatives: []string{}},
 }
 
-// Added forum terminology elements to junkwords map (GAP-007)
 var parserJunkWords = map[string]bool{
 	"proper": true, "repack": true, "extended": true, "unrated": true, "remastered": true,
 	"x264": true, "x265": true, "hevc": true, "avc": true, "aac": true, "ac3": true, "dts": true,
@@ -421,8 +485,6 @@ func extractInfohash(magnet string) string {
 	return ""
 }
 
-// ExtractMagnetDisplayName parses raw query parameters directly to prevent strict url.Parse from failing on unescaped spaces or square brackets in TamilMV magnet links.
-// Incorporates direct cleanup rules for both Unicode non-breaking spaces (\u00a0) and literal HTML &nbsp; entities (BUG-003 & GAP-010).
 func ExtractMagnetDisplayName(magnet string) string {
 	magnetClean := strings.ReplaceAll(magnet, "&nbsp;", " ")
 	magnetClean = strings.ReplaceAll(magnetClean, "\u00a0", " ")
@@ -600,7 +662,7 @@ func collapseSpaces(s string) string {
 func SanitizeName(name string) string {
 	s := name
 	s = strings.ReplaceAll(s, "\u00a0", " ")
-	s = strings.ReplaceAll(s, "&nbsp;", " ") // literal HTML &nbsp; entity (BUG-003 & GAP-010)
+	s = strings.ReplaceAll(s, "&nbsp;", " ")
 	s = strings.ReplaceAll(s, "\u200b", " ")
 	s = normalizeEpisodePatterns(s)
 
@@ -646,9 +708,6 @@ func parseEpisodeRange(s string) (int, int, bool) {
 	return 0, 0, false
 }
 
-// Removed dead uncalled truncateSeriesJunk function (GAP-014)
-
-// Check if block contains metadata
 func isMetadataBlock(content string) bool {
 	normalized := strings.ToLower(content)
 	metadataTokens := []string{
@@ -842,8 +901,6 @@ func filterTorrentNoise(title string, originalTitle string) string {
 	return capitalizeTitle(finalTitle)
 }
 
-// ── Overhauled Parsing Framework (Architect-Grade Parity Objects) ──
-
 type TitleExtractor struct{}
 
 func NewTitleExtractor() *TitleExtractor { return &TitleExtractor{} }
@@ -858,8 +915,7 @@ type TitleExtraction struct {
 func (te *TitleExtractor) Extract(rawTitle string, contentType string) (*TitleExtraction, error) {
 	working := stripAllPrefixes(rawTitle)
 	
-	titlePart, year := extractTitleAndYear(working)
-	_ = titlePart
+	_, year := extractTitleAndYear(working)
 
 	yearPos := -1
 	if year > 0 {
@@ -1037,7 +1093,7 @@ func parseForumTitle(title string, contentType string) *ParseResult {
 	var titlePart string
 	var afterPart string
 
-	yearLocs := wrappedYearRegex.FindAllStringSubmatchIndex(title, -1)
+	yearLocs := yearRangeParensRegex.FindAllStringSubmatchIndex(title, -1)
 	if len(yearLocs) > 0 {
 		loc := yearLocs[0]
 		yearStr := title[loc[2]:loc[3]]
@@ -1064,8 +1120,17 @@ func parseForumTitle(title string, contentType string) *ParseResult {
 		titlePart = title
 	}
 
+	// Structural boundary cutoff pass if no year anchor was found
+	if year == 0 {
+		if loc := structuralBoundaryRegex.FindStringIndex(titlePart); loc != nil && loc[0] > 0 {
+			titlePart = strings.TrimSpace(titlePart[:loc[0]])
+		}
+	}
+
 	titlePart = cleanBalancedBrackets(titlePart)
 	titlePart = SanitizeName(titlePart)
+	titlePart = boxsetTermsRegex.ReplaceAllString(titlePart, "")
+	titlePart = cleanTitleOnly(titlePart)
 	titlePart = strings.Trim(titlePart, " .-_[]()/\\")
 
 	searchStr := afterPart
@@ -1182,6 +1247,7 @@ func RobustParseInfo(title string, fallbackSeason int, contentType string) *Pars
 	leftTitleCandidate, extractedYear := extractTitleAndYear(balancedClean)
 	detectedLang := detectRegionalLanguage(title)
 	clean := SanitizeName(leftTitleCandidate)
+	clean = boxsetTermsRegex.ReplaceAllString(clean, "")
 	searchTitle := cleanTitleOnly(clean)
 	fullClean := SanitizeName(balancedClean)
 
@@ -1310,8 +1376,6 @@ func isVideoFile(path string) bool {
 	return strings.HasSuffix(p, ".mkv") || strings.HasSuffix(p, ".mp4") || strings.HasSuffix(p, ".avi") || strings.HasSuffix(p, ".flv") || strings.HasSuffix(p, ".webm") || strings.HasSuffix(p, ".mov")
 }
 
-// ParseFilePath evaluates complex multi-episode and legacy range-based patterns first, falling back to standard single-episode formats.
-// Implements absolute numbering fallbacks with year guardrails to eliminate false positives on release years (BUG-001 & GAP-005).
 func ParseFilePath(path string, fallbackSeason int) *ParseResult {
 	fileName := path
 	if idx := strings.LastIndexAny(path, "/\\"); idx != -1 {
@@ -1323,7 +1387,6 @@ func ParseFilePath(path string, fallbackSeason int) *ParseResult {
 	cleanPath = strings.ReplaceAll(cleanPath, "\u200b", " ")
 	cleanPath = normalizeEpisodePatterns(cleanPath)
 
-	// 1. Evaluate range-based patterns FIRST (BUG-001)
 	if m := adjacentRangeRe.FindStringSubmatch(cleanPath); len(m) > 3 {
 		sVal, _ := strconv.Atoi(m[1])
 		startVal, _ := strconv.Atoi(m[2])
@@ -1369,7 +1432,6 @@ func ParseFilePath(path string, fallbackSeason int) *ParseResult {
 			start, err1 := strconv.Atoi(match[1])
 			end, err2 := strconv.Atoi(match[2])
 			if err1 == nil && err2 == nil && start <= end {
-				// Safety Guardrail: Skip if numeric episode matches represent valid release years (GAP-005)
 				if (start < 1900 || start > 2030) && (end < 1900 || end > 2030) {
 					season := fallbackSeason
 					if sMatch := regexp.MustCompile(`(?i)\bs(\d+)\b`).FindStringSubmatch(cleanPath); len(sMatch) > 1 {
@@ -1387,7 +1449,6 @@ func ParseFilePath(path string, fallbackSeason int) *ParseResult {
 		}
 	}
 
-	// Multi-season pack checks (GAP-004)
 	if m := multiSeasonSRe.FindStringSubmatch(cleanPath); len(m) > 2 {
 		startS, _ := strconv.Atoi(m[1])
 		return &ParseResult{
@@ -1403,7 +1464,6 @@ func ParseFilePath(path string, fallbackSeason int) *ParseResult {
 		}
 	}
 
-	// 2. Fallback to standard single-episode matches
 	if m := adjacentRe.FindStringSubmatch(cleanPath); len(m) > 2 {
 		sVal, _ := strconv.Atoi(m[1])
 		eVal, _ := strconv.Atoi(m[2])
@@ -1488,7 +1548,6 @@ func ParseFilePath(path string, fallbackSeason int) *ParseResult {
 		}
 	}
 
-	// Fallback to absolute numbering (GAP-005 Anime Guardrail)
 	if matches := absoluteEpRe.FindAllStringSubmatch(cleanPath, -1); len(matches) > 0 {
 		for _, m := range matches {
 			val, err := strconv.Atoi(m[1])
@@ -1595,7 +1654,7 @@ func FindBestSeriesFile(candidates []CandidateFile, targetSeason, targetEpisode,
 	}
 
 	for _, c := range candidates {
-		if checkExtra(c.Path) || !isVideoFile(c.Path) || c.Size < 15*1024*1024 { // Guardrail: Ignore non-video and tiny assets
+		if checkExtra(c.Path) || !isVideoFile(c.Path) || c.Size < 15*1024*1024 {
 			continue
 		}
 
@@ -1631,7 +1690,7 @@ func FindBestSeriesFile(candidates []CandidateFile, targetSeason, targetEpisode,
 
 	var seasonMatches []CandidateFile
 	for _, c := range candidates {
-		if checkExtra(c.Path) || !isVideoFile(c.Path) || c.Size < 15*1024*1024 { // Guardrail: Apply same filters on fallback indexing
+		if checkExtra(c.Path) || !isVideoFile(c.Path) || c.Size < 15*1024*1024 {
 			continue
 		}
 
@@ -1674,6 +1733,7 @@ func FindBestSeriesFile(candidates []CandidateFile, targetSeason, targetEpisode,
 	return CandidateFile{}, false
 }
 
+// GenerateThreadHash preserves original function contract (title string, _ []string).
 func GenerateThreadHash(title string, _ []string) string {
 	normalized := strings.ToLower(strings.TrimSpace(title))
 	words := strings.Fields(normalized)
@@ -1757,9 +1817,15 @@ func stripAllPrefixes(s string) string {
 
 func extractTitleAndYear(s string) (title string, year int) {
 	yearEnd := -1
-	if m := yearRe.FindStringSubmatchIndex(s); m != nil {
+	if m := yearRangeParensRegex.FindStringSubmatchIndex(s); m != nil {
 		year, _ = strconv.Atoi(s[m[2]:m[3]])
-		yearEnd = m[1]
+		yearEnd = m[0]
+	} else if m := plainYearRangeRegex.FindStringSubmatchIndex(s); m != nil {
+		year, _ = strconv.Atoi(s[m[2]:m[3]])
+		yearEnd = m[0]
+	} else if m := yearRe.FindStringSubmatchIndex(s); m != nil {
+		year, _ = strconv.Atoi(s[m[2]:m[3]])
+		yearEnd = m[0]
 	}
 
 	if yearEnd > 0 {
@@ -1798,6 +1864,9 @@ func cleanTitleOnly(title string) string {
 	s = cleanSpacesPunctRe.ReplaceAllString(s, " ")
 	s = cleanSuffixPunctRe.ReplaceAllString(s, "$1")
 
+	s = trailingOrphanTokensRegex.ReplaceAllString(s, "")
+	s = trailingPunctuationRegex.ReplaceAllString(s, "")
+
 	s = collapseSpaces(s)
 	s = strings.TrimSpace(s)
 	s = moveArticleToFront(s)
@@ -1817,7 +1886,7 @@ func (rgp *ReleaseGroupParser) ParseReleaseGroup(title string) string {
 func parseReleaseGroup(title string) string {
 	if m := trailingGroupRe.FindStringSubmatch(title); m != nil {
 		group := m[1]
-		if !isMetadataWord(group) {
+		if !IsMetadataWord(group) {
 			return group
 		}
 	}
@@ -2019,19 +2088,21 @@ func (v *Validator) ValidateParsedRelease(pr *ParsedRelease) bool {
 		pr.ValidationError = "Empty title after parsing"
 		return false
 	}
-	if len(pr.CleanTitle) <= 1 {
+	if len(pr.CleanTitle) < 1 {
 		pr.IsValid = false
 		pr.ValidationError = "Title too short"
 		return false
 	}
-	if isAllNumbers(pr.CleanTitle) {
-		pr.IsValid = false
-		pr.ValidationError = "Title is all numbers"
-		return false
+	words := strings.Fields(strings.ToLower(pr.CleanTitle))
+	metadataCount := 0
+	for _, w := range words {
+		if IsMetadataWord(w) {
+			metadataCount++
+		}
 	}
-	if isAllUppercase(pr.CleanTitle) && len(pr.CleanTitle) > 3 {
+	if len(words) > 0 && float64(metadataCount)/float64(len(words)) > 0.5 {
 		pr.IsValid = false
-		pr.ValidationError = "Title appears to be metadata (all caps)"
+		pr.ValidationError = "Title consists predominantly of metadata keywords"
 		return false
 	}
 	if pr.Year != 0 && (pr.Year < 1900 || pr.Year > 2030) {
@@ -2133,8 +2204,6 @@ func parseAudioChannels(s string) string {
 	return ""
 }
 
-// ── Secondary Parsers and Helper Functions ──
-
 func moveArticleToFront(s string) string {
 	articles := []string{", The", ", A", ", An", ", Le", ", La", ", Les", ", L'"}
 	for _, article := range articles {
@@ -2147,7 +2216,7 @@ func moveArticleToFront(s string) string {
 	return s
 }
 
-func isMetadataWord(s string) bool {
+func IsMetadataWord(s string) bool {
 	metadataWords := []string{
 		"proper", "repack", "extended", "unrated", "remastered",
 		"x264", "x265", "hevc", "avc", "aac", "ac3", "dts",
@@ -2162,6 +2231,10 @@ func isMetadataWord(s string) bool {
 		}
 	}
 	return false
+}
+
+func isMetadataWord(s string) bool {
+	return IsMetadataWord(s)
 }
 
 func isAllNumbers(s string) bool {
