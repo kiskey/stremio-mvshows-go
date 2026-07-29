@@ -1,5 +1,5 @@
-// Version: 2.9.0
-// Change log: Updated GetEntityGraphData to return a GraphResponse containing a slice of GraphEntity decks grouped strictly by unique TmdbID/ThreadHash for multi-entity diagnostic visualization.
+// Version: 2.9.1
+// Change log: Fixed Go compiler error (undefined err) in GetEntityGraphData by properly assigning err from runView; verified metadata type normalization and multi-entity graph deck grouping.
 
 package database
 
@@ -977,7 +977,7 @@ func GetEntityGraphData(tx *bolt.Tx, query string, contentType string) (*GraphRe
 	entityKeysOrder := []string{}
 	seenEntityKeys := make(map[string]bool)
 
-	_ = runView(tx, func(tx *bolt.Tx) error {
+	err := runView(tx, func(tx *bolt.Tx) error {
 		tb := tx.Bucket([]byte("threads"))
 		metaB := tx.Bucket([]byte("tmdb_metadata"))
 		locksB := tx.Bucket([]byte("debrid_cache_locks"))
