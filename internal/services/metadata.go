@@ -1,5 +1,5 @@
-// Version: 1.5.0
-// Change log: Integrated Ingest-Time Cinemeta Fallback Engine in GetByID using 4-Factor Deterministic Selection Engine, firing if and only if TMDB external_ids returns null/empty imdb_id while reusing calculateScore and OverlapCoefficient.
+// Version: 1.6.0
+// Change log: Standardized media type normalization, enforced strict type isolation in Cinemeta/TMDB lookups, and established IMDb tt... canonical primary key supremacy.
 
 package metadata
 
@@ -22,6 +22,20 @@ import (
 	"golang.org/x/net/http2"
 )
 
+// NormalizeMediaType standardizes media type representations across TMDB ("tv", "movie") and Stremio/Bbolt ("series", "movie").
+func NormalizeMediaType(input string) string {
+	s := strings.ToLower(strings.TrimSpace(input))
+	if s == "tv" || s == "series" || s == "tvshow" || s == "show" {
+		return "series"
+	}
+	return "movie"
+}
+
+// IsTypeMatch asserts whether two media type representations match strictly.
+func IsTypeMatch(typeA, typeB string) bool {
+	return NormalizeMediaType(typeA) == NormalizeMediaType(typeB)
+}
+
 type TmdbResult struct {
 	TmdbID      string                 `json:"tmdb_id"`
 	ImdbID      string                 `json:"imdb_id"`
@@ -29,6 +43,7 @@ type TmdbResult struct {
 	Year        int                    `json:"year"`
 	Poster      string                 `json:"poster"`
 	Description string                 `json:"description"`
+	Type        string                 `json:"type"`
 	RawData     map[string]interface{} `json:"raw_data"`
 }
 
@@ -142,12 +157,9 @@ func (t *TMDBClient) doRequestWithRetry(req *http.Request, dest interface{}) err
 }
 
 func (t *TMDBClient) GetByImdbIDFromCinemeta(imdbID string, contentType string) (*TmdbResult, error) {
-	mediaType := "movie"
-	if strings.ToLower(contentType) == "series" {
-		mediaType = "series"
-	}
+	targetType := NormalizeMediaType(contentType)
 
-	urlStr := fmt.Sprintf("https://v3-cinemeta.strem.io/meta/%s/%s.json", mediaType, imdbID)
+	urlStr := fmt.Sprintf("https://v3-cinemeta.strem.io/meta/%s/%s.json", targetType, imdbID)
 	req, err := http.NewRequestWithContext(context.Background(), "GET", urlStr, nil)
 	if err != nil {
 		return nil, err
@@ -160,6 +172,12 @@ func (t *TMDBClient) GetByImdbIDFromCinemeta(imdbID string, contentType string) 
 
 	if res.Meta.ID == "" {
 		return nil, fmt.Errorf("cinemeta metadata not found for ID: %s", imdbID)
+	}
+
+	// STRICT MEDIA TYPE ISOLATION GUARDRAIL
+	resolvedType := NormalizeMediaType(res.Meta.Type)
+	if resolvedType != targetType {
+		return nil, fmt.Errorf("cinemeta type mismatch: expected %s, got %s for ID %s", targetType, resolvedType, imdbID)
 	}
 
 	year := 0
@@ -186,12 +204,13 @@ func (t *TMDBClient) GetByImdbIDFromCinemeta(imdbID string, contentType string) 
 	}
 
 	return &TmdbResult{
-		TmdbID:      res.Meta.ID,
+		TmdbID:      res.Meta.ID, // Canonical tt... ID
 		ImdbID:      res.Meta.ID,
 		Title:       res.Meta.Name,
 		Year:        year,
 		Poster:      res.Meta.Poster,
 		Description: res.Meta.Description,
+		Type:        resolvedType,
 		RawData:     rawData,
 	}, nil
 }
@@ -269,6 +288,7 @@ func stripYearArtifact(title string) string {
 
 // SearchWithAliases executes variant matching and tries &/and, moved articles, etc.
 func (t *TMDBClient) SearchWithAliases(title string, year int, contentType string) (*TmdbResult, error) {
+	targetType := NormalizeMediaType(contentType)
 	variants := []string{title}
 
 	if strings.HasPrefix(strings.ToLower(title), "the ") {
@@ -285,7 +305,7 @@ func (t *TMDBClient) SearchWithAliases(title string, year int, contentType strin
 	bestScore := -1.0
 
 	for _, variant := range variants {
-		result, err := t.Search(variant, year, contentType)
+		result, err := t.Search(variant, year, targetType)
 		if err == nil && result != nil {
 			score := calculateScore(title, year, result.Title, result.Year)
 			if score > bestScore {
@@ -300,7 +320,7 @@ func (t *TMDBClient) SearchWithAliases(title string, year int, contentType strin
 	}
 
 	// Direct search fallback
-	return t.Search(title, year, contentType)
+	return t.Search(title, year, targetType)
 }
 
 func (t *TMDBClient) Search(title string, year int, contentType string) (*TmdbResult, error) {
@@ -308,22 +328,26 @@ func (t *TMDBClient) Search(title string, year int, contentType string) (*TmdbRe
 		return nil, fmt.Errorf("TMDB API key is not configured")
 	}
 
+	targetType := NormalizeMediaType(contentType)
 	cleanTitle := stripYearArtifact(title)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	cand, score, err := t.executeSearch(ctx, cleanTitle, year, contentType)
+	cand, score, err := t.executeSearch(ctx, cleanTitle, year, targetType)
 	if err != nil || cand == nil || score < 40.0 {
-		return nil, fmt.Errorf("no metadata match met similarity threshold on requested content type: %s", contentType)
+		return nil, fmt.Errorf("no metadata match met similarity threshold on requested content type: %s", targetType)
 	}
 
 	candID := fmt.Sprintf("%.0f", cand.ID)
 
-	tmdbRaw, errTmdb := t.GetByID(candID, contentType)
+	tmdbRaw, errTmdb := t.GetByID(candID, targetType)
 	if errTmdb == nil && tmdbRaw.ImdbID != "" {
-		cinemetaResult, errCinemeta := t.GetByImdbIDFromCinemeta(tmdbRaw.ImdbID, contentType)
+		cinemetaResult, errCinemeta := t.GetByImdbIDFromCinemeta(tmdbRaw.ImdbID, targetType)
 		if errCinemeta == nil {
+			if tmdbRaw.TmdbID != "" {
+				cinemetaResult.TmdbID = tmdbRaw.TmdbID
+			}
 			return cinemetaResult, nil
 		}
 	}
@@ -335,8 +359,9 @@ func (t *TMDBClient) Search(title string, year int, contentType string) (*TmdbRe
 }
 
 func (t *TMDBClient) executeSearch(ctx context.Context, title string, year int, contentType string) (*tmdbSearchResult, float64, error) {
+	targetType := NormalizeMediaType(contentType)
 	endpoint := "https://api.themoviedb.org/3/search/movie"
-	if strings.ToLower(contentType) == "series" {
+	if targetType == "series" {
 		endpoint = "https://api.themoviedb.org/3/search/tv"
 	}
 
@@ -350,7 +375,7 @@ func (t *TMDBClient) executeSearch(ctx context.Context, title string, year int, 
 	q.Add("query", title)
 	q.Add("include_adult", "false")
 	if year > 0 {
-		if strings.ToLower(contentType) == "series" {
+		if targetType == "series" {
 			q.Add("first_air_date_year", strconv.Itoa(year))
 		} else {
 			q.Add("primary_release_year", strconv.Itoa(year))
@@ -407,46 +432,68 @@ func (t *TMDBClient) GetByID(id string, contentType string) (*TmdbResult, error)
 		return nil, fmt.Errorf("TMDB API key is not configured")
 	}
 
-	mediaType := "movie"
-	if strings.ToLower(contentType) == "series" {
-		mediaType = "tv"
+	targetType := NormalizeMediaType(contentType)
+	tmdbMediaType := "movie"
+	if targetType == "series" {
+		tmdbMediaType = "tv"
 	}
 
 	ctx := context.Background()
 
+	// 1. If ID is an IMDb ID (tt...)
 	if strings.HasPrefix(id, "tt") {
-		cinemetaResult, errCinemeta := t.GetByImdbIDFromCinemeta(id, contentType)
+		// Attempt Cinemeta lookup first
+		cinemetaResult, errCinemeta := t.GetByImdbIDFromCinemeta(id, targetType)
 		if errCinemeta == nil {
 			return cinemetaResult, nil
 		}
 
+		// Fallback to TMDB Find API
 		findURL := fmt.Sprintf("https://api.themoviedb.org/3/find/%s?api_key=%s&external_source=imdb_id", id, t.apiKey)
 		reqFind, _ := http.NewRequestWithContext(ctx, "GET", findURL, nil)
 		var findData map[string]interface{}
+
+		numericID := ""
 		if errFind := t.doRequestWithRetry(reqFind, &findData); errFind == nil {
 			resultsKey := "movie_results"
-			if mediaType == "tv" {
+			otherKey := "tv_results"
+			if targetType == "series" {
 				resultsKey = "tv_results"
+				otherKey = "movie_results"
 			}
+
+			// Reject cross-type matches
+			if otherResults, ok := findData[otherKey].([]interface{}); ok && len(otherResults) > 0 {
+				if targetResults, ok := findData[resultsKey].([]interface{}); !ok || len(targetResults) == 0 {
+					return nil, fmt.Errorf("type mismatch: ID %s is a %s on TMDB, expected %s", id, otherKey, resultsKey)
+				}
+			}
+
 			if results, ok := findData[resultsKey].([]interface{}); ok && len(results) > 0 {
 				if first, ok := results[0].(map[string]interface{}); ok {
-					if numericID, ok := first["id"].(float64); ok {
-						id = fmt.Sprintf("%.0f", numericID)
+					if num, ok := first["id"].(float64); ok {
+						numericID = fmt.Sprintf("%.0f", num)
 					}
 				}
 			}
 		}
+
+		if numericID == "" {
+			return nil, fmt.Errorf("failed to resolve IMDb ID %s on TMDB for type %s", id, targetType)
+		}
+		id = numericID
 	}
 
-	urlStr := fmt.Sprintf("https://api.themoviedb.org/3/%s/%s?api_key=%s", mediaType, id, t.apiKey)
+	// 2. Query TMDB using numeric ID
+	urlStr := fmt.Sprintf("https://api.themoviedb.org/3/%s/%s?api_key=%s", tmdbMediaType, id, t.apiKey)
 	req, _ := http.NewRequestWithContext(ctx, "GET", urlStr, nil)
 
 	var data map[string]interface{}
 	if err := t.doRequestWithRetry(req, &data); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("TMDB %s lookup failed for ID %s: %w", tmdbMediaType, id, err)
 	}
 
-	urlExt := fmt.Sprintf("https://api.themoviedb.org/3/%s/%s/external_ids?api_key=%s", mediaType, id, t.apiKey)
+	urlExt := fmt.Sprintf("https://api.themoviedb.org/3/%s/%s/external_ids?api_key=%s", tmdbMediaType, id, t.apiKey)
 	reqExt, _ := http.NewRequestWithContext(ctx, "GET", urlExt, nil)
 	var extData map[string]interface{}
 	_ = t.doRequestWithRetry(reqExt, &extData)
@@ -467,11 +514,9 @@ func (t *TMDBClient) GetByID(id string, contentType string) (*TmdbResult, error)
 		year, _ = strconv.Atoi(dateStr[:4])
 	}
 
-	// ── INGEST-TIME CINEMETA FALLBACK ENGINE ──
-	// Executes IF AND ONLY IF TMDB external_ids returned null/empty imdb_id
+	// Ingest-Time Cinemeta Fallback
 	if imdbID == "" && title != "" {
 		if cinemetaCandidates, errCine := t.SearchCinemeta(title); errCine == nil && len(cinemetaCandidates) > 0 {
-			targetType := strings.ToLower(strings.TrimSpace(contentType))
 			normTargetTitle := NormalizeTitleForMatching(title)
 
 			type scoredCand struct {
@@ -482,8 +527,7 @@ func (t *TMDBClient) GetByID(id string, contentType string) (*TmdbResult, error)
 			var validCandidates []scoredCand
 
 			for _, item := range cinemetaCandidates {
-				// Factor 1: Strict Media Type Isolation
-				if targetType != "" && strings.ToLower(strings.TrimSpace(item.Type)) != targetType {
+				if !IsTypeMatch(item.Type, targetType) {
 					continue
 				}
 
@@ -492,10 +536,7 @@ func (t *TMDBClient) GetByID(id string, contentType string) (*TmdbResult, error)
 					candYear, _ = strconv.Atoi(item.ReleaseInfo[:4])
 				}
 
-				// Leverage existing calculateScore function
 				baseScore := calculateScore(title, year, item.Name, candYear)
-
-				// Factor 2: Exact Normalized Title Identity Bonus (+20.0)
 				normCandTitle := NormalizeTitleForMatching(item.Name)
 				if normTargetTitle != "" && normTargetTitle == normCandTitle {
 					baseScore += 20.0
@@ -510,34 +551,37 @@ func (t *TMDBClient) GetByID(id string, contentType string) (*TmdbResult, error)
 				})
 
 				topScore := validCandidates[0].score
-
-				// Factor 3: Dominant Winner Threshold (S1 >= 50.0)
 				if topScore >= 50.0 {
 					isWinner := true
-
-					// Factor 4: Score Delta Margin Guardrail (S1 - S2 >= 8.0)
 					if len(validCandidates) > 1 {
 						runnerUpScore := validCandidates[1].score
 						if (topScore - runnerUpScore) < 8.0 {
-							isWinner = false // Ambiguous/contested tie ➔ Reject to avoid mislinks
+							isWinner = false
 						}
 					}
 
 					if isWinner {
-						imdbID = validCandidates[0].item.ID // Assigns official "tt..." ID
+						imdbID = validCandidates[0].item.ID
 					}
 				}
 			}
 		}
 	}
 
+	// CANONICAL ID RULE: Prefer IMDb tt... ID as primary TmdbID if available
+	canonicalID := id
+	if imdbID != "" {
+		canonicalID = imdbID
+	}
+
 	return &TmdbResult{
-		TmdbID:      id,
+		TmdbID:      canonicalID,
 		ImdbID:      imdbID,
 		Title:       title,
 		Year:        year,
 		Poster:      "",
 		Description: getMapString(data, "overview"),
+		Type:        targetType,
 		RawData:     data,
 	}, nil
 }
@@ -662,7 +706,7 @@ func calculateScore(targetTitle string, targetYear int, candidateTitle string, c
 	}
 
 	titleOverlap := OverlapCoefficient(normTarget, normCandidate)
-	if titleOverlap < 0.18 { // Guardrail: Prevent unrelated titles from matching purely on exact-year criteria
+	if titleOverlap < 0.18 {
 		return titleOverlap * 60.0
 	}
 	titleScore := titleOverlap * 60.0
