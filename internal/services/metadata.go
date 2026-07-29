@@ -1,5 +1,5 @@
-// Version: 1.6.0
-// Change log: Standardized media type normalization, enforced strict type isolation in Cinemeta/TMDB lookups, and established IMDb tt... canonical primary key supremacy.
+// Version: 1.7.0
+// Change log: Upgraded OverlapCoefficient to the Sørensen–Dice Coefficient to penalize title length discrepancies and eliminate false positive substring matches (e.g. "The Boys" matching "The Beach Boys").
 
 package metadata
 
@@ -634,11 +634,13 @@ func OverlapCoefficient(s1, s2 string) float64 {
 		}
 	}
 
-	minSize := len(bg1)
-	if len(bg2) < minSize {
-		minSize = len(bg2)
+	totalSize := len(bg1) + len(bg2)
+	if totalSize == 0 {
+		return 0.0
 	}
-	return float64(intersection) / float64(minSize)
+
+	// Sørensen–Dice Coefficient Formula: 2 * Intersection / (len1 + len2)
+	return (2.0 * float64(intersection)) / float64(totalSize)
 }
 
 var homoglyphClasses = map[rune][]rune{
