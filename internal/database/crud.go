@@ -1,5 +1,5 @@
-// Version: 2.8.0
-// Change log: Integrated metadata.NormalizeMediaType across local pre-lookup, graph visualizer, and series auto-enrollment; updated GetEntityGraphData to support canonical tt... primary keys.
+// Version: 2.9.0
+// Change log: Updated GetEntityGraphData to return a GraphResponse containing a slice of GraphEntity decks grouped strictly by unique TmdbID/ThreadHash for multi-entity diagnostic visualization.
 
 package database
 
@@ -91,22 +91,18 @@ func FindLinkedThreadByTitleYearType(tx *bolt.Tx, title string, year int, mediaT
 		for k, v := c.First(); k != nil; k, v = c.Next() {
 			var t Thread
 			if errDec := DecodeGob(v, &t); errDec == nil {
-				// Factor 5: Status & TmdbID Prerequisite
 				if t.Status != "linked" || t.TmdbID == nil || *t.TmdbID == "" {
 					continue
 				}
 
-				// Factor 1: Strict Media Type Isolation
 				if metadata.NormalizeMediaType(t.Type) != targetType {
 					continue
 				}
 
-				// Factor 2: Exact Year Alignment
 				if t.Year == nil || *t.Year != year {
 					continue
 				}
 
-				// Factor 3: Exact Normalized Title Match
 				normStoredTitle := metadata.NormalizeTitleForMatching(t.CleanTitle)
 				if normStoredTitle == "" {
 					normStoredTitle = metadata.NormalizeTitleForMatching(t.RawTitle)
@@ -230,7 +226,6 @@ func CreateOrUpdateThread(tx *bolt.Tx, data *Thread) error {
 					data.URL = oldThread.URL
 				}
 
-				// Merge and deduplicate magnet URIs on thread updates
 				if len(oldThread.MagnetURIs) > 0 {
 					seenMags := make(map[string]bool)
 					var merged []string
@@ -446,7 +441,7 @@ func GetRecentLinkedThreadsPaginated(offset, limit int) ([]Thread, error) {
 	return list[offset:end], err
 }
 
-// ── Stream CRUD Operations (Composite Key Architecture: tmdbID:infohash) ──
+// ── Stream CRUD Operations ──
 
 var streamsQualityRank = map[string]int{
 	"4K":    1, "2160P": 1, "2160p": 1,
@@ -909,6 +904,10 @@ func DeleteDebridCacheLock(hash string) error {
 
 // ── Panel G: Entity Relation Graph Data Traversal ──
 
+type GraphResponse struct {
+	Entities []GraphEntity `json:"entities"`
+}
+
 type GraphEntity struct {
 	Meta struct {
 		TmdbID    string `json:"tmdb_id"`
@@ -948,7 +947,7 @@ type GraphStream struct {
 	Locked   bool   `json:"is_locked"`
 }
 
-func GetEntityGraphData(tx *bolt.Tx, query string, contentType string) (*GraphEntity, error) {
+func GetEntityGraphData(tx *bolt.Tx, query string, contentType string) (*GraphResponse, error) {
 	q := strings.TrimSpace(query)
 	if q == "" {
 		return nil, fmt.Errorf("query parameter is required")
@@ -957,11 +956,7 @@ func GetEntityGraphData(tx *bolt.Tx, query string, contentType string) (*GraphEn
 	normQuery := metadata.NormalizeTitleForMatching(q)
 	mediaTypeFilter := metadata.NormalizeMediaType(contentType)
 
-	graph := &GraphEntity{}
-	var matchedTmdbID string
-	var matchedImdbID string
-	var primaryTitle string
-	var primaryYear int
+	resp := &GraphResponse{Entities: []GraphEntity{}}
 
 	monitoredMap := make(map[string]string)
 	_ = runView(tx, func(tx *bolt.Tx) error {
@@ -978,29 +973,43 @@ func GetEntityGraphData(tx *bolt.Tx, query string, contentType string) (*GraphEn
 		return nil
 	})
 
-	err := runView(tx, func(tx *bolt.Tx) error {
+	entityThreadsMap := make(map[string][]Thread)
+	entityKeysOrder := []string{}
+	seenEntityKeys := make(map[string]bool)
+
+	_ = runView(tx, func(tx *bolt.Tx) error {
 		tb := tx.Bucket([]byte("threads"))
 		metaB := tx.Bucket([]byte("tmdb_metadata"))
 		locksB := tx.Bucket([]byte("debrid_cache_locks"))
 		streamsB := tx.Bucket([]byte("streams"))
 
-		if metaB != nil {
-			metaData := metaB.Get([]byte(q))
-			if metaData != nil {
-				var m TmdbMetadata
-				if errDec := DecodeGob(metaData, &m); errDec == nil {
-					matchedTmdbID = m.TmdbID
-					if m.ImdbID != nil {
-						matchedImdbID = *m.ImdbID
+		if tb == nil {
+			return nil
+		}
+
+		// 1. Direct ID Lookup (tt... or numeric TMDB ID)
+		if strings.HasPrefix(q, "tt") || (len(q) > 0 && q[0] >= '0' && q[0] <= '9') {
+			c := tb.Cursor()
+			for k, v := c.First(); k != nil; k, v = c.Next() {
+				var t Thread
+				if errDec := DecodeGob(v, &t); errDec == nil {
+					if mediaTypeFilter != "" && mediaTypeFilter != "all" && metadata.NormalizeMediaType(t.Type) != mediaTypeFilter {
+						continue
 					}
-					if m.Year != nil {
-						primaryYear = *m.Year
+					if t.TmdbID != nil && *t.TmdbID == q {
+						groupKey := *t.TmdbID
+						if !seenEntityKeys[groupKey] {
+							seenEntityKeys[groupKey] = true
+							entityKeysOrder = append(entityKeysOrder, groupKey)
+						}
+						entityThreadsMap[groupKey] = append(entityThreadsMap[groupKey], t)
 					}
 				}
 			}
 		}
 
-		if tb != nil {
+		// 2. Text Search: Scan all matching threads and group by unique TmdbID/ThreadHash
+		if len(entityKeysOrder) == 0 {
 			c := tb.Cursor()
 			for k, v := c.First(); k != nil; k, v = c.Next() {
 				var t Thread
@@ -1009,108 +1018,151 @@ func GetEntityGraphData(tx *bolt.Tx, query string, contentType string) (*GraphEn
 						continue
 					}
 
-					match := false
-					if strings.HasPrefix(q, "tt") && t.TmdbID != nil {
-						if (matchedTmdbID != "" && *t.TmdbID == matchedTmdbID) || *t.TmdbID == q {
-							match = true
-						}
-					} else if matchedTmdbID != "" && t.TmdbID != nil && *t.TmdbID == matchedTmdbID {
-						match = true
-					} else {
-						normClean := metadata.NormalizeTitleForMatching(t.CleanTitle)
-						normRaw := metadata.NormalizeTitleForMatching(t.RawTitle)
-						if normClean == normQuery || normRaw == normQuery || strings.Contains(normClean, normQuery) || strings.Contains(normRaw, normQuery) {
-							match = true
-							if matchedTmdbID == "" && t.TmdbID != nil {
-								matchedTmdbID = *t.TmdbID
-							}
-						}
-					}
+					normClean := metadata.NormalizeTitleForMatching(t.CleanTitle)
+					normRaw := metadata.NormalizeTitleForMatching(t.RawTitle)
 
-					if match {
-						if primaryTitle == "" {
-							primaryTitle = t.CleanTitle
-							if primaryTitle == "" {
-								primaryTitle = t.RawTitle
-							}
-						}
-						if primaryYear == 0 && t.Year != nil {
-							primaryYear = *t.Year
+					if normClean == normQuery || normRaw == normQuery || strings.Contains(normClean, normQuery) || strings.Contains(normRaw, normQuery) {
+						groupKey := t.ThreadHash
+						if t.TmdbID != nil && *t.TmdbID != "" {
+							groupKey = *t.TmdbID
 						}
 
-						mStatus := "none"
-						if val, ok := monitoredMap[t.ThreadHash]; ok {
-							mStatus = val
+						if !seenEntityKeys[groupKey] {
+							seenEntityKeys[groupKey] = true
+							entityKeysOrder = append(entityKeysOrder, groupKey)
 						}
-
-						graph.Threads = append(graph.Threads, GraphThread{
-							ID:          t.ID,
-							ThreadHash:  t.ThreadHash,
-							RawTitle:    t.RawTitle,
-							CleanTitle:  t.CleanTitle,
-							Status:      t.Status,
-							Type:        t.Type,
-							Catalog:     t.Catalog,
-							URL:         t.URL,
-							MagnetCount: len(t.MagnetURIs),
-							Monitored:   mStatus,
-							LastSeen:    t.LastSeen,
-							UpdatedAt:   t.UpdatedAt,
-						})
+						entityThreadsMap[groupKey] = append(entityThreadsMap[groupKey], t)
 					}
 				}
 			}
 		}
 
-		if matchedTmdbID != "" && metaB != nil {
-			data := metaB.Get([]byte(matchedTmdbID))
-			if data != nil {
-				var m TmdbMetadata
-				if errDec := DecodeGob(data, &m); errDec == nil {
-					if m.ImdbID != nil && *m.ImdbID != "" {
-						matchedImdbID = *m.ImdbID
-					}
-					if m.Year != nil {
-						primaryYear = *m.Year
-					}
-				}
+		// 3. For each unique group key, build a distinct GraphEntity deck
+		for _, groupKey := range entityKeysOrder {
+			threads := entityThreadsMap[groupKey]
+			if len(threads) == 0 {
+				continue
 			}
-		}
 
-		// Traverse streams using matched ID or canonical tt... ID
-		lookupStreamIDs := []string{}
-		if matchedTmdbID != "" { lookupStreamIDs = append(lookupStreamIDs, matchedTmdbID) }
-		if matchedImdbID != "" && matchedImdbID != matchedTmdbID { lookupStreamIDs = append(lookupStreamIDs, matchedImdbID) }
+			entity := GraphEntity{}
+			primaryThread := threads[0]
 
-		if len(lookupStreamIDs) > 0 && streamsB != nil {
-			seenStreamKeys := make(map[string]bool)
+			matchedTmdbID := ""
+			if primaryThread.TmdbID != nil {
+				matchedTmdbID = *primaryThread.TmdbID
+			}
+			matchedImdbID := ""
+			primaryTitle := primaryThread.CleanTitle
+			if primaryTitle == "" {
+				primaryTitle = primaryThread.RawTitle
+			}
+			primaryYear := 0
+			if primaryThread.Year != nil {
+				primaryYear = *primaryThread.Year
+			}
 
-			for _, targetID := range lookupStreamIDs {
-				prefix := []byte(targetID + ":")
-				sCursor := streamsB.Cursor()
-				for k, v := sCursor.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix); k, v = sCursor.Next() {
-					if seenStreamKeys[string(k)] { continue }
-					seenStreamKeys[string(k)] = true
-
-					var s Stream
-					if errDec := DecodeGob(v, &s); errDec == nil {
-						isLocked := false
-						if locksB != nil && locksB.Get([]byte(strings.ToLower(s.Infohash))) != nil {
-							isLocked = true
+			if matchedTmdbID != "" && metaB != nil {
+				metaData := metaB.Get([]byte(matchedTmdbID))
+				if metaData != nil {
+					var m TmdbMetadata
+					if errDec := DecodeGob(metaData, &m); errDec == nil {
+						if m.ImdbID != nil && *m.ImdbID != "" {
+							matchedImdbID = *m.ImdbID
 						}
-						graph.Streams = append(graph.Streams, GraphStream{
-							ID:       s.ID,
-							TmdbID:   s.TmdbID,
-							Season:   s.Season,
-							Episode:  s.Episode,
-							Infohash: s.Infohash,
-							Quality:  s.Quality,
-							Language: s.Language,
-							Locked:   isLocked,
-						})
+						if m.Year != nil {
+							primaryYear = *m.Year
+						}
 					}
 				}
 			}
+
+			for _, t := range threads {
+				mStatus := "none"
+				if val, ok := monitoredMap[t.ThreadHash]; ok {
+					mStatus = val
+				}
+
+				entity.Threads = append(entity.Threads, GraphThread{
+					ID:          t.ID,
+					ThreadHash:  t.ThreadHash,
+					RawTitle:    t.RawTitle,
+					CleanTitle:  t.CleanTitle,
+					Status:      t.Status,
+					Type:        t.Type,
+					Catalog:     t.Catalog,
+					URL:         t.URL,
+					MagnetCount: len(t.MagnetURIs),
+					Monitored:   mStatus,
+					LastSeen:    t.LastSeen,
+					UpdatedAt:   t.UpdatedAt,
+				})
+			}
+
+			lookupIDs := []string{}
+			if matchedTmdbID != "" { lookupIDs = append(lookupIDs, matchedTmdbID) }
+			if matchedImdbID != "" && matchedImdbID != matchedTmdbID { lookupIDs = append(lookupIDs, matchedImdbID) }
+
+			if len(lookupIDs) > 0 && streamsB != nil {
+				seenStreamKeys := make(map[string]bool)
+				for _, targetID := range lookupIDs {
+					prefix := []byte(targetID + ":")
+					sCursor := streamsB.Cursor()
+					for sk, sv := sCursor.Seek(prefix); sk != nil && bytes.HasPrefix(sk, prefix); sk, sv = sCursor.Next() {
+						if seenStreamKeys[string(sk)] { continue }
+						seenStreamKeys[string(sk)] = true
+
+						var s Stream
+						if errDec := DecodeGob(sv, &s); errDec == nil {
+							isLocked := false
+							if locksB != nil && locksB.Get([]byte(strings.ToLower(s.Infohash))) != nil {
+								isLocked = true
+							}
+							entity.Streams = append(entity.Streams, GraphStream{
+								ID:       s.ID,
+								TmdbID:   s.TmdbID,
+								Season:   s.Season,
+								Episode:  s.Episode,
+								Infohash: s.Infohash,
+								Quality:  s.Quality,
+								Language: s.Language,
+								Locked:   isLocked,
+							})
+						}
+					}
+				}
+			}
+
+			entity.Meta.TmdbID = matchedTmdbID
+			entity.Meta.ImdbID = matchedImdbID
+			entity.Meta.Title = primaryTitle
+			entity.Meta.Year = primaryYear
+
+			if matchedTmdbID != "" {
+				if matchedImdbID != "" || strings.HasPrefix(matchedTmdbID, "tt") {
+					entity.Meta.GapStatus = "HEALTHY"
+					entity.Meta.GapReason = "100% Verified Link: Both TMDB ID and IMDb ID mapped cleanly."
+				} else {
+					entity.Meta.GapStatus = "MISSING_IMDB_GAP"
+					entity.Meta.GapReason = "IMDb Pointer Gap: TMDB ID present, but secondary IMDb ID pointer missing."
+				}
+			} else {
+				hasPending := false
+				for _, th := range entity.Threads {
+					if th.Status == "pending_tmdb" {
+						hasPending = true
+						break
+					}
+				}
+				if hasPending {
+					entity.Meta.GapStatus = "PENDING_MATCH"
+					entity.Meta.GapReason = "Pending Matching Pool: Thread in pending_tmdb queue awaiting linking."
+				} else {
+					entity.Meta.GapStatus = "UNLINKED"
+					entity.Meta.GapReason = "Unlinked Thread: Thread present in storage without assigned TMDB ID."
+				}
+			}
+
+			resp.Entities = append(resp.Entities, entity)
 		}
 
 		return nil
@@ -1120,38 +1172,5 @@ func GetEntityGraphData(tx *bolt.Tx, query string, contentType string) (*GraphEn
 		return nil, err
 	}
 
-	graph.Meta.TmdbID = matchedTmdbID
-	graph.Meta.ImdbID = matchedImdbID
-	graph.Meta.Title = primaryTitle
-	graph.Meta.Year = primaryYear
-
-	if matchedTmdbID != "" {
-		if matchedImdbID != "" || strings.HasPrefix(matchedTmdbID, "tt") {
-			graph.Meta.GapStatus = "HEALTHY"
-			graph.Meta.GapReason = "100% Verified Link: Both TMDB ID and IMDb ID mapped cleanly."
-		} else {
-			graph.Meta.GapStatus = "MISSING_IMDB_GAP"
-			graph.Meta.GapReason = "IMDb Pointer Gap: TMDB ID present, but secondary IMDb ID pointer missing."
-		}
-	} else if len(graph.Threads) > 0 {
-		hasPending := false
-		for _, th := range graph.Threads {
-			if th.Status == "pending_tmdb" {
-				hasPending = true
-				break
-			}
-		}
-		if hasPending {
-			graph.Meta.GapStatus = "PENDING_MATCH"
-			graph.Meta.GapReason = "Pending Matching Pool: Thread in pending_tmdb queue awaiting linking."
-		} else {
-			graph.Meta.GapStatus = "UNLINKED"
-			graph.Meta.GapReason = "Unlinked Thread: Thread present in storage without assigned TMDB ID."
-		}
-	} else {
-		graph.Meta.GapStatus = "NOT_FOUND"
-		graph.Meta.GapReason = "No matching database records located for query."
-	}
-
-	return graph, nil
+	return resp, nil
 }
