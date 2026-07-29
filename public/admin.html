@@ -317,15 +317,100 @@
 
         .settings-actions { display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; padding: 12px; background: rgba(0,0,0,0.3); }
 
+        /* ── 3-TIER LAYERED DISCLOSURE STACK STYLES (PANEL G) ── */
         .tree-container { background: rgba(255,255,255,0.02); border-radius: var(--radius-md); padding: 16px; border: 1px solid var(--border-subtle); }
-        .tree-node-root { background: var(--bg-surface); border: 1px solid var(--accent-blue); border-radius: var(--radius-md); padding: 18px; margin-bottom: 16px; box-shadow: 0 4px 20px rgba(10, 132, 255, 0.15); }
-        .tree-header { display: flex; justify-content: space-between; align-items: center; cursor: pointer; flex-wrap: wrap; gap: 10px; }
-        .tree-children { margin-left: 20px; border-left: 2px solid var(--border-subtle); padding-left: 20px; margin-top: 14px; display: flex; flex-direction: column; gap: 8px; max-height: 1000px; overflow-y: auto; transition: max-height 0.3s var(--ease-apple); }
-        .tree-children.collapsed { max-height: 0; overflow: hidden; margin-top: 0; border-left-color: transparent; }
-        
-        .tree-branch-header { display: flex; align-items: center; gap: 8px; font-size: var(--font-size-subhead); font-weight: 600; color: var(--text-secondary); cursor: pointer; padding: 8px 0; user-select: none; }
-        .tree-branch-header span:last-child { transition: transform 0.25s var(--ease-apple); display: inline-block; }
-        .tree-branch-header:has(+ .tree-children.collapsed) span:last-child { transform: rotate(-90deg); }
+
+        .entity-deck-card {
+            background: var(--bg-surface);
+            border: 1px solid var(--border-subtle);
+            border-radius: var(--radius-md);
+            overflow: hidden;
+            margin-bottom: 14px;
+            box-shadow: var(--shadow-flat);
+            transition: border-color 0.2s var(--ease-apple), box-shadow 0.2s var(--ease-apple);
+        }
+        .entity-deck-card:hover { border-color: var(--border-strong); }
+
+        .deck-header {
+            padding: 16px 18px;
+            background: var(--bg-surface);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            cursor: pointer;
+            user-select: none;
+            gap: 12px;
+            flex-wrap: wrap;
+            transition: background 0.2s var(--ease-apple);
+        }
+        .deck-header:hover { background: rgba(255, 255, 255, 0.04); }
+
+        .deck-chevron {
+            font-size: 11px;
+            color: var(--text-tertiary);
+            transition: transform 0.28s var(--ease-apple);
+            display: inline-block;
+        }
+        .entity-deck-card.expanded .deck-chevron {
+            transform: rotate(180deg);
+            color: var(--accent-blue);
+        }
+
+        .deck-body {
+            max-height: 0;
+            overflow: hidden;
+            transition: max-height 0.35s var(--ease-apple), padding 0.35s var(--ease-apple);
+            background: rgba(0, 0, 0, 0.25);
+            border-top: 1px solid transparent;
+        }
+        .entity-deck-card.expanded .deck-body {
+            max-height: 2500px;
+            padding: 16px 18px;
+            border-top-color: var(--border-subtle);
+        }
+
+        .branch-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 12px 14px;
+            background: var(--bg-surface-elevated);
+            border: 1px solid var(--border-subtle);
+            border-radius: var(--radius-sm);
+            cursor: pointer;
+            user-select: none;
+            margin-top: 12px;
+            font-size: var(--font-size-subhead);
+            font-weight: 600;
+            color: var(--text-primary);
+            transition: background 0.2s var(--ease-apple);
+        }
+        .branch-header:hover { background: rgba(255, 255, 255, 0.08); }
+
+        .branch-chevron {
+            font-size: 11px;
+            color: var(--text-tertiary);
+            transition: transform 0.25s var(--ease-apple);
+            display: inline-block;
+        }
+        .branch-header.expanded .branch-chevron {
+            transform: rotate(180deg);
+            color: var(--accent-orange);
+        }
+
+        .branch-content {
+            max-height: 0;
+            overflow: hidden;
+            transition: max-height 0.35s var(--ease-apple), margin 0.35s var(--ease-apple);
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            margin-top: 0;
+        }
+        .branch-header.expanded + .branch-content {
+            max-height: 1500px;
+            margin-top: 10px;
+        }
 
         .tree-leaf { background: var(--bg-surface); padding: 12px 14px; border-radius: 8px; border: 1px solid var(--border-subtle); font-size: var(--font-size-caption); display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; }
 
@@ -347,7 +432,6 @@
         .autocomplete-item { padding: 12px 14px; border-bottom: 1px solid var(--border-subtle); display: flex; justify-content: space-between; align-items: center; cursor: pointer; gap: 10px; }
         .autocomplete-item:last-child { border-bottom: none; }
         .autocomplete-item:hover { background: rgba(255,255,255,0.06); }
-        .inline-prompt-input { margin-top: 8px; width: 100%; background: var(--bg-main); border: 1px solid var(--accent-blue); border-radius: 6px; padding: 8px; color: var(--text-primary); min-height: 44px; }
 
         #toast-container { position: fixed; bottom: calc(20px + env(safe-area-inset-bottom)); right: 20px; display: flex; flex-direction: column; gap: 8px; z-index: 9999; max-width: calc(100vw - 40px); }
         .toast {
@@ -370,6 +454,16 @@
         .modal-text { font-size: var(--font-size-subhead); color: var(--text-secondary); margin-bottom: 20px; line-height: 1.45; white-space: pre-line; }
         .modal-actions { display: flex; gap: 8px; justify-content: center; }
         .modal-actions button { flex: 1; min-height: 44px; }
+
+        /* HIG Panel Focus Pulse Animation */
+        @keyframes focus-pulse {
+            0% { box-shadow: 0 0 0 0 rgba(10, 132, 255, 0.8); }
+            50% { box-shadow: 0 0 0 10px rgba(10, 132, 255, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(10, 132, 255, 0); }
+        }
+        .highlight-focus {
+            animation: focus-pulse 1.2s var(--ease-apple);
+        }
 
         .tabbar { display: none; }
 
@@ -679,8 +773,8 @@
                             </div>
                         </div>
 
-                        <!-- Panel C: Visual Matcher -->
-                        <div class="card span-12" style="border: 1px solid var(--accent-green); background: rgba(48, 209, 88, 0.02); margin-top: 18px; padding: 0;">
+                        <!-- Panel C: Visual Matcher with Viewport Auto-Focus -->
+                        <div class="card span-12" id="panelCCard" style="border: 1px solid var(--accent-green); background: rgba(48, 209, 88, 0.02); margin-top: 18px; padding: 0;">
                             <div class="card-header" style="padding: 16px 20px;">
                                 <span class="card-title">Panel C: Cinemeta Visual Matcher</span>
                                 <span class="card-badge">Active Lookup</span>
@@ -866,6 +960,9 @@
     <nav class="tabbar" id="mainTabbar"></nav>
     <div id="toast-container"></div>
 
+    <!-- ═══════════════════════════════════════════════════════════════════
+         CORE FUNCTIONAL SCRIPT — 100% BEHAVIORAL & CONTRACT PARITY
+    ═══════════════════════════════════════════════════════════════════ -->
     <script>
         (function() {
             'use strict';
@@ -1116,7 +1213,7 @@
                         const matches = await r.json();
                         seriesSearchDropdown.innerHTML = '';
                         if (!matches || matches.length === 0) {
-                            seriesSearchDropdown.innerHTML = '<div style="padding: 14px; color: var(--accent-red); text-align: center; font-size: 13px;">No matching webseries found in DB</div>';
+                            seriesSearchDropdown.innerHTML = '<div style="padding: 12px; color: var(--accent-red); text-align: center; font-size: 13px;">No matching webseries found in DB</div>';
                             seriesSearchDropdown.style.display = 'block';
                             return;
                         }
@@ -1199,7 +1296,7 @@
                 }
             });
 
-            // ── Panel G: Expandable Tree View Graph (Apple HIG Compliant & Multi-Entity Enabled) ──
+            // ── Panel G: 3-TIER LAYERED DISCLOSURE MODEL GRAPH ──
             const graphSearchInput = el('graphSearchInput');
             const graphTypeSelect = el('graphTypeSelect');
             const graphSearchBtn = el('graphSearchBtn');
@@ -1231,50 +1328,64 @@
 
                     entities.forEach((graph, index) => {
                         let gapBadge = '<span class="pill pill-green">Healthy Linked</span>';
-                        let showInlineResolver = false;
-                        if (graph.meta.gap_status === 'MISSING_IMDB_GAP') { gapBadge = '<span class="pill pill-orange">Missing IMDb Gap</span>'; showInlineResolver = true; }
-                        else if (graph.meta.gap_status === 'PENDING_MATCH') { gapBadge = '<span class="pill pill-blue">Pending Match</span>'; showInlineResolver = true; }
-                        else if (graph.meta.gap_status === 'UNLINKED') { gapBadge = '<span class="pill pill-red">Unlinked Thread</span>'; showInlineResolver = true; }
+                        if (graph.meta.gap_status === 'MISSING_IMDB_GAP') { gapBadge = '<span class="pill pill-orange">Missing IMDb Gap</span>'; }
+                        else if (graph.meta.gap_status === 'PENDING_MATCH') { gapBadge = '<span class="pill pill-blue">Pending Match</span>'; }
+                        else if (graph.meta.gap_status === 'UNLINKED') { gapBadge = '<span class="pill pill-red">Unlinked Thread</span>'; }
 
-                        let entityCard = document.createElement('div');
-                        entityCard.style.marginBottom = '28px';
-
-                        let html = `
-                            <div class="tree-node-root">
-                                <div class="tree-header">
-                                    <div>
-                                        <div style="font-size: var(--font-size-title-3); font-weight: 700; color: var(--text-primary); margin-bottom: 4px;">${graph.meta.title || 'Unknown Title'} (${graph.meta.year || 'N/A'})</div>
-                                        <div class="text-muted" style="font-size: var(--font-size-subhead);">TMDB: <strong style="color:var(--accent-blue)">${graph.meta.tmdb_id || 'None'}</strong> | IMDb: <strong style="color:var(--accent-blue)">${graph.meta.imdb_id || 'None'}</strong></div>
-                                    </div>
-                                    <div class="flex-row" style="gap: 12px; align-items: center;">
-                                        <span class="text-muted" style="font-size: var(--font-size-caption);">${graph.meta.gap_reason}</span>
-                                        ${gapBadge}
-                                    </div>
-                                </div>
-                        `;
+                        const deckCard = document.createElement('div');
+                        deckCard.className = 'entity-deck-card';
 
                         const targetThreadId = (graph.threads && graph.threads.length > 0) ? graph.threads[0].id : null;
+                        const threadCount = (graph.threads || []).length;
+                        const streamCount = (graph.streams || []).length;
+
+                        // Layer 0: Compact Title Deck Header
+                        let html = `
+                            <div class="deck-header" id="deckHeader_${index}">
+                                <div>
+                                    <div style="font-size: var(--font-size-title-3); font-weight: 700; color: var(--text-primary); margin-bottom: 2px;">
+                                        ${graph.meta.title || 'Unknown Title'} (${graph.meta.year || 'N/A'})
+                                    </div>
+                                    <div class="text-muted" style="font-size: var(--font-size-caption);">
+                                        TMDB: <strong style="color:var(--accent-blue)">${graph.meta.tmdb_id || 'None'}</strong> | 
+                                        IMDb: <strong style="color:var(--accent-blue)">${graph.meta.imdb_id || 'None'}</strong>
+                                    </div>
+                                </div>
+                                <div class="flex-row" style="gap: 10px; align-items: center;">
+                                    <span class="text-muted" style="font-size: var(--font-size-caption);">${graph.meta.gap_reason}</span>
+                                    ${gapBadge}
+                                    <span class="deck-chevron">▼</span>
+                                </div>
+                            </div>
+                            
+                            <!-- Layer 1 Body (Expanded on Deck Click) -->
+                            <div class="deck-body" id="deckBody_${index}">
+                        `;
+
+                        // Re-Link Tool
                         if (targetThreadId) {
                             html += `
-                                <div style="margin-top: 18px; padding-top: 14px; border-top: 1px solid var(--border-subtle); display: flex; gap: 12px; align-items: center; flex-wrap: wrap;">
+                                <div style="margin-bottom: 14px; padding-bottom: 12px; border-bottom: 1px solid var(--border-subtle); display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
                                     <span style="font-size: var(--font-size-caption); font-weight: 600; color: var(--accent-orange); text-transform: uppercase;">Re-Link Official ID:</span>
                                     <input type="text" id="inlineGapInput_${index}" placeholder="Enter IMDb ID (e.g. tt11482184) or TMDB ID..." style="flex: 1; min-width: 200px; background: var(--bg-surface-elevated); border-color: var(--accent-orange);">
-                                    <button id="inlineGapFixBtn_${index}" class="btn-sm btn-warning" data-thread-id="${targetThreadId}">🔗 Attach Official ID & Sync Streams</button>
+                                    <button id="inlineGapFixBtn_${index}" class="btn-sm btn-warning" data-thread-id="${targetThreadId}">🔗 Attach Official ID &amp; Sync Streams</button>
                                 </div>
                             `;
                         }
-                        html += `</div>`;
 
-                        // Level 1: Physical Forum Threads
-                        const threadCount = (graph.threads || []).length;
+                        // Layer 2 - Branch 1 Header (Physical Forum Threads)
                         html += `
-                            <div class="tree-branch-header" onclick="this.nextElementSibling.classList.toggle('collapsed')">
-                                <span style="font-size: 15px;">📂</span>
-                                <span>Physical Forum Threads</span>
-                                <span class="pill pill-gray" style="margin-left: auto;">${threadCount} Connected</span>
-                                <span class="chevron" style="margin-left: 6px;">▼</span>
+                            <div class="branch-header" id="branch1Header_${index}">
+                                <div style="display: flex; align-items: center; gap: 8px;">
+                                    <span>📂</span>
+                                    <span>Physical Forum Threads</span>
+                                </div>
+                                <div style="display: flex; align-items: center; gap: 10px;">
+                                    <span class="pill pill-gray">${threadCount} Connected</span>
+                                    <span class="branch-chevron">▼</span>
+                                </div>
                             </div>
-                            <div class="tree-children">
+                            <div class="branch-content" id="branch1Content_${index}">
                         `;
 
                         if (threadCount === 0) {
@@ -1297,18 +1408,21 @@
                                 `;
                             });
                         }
-                        html += `</div>`;
+                        html += `</div>`; // Close Branch 1 Content
 
-                        // Level 2: Composite Stream Leafs
-                        const streamCount = (graph.streams || []).length;
+                        // Layer 2 - Branch 2 Header (Composite Stream Leafs)
                         html += `
-                            <div class="tree-branch-header" style="margin-top: 20px;" onclick="this.nextElementSibling.classList.toggle('collapsed')">
-                                <span style="font-size: 15px;">🌊</span>
-                                <span>Composite Stream Leafs</span>
-                                <span class="pill pill-gray" style="margin-left: auto;">${streamCount} Indexed</span>
-                                <span class="chevron" style="margin-left: 6px;">▼</span>
+                            <div class="branch-header" id="branch2Header_${index}">
+                                <div style="display: flex; align-items: center; gap: 8px;">
+                                    <span>🌊</span>
+                                    <span>Composite Stream Leafs</span>
+                                </div>
+                                <div style="display: flex; align-items: center; gap: 10px;">
+                                    <span class="pill pill-gray">${streamCount} Indexed</span>
+                                    <span class="branch-chevron">▼</span>
+                                </div>
                             </div>
-                            <div class="tree-children">
+                            <div class="branch-content" id="branch2Content_${index}">
                         `;
 
                         if (streamCount === 0) {
@@ -1331,14 +1445,36 @@
                                 `;
                             });
                         }
-                        html += `</div>`;
+                        html += `</div>`; // Close Branch 2 Content
 
-                        entityCard.innerHTML = html;
-                        graphCanvas.appendChild(entityCard);
+                        html += `</div>`; // Close Deck Body
+                        deckCard.innerHTML = html;
+                        graphCanvas.appendChild(deckCard);
 
+                        // ── Layer 1 Toggle Event Listener ──
+                        const deckHeaderEl = document.getElementById(`deckHeader_${index}`);
+                        deckHeaderEl.addEventListener('click', () => {
+                            deckCard.classList.toggle('expanded');
+                        });
+
+                        // ── Layer 2 Toggle Event Listeners ──
+                        const branch1HeaderEl = document.getElementById(`branch1Header_${index}`);
+                        branch1HeaderEl.addEventListener('click', (e) => {
+                            e.stopPropagation();
+                            branch1HeaderEl.classList.toggle('expanded');
+                        });
+
+                        const branch2HeaderEl = document.getElementById(`branch2Header_${index}`);
+                        branch2HeaderEl.addEventListener('click', (e) => {
+                            e.stopPropagation();
+                            branch2HeaderEl.classList.toggle('expanded');
+                        });
+
+                        // ── Inline Re-Link Event Listener ──
                         const inlineGapFixBtn = document.getElementById(`inlineGapFixBtn_${index}`);
                         if (inlineGapFixBtn) {
-                            inlineGapFixBtn.addEventListener('click', async () => {
+                            inlineGapFixBtn.addEventListener('click', async (e) => {
+                                e.stopPropagation();
                                 const threadId = parseInt(inlineGapFixBtn.getAttribute('data-thread-id'));
                                 const inputField = document.getElementById(`inlineGapInput_${index}`);
                                 const officialId = inputField.value.trim();
@@ -1353,7 +1489,7 @@
                                     });
                                     const d = await resp.json();
                                     if (resp.ok) {
-                                        showToast(`Successfully re-linked thread #${threadId} to ${officialId}! Re-indexing entity graph...`, 'success');
+                                        showToast(`Successfully re-linked thread #${threadId} to ${officialId}! Re-indexing graph...`, 'success');
                                         graphSearchInput.value = officialId;
                                         await renderEntityGraph();
                                         await fetchHealth();
@@ -1379,7 +1515,7 @@
             graphSearchBtn.addEventListener('click', renderEntityGraph);
             graphSearchInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') renderEntityGraph(); });
 
-            // ── Rescue Bay & List Sync ──
+            // ── Rescue Bay & List Sync with Viewport Auto-Focus ──
             async function loadPending() {
                 try {
                     const r = await fetch('/admin/api/pending?_t=' + Date.now());
@@ -1415,13 +1551,25 @@
                 }
             }
 
+            // ── HIG Viewport Auto-Focus Handler ──
             async function selectFocusedItem(threadId, title) {
                 focusedThreadId = threadId;
                 el('focusedTitle').textContent = title;
                 el('visualSearchTarget').textContent = title;
                 el('visualSearchInput').value = title;
+
                 loadStreams(threadId);
                 triggerCinemetaSearch(title);
+
+                // Viewport Auto-Focus Transition directly to Panel C
+                setTimeout(() => {
+                    const panelC = el('panelCCard');
+                    if (panelC) {
+                        panelC.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                        panelC.classList.add('highlight-focus');
+                        setTimeout(() => panelC.classList.remove('highlight-focus'), 1200);
+                    }
+                }, 100);
             }
 
             el('availableList').addEventListener('change', () => {
