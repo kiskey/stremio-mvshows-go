@@ -1,5 +1,5 @@
-// Version: 2.2.0
-// Change log: Implemented Proposal 3 (Non-blocking Debrid cache fallback with 1.5s context timeout) in streamHandler and integrated prefix-based composite stream lookups.
+// Version: 2.3.0
+// Change log: Integrated standardized media type normalization across catalog/meta/stream handlers and updated stream resolution to leverage canonical tt... primary keys cleanly.
 
 package api
 
@@ -19,6 +19,7 @@ import (
 	"github.com/kiskey/stremio-mvshows-go/internal/config"
 	"github.com/kiskey/stremio-mvshows-go/internal/database"
 	"github.com/kiskey/stremio-mvshows-go/internal/services/debrid"
+	"github.com/kiskey/stremio-mvshows-go/internal/services/metadata"
 	"github.com/kiskey/stremio-mvshows-go/internal/services/parser"
 	"github.com/kiskey/stremio-mvshows-go/internal/services/tracker"
 	"github.com/kiskey/stremio-mvshows-go/internal/utils"
@@ -273,7 +274,7 @@ func manifestHandler(c *gin.Context) {
 // ── Catalog ──
 
 func catalogHandler(c *gin.Context) {
-	mediaType := c.Param("type")
+	mediaType := metadata.NormalizeMediaType(c.Param("type"))
 	catalogID := c.Param("id")
 	extra := c.Param("extra")
 
@@ -416,7 +417,7 @@ func catalogHandler(c *gin.Context) {
 
 		metaEntry := StremioMetaEntry{
 			ID:          metaID,
-			Type:        t.Type,
+			Type:        metadata.NormalizeMediaType(t.Type),
 			Name:        title,
 			ReleaseInfo: releaseInfo,
 			Poster:      poster,
@@ -494,7 +495,7 @@ func metaHandler(c *gin.Context) {
 
 		mediaType := "movie"
 		if hasMappedThread {
-			mediaType = mappedThread.Type
+			mediaType = metadata.NormalizeMediaType(mappedThread.Type)
 		}
 
 		poster := "https://images.metahub.space/poster/medium/" + cleanID + "/img"
@@ -579,7 +580,7 @@ func metaHandler(c *gin.Context) {
 		t := *foundThread
 		metaObj := StremioMetaDetail{
 			ID:          id,
-			Type:        t.Type,
+			Type:        metadata.NormalizeMediaType(t.Type),
 			Name:        t.RawTitle,
 			Poster:      cfg.PlaceholderPoster,
 			Description: "Pending metadata match. You can link this manually in the administration rescue panel.",
@@ -765,7 +766,7 @@ func streamHandler(c *gin.Context) {
 		return
 	}
 
-	// PROPOSAL 3: Non-Blocking Debrid Cache Fallback with 1.5s Context Timeout
+	// Non-blocking Debrid Cache Fallback with 1.5s Context Timeout
 	cacheCtx, cancelCache := context.WithTimeout(c.Request.Context(), 1500*time.Millisecond)
 	defer cancelCache()
 
@@ -795,7 +796,7 @@ func streamHandler(c *gin.Context) {
 
 	mediaType := "movie"
 	if hasMappedThread {
-		mediaType = mappedThread.Type
+		mediaType = metadata.NormalizeMediaType(mappedThread.Type)
 	}
 
 	tmdbTitle := ""
@@ -985,7 +986,7 @@ func rdAddHandler(c *gin.Context) {
 
 	maxPolls := 60
 	pollInterval := 3 * time.Second
-	torrentID := info.ID 
+	torrentID := info.ID
 
 	for i := 0; i < maxPolls; i++ {
 		select {
@@ -994,7 +995,7 @@ func rdAddHandler(c *gin.Context) {
 				Str("infohash", infohash).
 				Str("id", torrentID).
 				Msg("Client disconnected during active stream loading. Detaching and delegating debrid caching to background.")
-			
+
 			go func(tID string, infohash string) {
 				defer func() {
 					if r := recover(); r != nil {
