@@ -1,5 +1,5 @@
-// Version: 1.8.0
-// Change log: Integrated Gap 4 Smart Local-First DB Lookup (FindLinkedThreadByTitleYearType) with 5-Factor Invariant Match Contract to reuse local TMDB metadata and bypass external API calls (<0.1ms latency, 0 API quota).
+// Version: 1.9.0
+// Change log: Enforced automated scraper media-type isolation guardrail (rejecting cross-type matches to pending_tmdb) and applied standardized media type normalization.
 
 package orchestrator
 
@@ -261,10 +261,12 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 		}
 	}()
 
+	threadType := metadata.NormalizeMediaType(thread.Type)
+
 	existing, errEx := database.FindThreadByHash(nil, thread.ThreadHash)
 	hasExisting := (errEx == nil && existing != nil)
 
-	prTitle := parser.ParseRelease(thread.RawTitle, thread.Type)
+	prTitle := parser.ParseRelease(thread.RawTitle, threadType)
 	parsed := &parser.ParseResult{
 		Title:        prTitle.CleanTitle,
 		Year:         prTitle.Year,
@@ -286,20 +288,18 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 	}
 
 	// Topic ID Invariant In-Place Update Pathway:
-	// If existing thread has same ThreadHash (e.g. topic_198255) and is already linked, merge magnets and update streams in-place
 	if hasExisting && existing.Status == "linked" && existing.TmdbID != nil {
 		cleanTitle := existing.CleanTitle
 		if cleanTitle == "" {
 			cleanTitle = parsed.Title
 		}
 
-		// Filter divergence on incoming magnets before merging
 		var cleanedMagnets []string
 		for _, m := range thread.MagnetURIs {
 			cleanM := parser.StripTrackersFromMagnet(m)
 			dn := parser.ExtractMagnetDisplayName(m)
 			if dn != "" {
-				pmr := parser.ParseRelease(dn, thread.Type)
+				pmr := parser.ParseRelease(dn, threadType)
 				if pmr != nil && pmr.IsValid && pmr.CleanTitle != "" {
 					overlapParsed := metadata.OverlapCoefficient(parsed.Title, pmr.CleanTitle)
 					overlapClean := metadata.OverlapCoefficient(cleanTitle, pmr.CleanTitle)
@@ -315,7 +315,6 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 			cleanedMagnets = append(cleanedMagnets, cleanM)
 		}
 
-		// ── ZERO DISK WEAR SHORT-CIRCUIT DIRTY CHECK ──
 		if isThreadUnchanged(existing, cleanedMagnets, thread.RawTitle, thread.URL) {
 			utils.Logger.Debug().
 				Str("hash", thread.ThreadHash).
@@ -334,11 +333,11 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 		errTx := database.DB.Update(func(tx *bolt.Tx) error {
 			magnetBucket := tx.Bucket([]byte("magnet_cache"))
 
-			// Merge magnets with existing thread magnets
 			existing.MagnetURIs = cleanedMagnets
 			existing.RawTitle = thread.RawTitle
+			existing.Type = threadType
 			if thread.URL != "" {
-				existing.URL = thread.URL // Auto-heal thread URL to fresh slug
+				existing.URL = thread.URL
 			}
 			existing.LastSeen = time.Now()
 			existing.UpdatedAt = time.Now()
@@ -348,11 +347,11 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 				return errSave
 			}
 
-			isSeries := strings.ToLower(thread.Type) == "series"
+			isSeries := threadType == "series"
 			var newStreams []database.Stream
 
 			for _, magnet := range cleanedMagnets {
-				parsedMagnet := parser.ParseMagnet(magnet, thread.Type)
+				parsedMagnet := parser.ParseMagnet(magnet, threadType)
 				if parsedMagnet == nil {
 					continue
 				}
@@ -410,16 +409,16 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 		}
 	}
 
-	// ── GAP 4: SMART LOCAL-FIRST DB LOOKUP (5-Factor Match Contract) ──
+	// Smart Local-First DB Lookup
 	var tmdbResult *metadata.TmdbResult
 	var errTmdb error
 
-	localMatch, errLocal := database.FindLinkedThreadByTitleYearType(nil, parsed.Title, parsed.Year, thread.Type)
+	localMatch, errLocal := database.FindLinkedThreadByTitleYearType(nil, parsed.Title, parsed.Year, threadType)
 	if errLocal == nil && localMatch != nil && localMatch.TmdbID != nil && *localMatch.TmdbID != "" {
 		utils.Logger.Info().
 			Str("title", parsed.Title).
 			Int("year", parsed.Year).
-			Str("type", thread.Type).
+			Str("type", threadType).
 			Str("tmdb_id", *localMatch.TmdbID).
 			Msg("Smart Local-First Match: Found existing linked DB record. Bypassing external TMDB HTTP call (0 API calls consumed).")
 
@@ -427,6 +426,7 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 			TmdbID: *localMatch.TmdbID,
 			Title:  localMatch.CleanTitle,
 			Year:   parsed.Year,
+			Type:   threadType,
 		}
 
 		if localMatch.TmdbMetadata != nil && localMatch.TmdbMetadata.ImdbID != nil {
@@ -449,19 +449,32 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 			})
 		}
 	} else {
-		// Fallback to original external TMDB API search if no local match is found
-		tmdbResult, errTmdb = tmdbClient.SearchWithAliases(parsed.Title, parsed.Year, thread.Type)
+		// Fallback to external TMDB API search
+		tmdbResult, errTmdb = tmdbClient.SearchWithAliases(parsed.Title, parsed.Year, threadType)
+	}
+
+	// AUTOMATED SCRAPER GUARDRAIL: Reject cross-type matches automatically
+	if errTmdb == nil && tmdbResult != nil {
+		if tmdbResult.Type != "" && !metadata.IsTypeMatch(tmdbResult.Type, threadType) {
+			utils.Logger.Warn().
+				Str("title", parsed.Title).
+				Str("thread_type", threadType).
+				Str("tmdb_type", tmdbResult.Type).
+				Msg("Automated Scraper: TMDB result media type differs from forum thread type. Rejection enforced -> pending_tmdb.")
+			errTmdb = fmt.Errorf("type mismatch: thread is %s but TMDB is %s", threadType, tmdbResult.Type)
+			tmdbResult = nil
+		}
 	}
 
 	if errTmdb != nil || tmdbResult == nil {
-		utils.Logger.Warn().Err(errTmdb).Str("title", parsed.Title).Msg("TMDB lookup failed or score below threshold. Storing as pending_tmdb.")
+		utils.Logger.Warn().Err(errTmdb).Str("title", parsed.Title).Msg("TMDB lookup failed, low score, or type mismatch. Storing as pending_tmdb.")
 
 		pending := &database.Thread{
 			ThreadHash:        thread.ThreadHash,
 			RawTitle:          thread.RawTitle,
 			CleanTitle:        parsed.Title,
 			Status:            "pending_tmdb",
-			Type:              thread.Type,
+			Type:              threadType,
 			PostedAt:          thread.PostedAt,
 			Catalog:           thread.CatalogID,
 			MagnetURIs:        thread.MagnetURIs,
@@ -531,7 +544,7 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 
 		cleanTitle := tmdbResult.Title
 		if cleanTitle == "" || strings.Contains(cleanTitle, "[") || strings.Contains(cleanTitle, "]") || strings.Contains(strings.ToLower(cleanTitle), "1080p") || strings.Contains(strings.ToLower(cleanTitle), "720p") || strings.Contains(strings.ToLower(cleanTitle), "s0") {
-			parsed := parser.ParseTitle(thread.RawTitle, thread.Type)
+			parsed := parser.ParseTitle(thread.RawTitle, threadType)
 			if parsed != nil && parsed.Title != "" {
 				cleanTitle = parsed.Title
 			} else {
@@ -544,7 +557,7 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 			cleanM := parser.StripTrackersFromMagnet(m)
 			dn := parser.ExtractMagnetDisplayName(m)
 			if dn != "" {
-				pmr := parser.ParseRelease(dn, thread.Type)
+				pmr := parser.ParseRelease(dn, threadType)
 				if pmr != nil && pmr.IsValid && pmr.CleanTitle != "" {
 					overlapParsed := metadata.OverlapCoefficient(parsed.Title, pmr.CleanTitle)
 					overlapClean := metadata.OverlapCoefficient(cleanTitle, pmr.CleanTitle)
@@ -567,7 +580,7 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 			CleanTitle: cleanTitle,
 			TmdbID:     &tmdbResult.TmdbID,
 			Status:     "linked",
-			Type:       thread.Type,
+			Type:       threadType,
 			PostedAt:   thread.PostedAt,
 			Catalog:    thread.CatalogID,
 			MagnetURIs: cleanedMagnets,
@@ -584,11 +597,11 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 			return err
 		}
 
-		isSeries := strings.ToLower(thread.Type) == "series"
+		isSeries := threadType == "series"
 		var streams []database.Stream
 
 		for _, magnet := range cleanedMagnets {
-			parsedMagnet := parser.ParseMagnet(magnet, thread.Type)
+			parsedMagnet := parser.ParseMagnet(magnet, threadType)
 			if parsedMagnet == nil {
 				continue
 			}
@@ -652,9 +665,10 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
 }
 
 func RunTargetedWorkflow(cfg *config.Config, threadURL, contentType, catalogID string) error {
-	utils.Logger.Info().Str("url", threadURL).Str("type", contentType).Msg("Initiating targeted thread recoup workflow...")
+	targetType := metadata.NormalizeMediaType(contentType)
+	utils.Logger.Info().Str("url", threadURL).Str("type", targetType).Msg("Initiating targeted thread recoup workflow...")
 
-	scraped, err := crawler.RunTargetedCrawler(cfg, threadURL, contentType, catalogID)
+	scraped, err := crawler.RunTargetedCrawler(cfg, threadURL, targetType, catalogID)
 	if err != nil {
 		utils.Logger.Error().Err(err).Str("url", threadURL).Msg("Targeted crawler failed.")
 		return err
