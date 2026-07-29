@@ -1,5 +1,5 @@
-// Version: 2.9.0
-// Change log: Implemented atomic admin manual type override in linkOfficialHandler with automatic stream/index purge, enforced canonical IMDb tt... ID preservation, and added type safety assertions to autoMatchHandler.
+// Version: 3.0.0
+// Change log: Implemented surgical stream migration inside linkOfficialHandler to remove thread-specific infohash composite keys from the old TmdbID before relinking, preventing stranded ghost streams on shared metadata records.
 
 package api
 
@@ -262,25 +262,27 @@ func linkOfficialHandler(c *gin.Context) {
 	errTx := database.DB.Update(func(tx *bolt.Tx) error {
 		metaBucket := tx.Bucket([]byte("tmdb_metadata"))
 		magnetBucket := tx.Bucket([]byte("magnet_cache"))
-
-		// If thread type is changing via admin override, purge old stream entries under previous type
-		if metadata.NormalizeMediaType(t.Type) != targetType {
-			utils.Logger.Info().
-				Uint("thread_id", t.ID).
-				Str("old_type", t.Type).
-				Str("new_type", targetType).
-				Msg("Admin media type override executed. Purging stale streams from old type classification...")
-
-			if t.TmdbID != nil {
-				_ = database.DeleteStreamsByTmdbID(tx, *t.TmdbID)
-			}
-		}
+		streamsBucket := tx.Bucket([]byte("streams"))
 
 		primaryTmdbID := tmdbResult.TmdbID
 		secondaryImdbID := tmdbResult.ImdbID
 
 		if primaryTmdbID == "" && secondaryImdbID != "" {
 			primaryTmdbID = secondaryImdbID
+		}
+
+		// SURGICAL STREAM PURGE: Remove this specific thread's streams from old TmdbID to prevent ghost streams
+		if t.TmdbID != nil && *t.TmdbID != "" && *t.TmdbID != primaryTmdbID {
+			oldTmdbID := *t.TmdbID
+			if streamsBucket != nil {
+				for _, magnet := range t.MagnetURIs {
+					parsedMagnet := parser.ParseMagnet(magnet, t.Type)
+					if parsedMagnet != nil {
+						oldCompositeKey := fmt.Sprintf("%s:%s", oldTmdbID, strings.ToLower(parsedMagnet.Infohash))
+						_ = streamsBucket.Delete([]byte(oldCompositeKey))
+					}
+				}
+			}
 		}
 
 		rawDataBytes := []byte("{}")
@@ -550,6 +552,7 @@ func autoMatchHandler(c *gin.Context) {
 		errTx := database.DB.Update(func(tx *bolt.Tx) error {
 			metaBucket := tx.Bucket([]byte("tmdb_metadata"))
 			magnetBucket := tx.Bucket([]byte("magnet_cache"))
+			streamsBucket := tx.Bucket([]byte("streams"))
 
 			threadType := metadata.NormalizeMediaType(res.Thread.Type)
 
@@ -558,6 +561,20 @@ func autoMatchHandler(c *gin.Context) {
 
 			if primaryTmdbID == "" && secondaryImdbID != "" {
 				primaryTmdbID = secondaryImdbID
+			}
+
+			// SURGICAL STREAM PURGE: Remove this specific thread's streams from old TmdbID before relinking
+			if res.Thread.TmdbID != nil && *res.Thread.TmdbID != "" && *res.Thread.TmdbID != primaryTmdbID {
+				oldTmdbID := *res.Thread.TmdbID
+				if streamsBucket != nil {
+					for _, magnet := range res.Thread.MagnetURIs {
+						parsedMagnet := parser.ParseMagnet(magnet, res.Thread.Type)
+						if parsedMagnet != nil {
+							oldCompositeKey := fmt.Sprintf("%s:%s", oldTmdbID, strings.ToLower(parsedMagnet.Infohash))
+							_ = streamsBucket.Delete([]byte(oldCompositeKey))
+						}
+					}
+				}
 			}
 
 			rawDataBytes := []byte("{}")
