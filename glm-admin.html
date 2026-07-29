@@ -819,7 +819,7 @@
     <div id="scrim" class="scrim"></div>
 
     <!-- ═══════════════════════════════════════════════════════════════════
-         ORIGINAL FUNCTIONAL SCRIPT — UNCHANGED + CRAWL FIX
+         ORIGINAL FUNCTIONAL SCRIPT — UNCHANGED + CRAWL FIX + INLINE RELINK
     ═══════════════════════════════════════════════════════════════════ -->
     <script>
         (function() {
@@ -1264,16 +1264,30 @@
                     } else {
                         graph.threads.forEach(t => {
                             const urlLink = t.url ? `<a href="${t.url}" target="_blank" style="color: var(--accent-blue); font-size: 12px;">Visit Link ↗</a>` : '<span class="pill pill-red" style="font-size: 10px;">No URL</span>';
+                            
+                            // Generate unique IDs for this specific thread card
+                            const relinkInputId = `relinkInput_${t.id}`;
+                            const relinkBoxId = `relinkBox_${t.id}`;
+                            
                             html += `
-                                <div class="tree-leaf">
-                                    <div>
-                                        <div style="font-weight: 600; color: var(--text-primary); margin-bottom: 4px;">${t.clean_title || t.raw_title}</div>
-                                        <div class="text-muted" style="font-size: 12px;">Raw: ${t.raw_title}</div>
+                                <div class="tree-leaf" style="flex-direction: column; align-items: stretch;">
+                                    <div style="display: flex; justify-content: space-between; align-items: center; width: 100%;">
+                                        <div>
+                                            <div style="font-weight: 600; color: var(--text-primary); margin-bottom: 4px;">[ID: ${t.id}] ${t.clean_title || t.raw_title}</div>
+                                            <div class="text-muted" style="font-size: 12px;">Raw: ${t.raw_title}</div>
+                                        </div>
+                                        <div class="flex-row" style="gap: 16px; align-items: center;">
+                                            <span class="text-muted" style="font-size: 12px;">Cat: <strong style="color:var(--accent-orange)">${t.catalog || t.type}</strong></span>
+                                            <span class="text-muted" style="font-size: 12px;">Magnets: <strong style="color:var(--accent-green)">${t.magnet_count}</strong></span>
+                                            ${urlLink}
+                                            <button class="btn-sm toggleRelinkBtn" data-target="${relinkBoxId}" style="padding: 4px 10px; min-height: auto;">🔗 Relink</button>
+                                        </div>
                                     </div>
-                                    <div class="flex-row" style="gap: 16px; align-items: center;">
-                                        <span class="text-muted" style="font-size: 12px;">Cat: <strong style="color:var(--accent-orange)">${t.catalog || t.type}</strong></span>
-                                        <span class="text-muted" style="font-size: 12px;">Magnets: <strong style="color:var(--accent-green)">${t.magnet_count}</strong></span>
-                                        ${urlLink}
+                                    
+                                    <!-- Collapsible Relink Box -->
+                                    <div id="${relinkBoxId}" style="display: none; margin-top: 12px; padding-top: 12px; border-top: 1px solid var(--border-light); flex-direction: row; gap: 12px; align-items: center;">
+                                        <input type="text" id="${relinkInputId}" placeholder="Enter correct IMDb ID (e.g. tt1190634)" style="flex: 1; background: var(--bg-surface-2); border: 1px solid var(--accent-orange); min-height: 36px; padding: 8px; color: var(--text-primary);">
+                                        <button class="btn-sm btn-success execRelinkBtn" data-thread-id="${t.id}" data-input-id="${relinkInputId}" style="min-height: 36px;">Execute Relink</button>
                                     </div>
                                 </div>
                             `;
@@ -1316,6 +1330,52 @@
                     html += `</div>`;
 
                     graphCanvas.innerHTML = html;
+
+                    // Attach listeners for the inline relink feature
+                    document.querySelectorAll('.toggleRelinkBtn').forEach(btn => {
+                        btn.addEventListener('click', (e) => {
+                            const box = document.getElementById(btn.getAttribute('data-target'));
+                            if (box) {
+                                const isVisible = box.style.display === 'flex';
+                                box.style.display = isVisible ? 'none' : 'flex';
+                                if (!isVisible) box.querySelector('input').focus();
+                            }
+                        });
+                    });
+
+                    document.querySelectorAll('.execRelinkBtn').forEach(btn => {
+                        btn.addEventListener('click', async () => {
+                            const threadId = parseInt(btn.getAttribute('data-thread-id'));
+                            const inputId = btn.getAttribute('data-input-id');
+                            const officialId = document.getElementById(inputId).value.trim();
+                            
+                            if (!officialId) return showToast('Please enter a valid IMDb ID.', 'warn');
+                            
+                            btn.disabled = true;
+                            btn.innerText = 'Migrating...';
+                            
+                            try {
+                                const response = await fetch('/admin/api/link-official', {
+                                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                    body: JSON.stringify({ threadId, officialId })
+                                });
+                                const d = await response.json();
+                                if (response.ok) {
+                                    showToast(`Thread ${threadId} successfully relinked to ${officialId}!`, 'success');
+                                    await renderEntityGraph(); // Refresh graph
+                                    await fetchHealth();
+                                } else {
+                                    showToast('Relink failed: ' + (d.error || 'Unknown error'), 'error');
+                                    btn.disabled = false;
+                                    btn.innerText = 'Execute Relink';
+                                }
+                            } catch (err) {
+                                showToast('Network error: ' + err.message, 'error');
+                                btn.disabled = false;
+                                btn.innerText = 'Execute Relink';
+                            }
+                        });
+                    });
 
                     const inlineGapFixBtn = el('inlineGapFixBtn');
                     if (inlineGapFixBtn) {
