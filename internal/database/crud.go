@@ -1,5 +1,5 @@
-// Version: 2.6.0
-// Change log: Implemented FindLinkedThreadByTitleYearType with 5-Factor Invariant Match Contract to enable contamination-free local database lookups for multi-site threads.
+// Version: 2.7.1
+// Change log: Corrected return slice type in GetRecentLinkedThreadsPaginated (restored return []Thread{}, nil) and added GetEntityGraphData for Panel G.
 
 package database
 
@@ -902,4 +902,241 @@ func DeleteDebridCacheLock(hash string) error {
 		b := tx.Bucket([]byte("debrid_cache_locks"))
 		return b.Delete([]byte(strings.ToLower(hash)))
 	})
+}
+
+// ── Panel G: Entity Relation Graph Data Traversal ──
+
+type GraphEntity struct {
+	Meta struct {
+		TmdbID    string `json:"tmdb_id"`
+		ImdbID    string `json:"imdb_id"`
+		Title     string `json:"title"`
+		Year      int    `json:"year"`
+		GapStatus string `json:"gap_status"` // "HEALTHY", "MISSING_IMDB_GAP", "PENDING_MATCH", "UNLINKED"
+		GapReason string `json:"gap_reason"`
+	} `json:"meta"`
+	Threads []GraphThread `json:"threads"`
+	Streams []GraphStream `json:"streams"`
+}
+
+type GraphThread struct {
+	ID          uint      `json:"id"`
+	ThreadHash  string    `json:"thread_hash"`
+	RawTitle    string    `json:"raw_title"`
+	CleanTitle  string    `json:"clean_title"`
+	Status      string    `json:"status"`
+	Type        string    `json:"type"`
+	Catalog     string    `json:"catalog"`
+	URL         string    `json:"url"`
+	MagnetCount int       `json:"magnet_count"`
+	Monitored   string    `json:"monitored_status"`
+	LastSeen    time.Time `json:"last_seen"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+type GraphStream struct {
+	ID       uint   `json:"id"`
+	TmdbID   string `json:"tmdb_id"`
+	Season   *int   `json:"season"`
+	Episode  *int   `json:"episode"`
+	Infohash string `json:"infohash"`
+	Quality  string `json:"quality"`
+	Language string `json:"language"`
+	Locked   bool   `json:"is_locked"`
+}
+
+func GetEntityGraphData(tx *bolt.Tx, query string, contentType string) (*GraphEntity, error) {
+	q := strings.TrimSpace(query)
+	if q == "" {
+		return nil, fmt.Errorf("query parameter is required")
+	}
+
+	normQuery := metadata.NormalizeTitleForMatching(q)
+	mediaTypeFilter := strings.ToLower(strings.TrimSpace(contentType))
+
+	graph := &GraphEntity{}
+	var matchedTmdbID string
+	var matchedImdbID string
+	var primaryTitle string
+	var primaryYear int
+
+	monitoredMap := make(map[string]string)
+	_ = runView(tx, func(tx *bolt.Tx) error {
+		monB := tx.Bucket([]byte("monitored_series"))
+		if monB != nil {
+			c := monB.Cursor()
+			for k, v := c.First(); k != nil; k, v = c.Next() {
+				var ms MonitoredSeries
+				if errDec := DecodeGob(v, &ms); errDec == nil {
+					monitoredMap[ms.ThreadHash] = ms.Status
+				}
+			}
+		}
+		return nil
+	})
+
+	err := runView(tx, func(tx *bolt.Tx) error {
+		tb := tx.Bucket([]byte("threads"))
+		metaB := tx.Bucket([]byte("tmdb_metadata"))
+		locksB := tx.Bucket([]byte("debrid_cache_locks"))
+		streamsB := tx.Bucket([]byte("streams"))
+
+		if metaB != nil {
+			metaData := metaB.Get([]byte(q))
+			if metaData != nil {
+				var m TmdbMetadata
+				if errDec := DecodeGob(metaData, &m); errDec == nil {
+					matchedTmdbID = m.TmdbID
+					if m.ImdbID != nil {
+						matchedImdbID = *m.ImdbID
+					}
+					if m.Year != nil {
+						primaryYear = *m.Year
+					}
+				}
+			}
+		}
+
+		if tb != nil {
+			c := tb.Cursor()
+			for k, v := c.First(); k != nil; k, v = c.Next() {
+				var t Thread
+				if errDec := DecodeGob(v, &t); errDec == nil {
+					if mediaTypeFilter != "" && mediaTypeFilter != "all" && strings.ToLower(t.Type) != mediaTypeFilter {
+						continue
+					}
+
+					match := false
+					if strings.HasPrefix(q, "tt") && t.TmdbID != nil {
+						if matchedTmdbID != "" && *t.TmdbID == matchedTmdbID {
+							match = true
+						}
+					} else if matchedTmdbID != "" && t.TmdbID != nil && *t.TmdbID == matchedTmdbID {
+						match = true
+					} else {
+						normClean := metadata.NormalizeTitleForMatching(t.CleanTitle)
+						normRaw := metadata.NormalizeTitleForMatching(t.RawTitle)
+						if normClean == normQuery || normRaw == normQuery || strings.Contains(normClean, normQuery) || strings.Contains(normRaw, normQuery) {
+							match = true
+							if matchedTmdbID == "" && t.TmdbID != nil {
+								matchedTmdbID = *t.TmdbID
+							}
+						}
+					}
+
+					if match {
+						if primaryTitle == "" {
+							primaryTitle = t.CleanTitle
+							if primaryTitle == "" {
+								primaryTitle = t.RawTitle
+							}
+						}
+						if primaryYear == 0 && t.Year != nil {
+							primaryYear = *t.Year
+						}
+
+						mStatus := "none"
+						if val, ok := monitoredMap[t.ThreadHash]; ok {
+							mStatus = val
+						}
+
+						graph.Threads = append(graph.Threads, GraphThread{
+							ID:          t.ID,
+							ThreadHash:  t.ThreadHash,
+							RawTitle:    t.RawTitle,
+							CleanTitle:  t.CleanTitle,
+							Status:      t.Status,
+							Type:        t.Type,
+							Catalog:     t.Catalog,
+							URL:         t.URL,
+							MagnetCount: len(t.MagnetURIs),
+							Monitored:   mStatus,
+							LastSeen:    t.LastSeen,
+							UpdatedAt:   t.UpdatedAt,
+						})
+					}
+				}
+			}
+		}
+
+		if matchedTmdbID != "" && metaB != nil {
+			data := metaB.Get([]byte(matchedTmdbID))
+			if data != nil {
+				var m TmdbMetadata
+				if errDec := DecodeGob(data, &m); errDec == nil {
+					if m.ImdbID != nil && *m.ImdbID != "" {
+						matchedImdbID = *m.ImdbID
+					}
+					if m.Year != nil {
+						primaryYear = *m.Year
+					}
+				}
+			}
+		}
+
+		if matchedTmdbID != "" && streamsB != nil {
+			prefix := []byte(matchedTmdbID + ":")
+			sCursor := streamsB.Cursor()
+			for k, v := sCursor.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix); k, v = sCursor.Next() {
+				var s Stream
+				if errDec := DecodeGob(v, &s); errDec == nil {
+					isLocked := false
+					if locksB != nil && locksB.Get([]byte(strings.ToLower(s.Infohash))) != nil {
+						isLocked = true
+					}
+					graph.Streams = append(graph.Streams, GraphStream{
+						ID:       s.ID,
+						TmdbID:   s.TmdbID,
+						Season:   s.Season,
+						Episode:  s.Episode,
+						Infohash: s.Infohash,
+						Quality:  s.Quality,
+						Language: s.Language,
+						Locked:   isLocked,
+					})
+				}
+			}
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		return nil, err
+	}
+
+	graph.Meta.TmdbID = matchedTmdbID
+	graph.Meta.ImdbID = matchedImdbID
+	graph.Meta.Title = primaryTitle
+	graph.Meta.Year = primaryYear
+
+	if matchedTmdbID != "" {
+		if matchedImdbID != "" {
+			graph.Meta.GapStatus = "HEALTHY"
+			graph.Meta.GapReason = "100% Verified Link: Both TMDB ID and IMDb ID mapped cleanly."
+		} else {
+			graph.Meta.GapStatus = "MISSING_IMDB_GAP"
+			graph.Meta.GapReason = "IMDb Pointer Gap: TMDB ID present, but secondary IMDb ID pointer missing."
+		}
+	} else if len(graph.Threads) > 0 {
+		hasPending := false
+		for _, th := range graph.Threads {
+			if th.Status == "pending_tmdb" {
+				hasPending = true
+				break
+			}
+		}
+		if hasPending {
+			graph.Meta.GapStatus = "PENDING_MATCH"
+			graph.Meta.GapReason = "Pending Matching Pool: Thread in pending_tmdb queue awaiting linking."
+		} else {
+			graph.Meta.GapStatus = "UNLINKED"
+			graph.Meta.GapReason = "Unlinked Thread: Thread present in storage without assigned TMDB ID."
+		}
+	} else {
+		graph.Meta.GapStatus = "NOT_FOUND"
+		graph.Meta.GapReason = "No matching database records located for query."
+	}
+
+	return graph, nil
 }
