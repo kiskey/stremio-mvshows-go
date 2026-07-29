@@ -1,5 +1,5 @@
-// Version: 2.7.1
-// Change log: Corrected return slice type in GetRecentLinkedThreadsPaginated (restored return []Thread{}, nil) and added GetEntityGraphData for Panel G.
+// Version: 2.8.0
+// Change log: Integrated metadata.NormalizeMediaType across local pre-lookup, graph visualizer, and series auto-enrollment; updated GetEntityGraphData to support canonical tt... primary keys.
 
 package database
 
@@ -79,7 +79,7 @@ func FindLinkedThreadByTitleYearType(tx *bolt.Tx, title string, year int, mediaT
 		return nil, nil
 	}
 
-	targetType := strings.ToLower(strings.TrimSpace(mediaType))
+	targetType := metadata.NormalizeMediaType(mediaType)
 	var found *Thread
 
 	err := runView(tx, func(tx *bolt.Tx) error {
@@ -97,7 +97,7 @@ func FindLinkedThreadByTitleYearType(tx *bolt.Tx, title string, year int, mediaT
 				}
 
 				// Factor 1: Strict Media Type Isolation
-				if strings.ToLower(strings.TrimSpace(t.Type)) != targetType {
+				if metadata.NormalizeMediaType(t.Type) != targetType {
 					continue
 				}
 
@@ -214,10 +214,14 @@ func CreateOrUpdateThread(tx *bolt.Tx, data *Thread) error {
 			return errIdBucket
 		}
 
+		data.Type = metadata.NormalizeMediaType(data.Type)
+
 		existingData := b.Get([]byte(data.ThreadHash))
 		if existingData != nil {
 			var oldThread Thread
 			if errDec := DecodeGob(existingData, &oldThread); errDec == nil {
+				oldThread.Type = metadata.NormalizeMediaType(oldThread.Type)
+
 				if data.ID == 0 && oldThread.ID > 0 {
 					data.ID = oldThread.ID
 				}
@@ -310,7 +314,7 @@ func CreateOrUpdateThread(tx *bolt.Tx, data *Thread) error {
 
 		_ = idB.Put([]byte(fmt.Sprintf("%d", data.ID)), []byte(data.ThreadHash))
 
-		if strings.ToLower(data.Type) == "series" && data.Status == "linked" {
+		if data.Type == "series" && data.Status == "linked" {
 			_ = AutoEnrollSeries(tx, data)
 		}
 
@@ -725,7 +729,7 @@ func DeleteMonitoredSeries(tx *bolt.Tx, threadHash string) error {
 }
 
 func AutoEnrollSeries(tx *bolt.Tx, t *Thread) error {
-	if t == nil || strings.ToLower(t.Type) != "series" || t.ThreadHash == "" {
+	if t == nil || metadata.NormalizeMediaType(t.Type) != "series" || t.ThreadHash == "" {
 		return nil
 	}
 	return runUpdate(tx, func(tx *bolt.Tx) error {
@@ -745,7 +749,6 @@ func AutoEnrollSeries(tx *bolt.Tx, t *Thread) error {
 			if errDec := DecodeGob(existingData, &ms); errDec == nil {
 				ms.Title = title
 				ms.RawTitle = t.RawTitle
-				// Preserve user state choice (archived/paused). Do NOT force overwrite to active!
 				if t.URL != "" {
 					ms.URL = t.URL
 				}
@@ -760,7 +763,7 @@ func AutoEnrollSeries(tx *bolt.Tx, t *Thread) error {
 			URL:         t.URL,
 			Title:       title,
 			RawTitle:    t.RawTitle,
-			Status:      "active", // Initial default state ONLY for new webseries
+			Status:      "active",
 			LastChecked: time.Now(),
 			LastUpdated: time.Now(),
 			CreatedAt:   time.Now(),
@@ -952,7 +955,7 @@ func GetEntityGraphData(tx *bolt.Tx, query string, contentType string) (*GraphEn
 	}
 
 	normQuery := metadata.NormalizeTitleForMatching(q)
-	mediaTypeFilter := strings.ToLower(strings.TrimSpace(contentType))
+	mediaTypeFilter := metadata.NormalizeMediaType(contentType)
 
 	graph := &GraphEntity{}
 	var matchedTmdbID string
@@ -1002,13 +1005,13 @@ func GetEntityGraphData(tx *bolt.Tx, query string, contentType string) (*GraphEn
 			for k, v := c.First(); k != nil; k, v = c.Next() {
 				var t Thread
 				if errDec := DecodeGob(v, &t); errDec == nil {
-					if mediaTypeFilter != "" && mediaTypeFilter != "all" && strings.ToLower(t.Type) != mediaTypeFilter {
+					if mediaTypeFilter != "" && mediaTypeFilter != "all" && metadata.NormalizeMediaType(t.Type) != mediaTypeFilter {
 						continue
 					}
 
 					match := false
 					if strings.HasPrefix(q, "tt") && t.TmdbID != nil {
-						if matchedTmdbID != "" && *t.TmdbID == matchedTmdbID {
+						if (matchedTmdbID != "" && *t.TmdbID == matchedTmdbID) || *t.TmdbID == q {
 							match = true
 						}
 					} else if matchedTmdbID != "" && t.TmdbID != nil && *t.TmdbID == matchedTmdbID {
@@ -1074,26 +1077,38 @@ func GetEntityGraphData(tx *bolt.Tx, query string, contentType string) (*GraphEn
 			}
 		}
 
-		if matchedTmdbID != "" && streamsB != nil {
-			prefix := []byte(matchedTmdbID + ":")
-			sCursor := streamsB.Cursor()
-			for k, v := sCursor.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix); k, v = sCursor.Next() {
-				var s Stream
-				if errDec := DecodeGob(v, &s); errDec == nil {
-					isLocked := false
-					if locksB != nil && locksB.Get([]byte(strings.ToLower(s.Infohash))) != nil {
-						isLocked = true
+		// Traverse streams using matched ID or canonical tt... ID
+		lookupStreamIDs := []string{}
+		if matchedTmdbID != "" { lookupStreamIDs = append(lookupStreamIDs, matchedTmdbID) }
+		if matchedImdbID != "" && matchedImdbID != matchedTmdbID { lookupStreamIDs = append(lookupStreamIDs, matchedImdbID) }
+
+		if len(lookupStreamIDs) > 0 && streamsB != nil {
+			seenStreamKeys := make(map[string]bool)
+
+			for _, targetID := range lookupStreamIDs {
+				prefix := []byte(targetID + ":")
+				sCursor := streamsB.Cursor()
+				for k, v := sCursor.Seek(prefix); k != nil && bytes.HasPrefix(k, prefix); k, v = sCursor.Next() {
+					if seenStreamKeys[string(k)] { continue }
+					seenStreamKeys[string(k)] = true
+
+					var s Stream
+					if errDec := DecodeGob(v, &s); errDec == nil {
+						isLocked := false
+						if locksB != nil && locksB.Get([]byte(strings.ToLower(s.Infohash))) != nil {
+							isLocked = true
+						}
+						graph.Streams = append(graph.Streams, GraphStream{
+							ID:       s.ID,
+							TmdbID:   s.TmdbID,
+							Season:   s.Season,
+							Episode:  s.Episode,
+							Infohash: s.Infohash,
+							Quality:  s.Quality,
+							Language: s.Language,
+							Locked:   isLocked,
+						})
 					}
-					graph.Streams = append(graph.Streams, GraphStream{
-						ID:       s.ID,
-						TmdbID:   s.TmdbID,
-						Season:   s.Season,
-						Episode:  s.Episode,
-						Infohash: s.Infohash,
-						Quality:  s.Quality,
-						Language: s.Language,
-						Locked:   isLocked,
-					})
 				}
 			}
 		}
@@ -1111,7 +1126,7 @@ func GetEntityGraphData(tx *bolt.Tx, query string, contentType string) (*GraphEn
 	graph.Meta.Year = primaryYear
 
 	if matchedTmdbID != "" {
-		if matchedImdbID != "" {
+		if matchedImdbID != "" || strings.HasPrefix(matchedTmdbID, "tt") {
 			graph.Meta.GapStatus = "HEALTHY"
 			graph.Meta.GapReason = "100% Verified Link: Both TMDB ID and IMDb ID mapped cleanly."
 		} else {
