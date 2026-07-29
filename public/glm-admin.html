@@ -842,7 +842,7 @@
     <div id="scrim" class="scrim"></div>
 
     <!-- ═══════════════════════════════════════════════════════════════════
-         ORIGINAL FUNCTIONAL SCRIPT — UNCHANGED + CRAWL FIX
+         ORIGINAL FUNCTIONAL SCRIPT — UPDATED GRAPH MULTI-ENTITY RENDERING
     ═══════════════════════════════════════════════════════════════════ -->
     <script>
         (function() {
@@ -1213,7 +1213,7 @@
                 }
             });
 
-            // ── Panel G: Expandable Tree View Graph ──
+            // ── Panel G: Expandable Tree View Graph (MULTI-ENTITY FIXED) ──
             const graphSearchInput = el('graphSearchInput');
             const graphTypeSelect = el('graphTypeSelect');
             const graphSearchBtn = el('graphSearchBtn');
@@ -1228,150 +1228,166 @@
 
                 try {
                     const r = await fetch(`/admin/api/visualize-tree?q=${encodeURIComponent(query)}&type=${contentType}&_t=${Date.now()}`);
-                    const graph = await r.json();
+                    const response = await r.json();
 
-                    if (!r.ok || graph.error) {
-                        graphCanvas.innerHTML = `<div style="color:var(--accent-red); padding:40px; text-align:center;">Graph traversal error: ${graph.error || 'Unknown'}</div>`;
+                    if (!r.ok || response.error) {
+                        graphCanvas.innerHTML = `<div style="color:var(--accent-red); padding:40px; text-align:center;">Graph traversal error: ${response.error || 'Unknown'}</div>`;
                         return;
                     }
-                    if (graph.meta.gap_status === 'NOT_FOUND') {
+
+                    // Check if the new entities array exists and has items
+                    const entities = response.entities || [];
+                    if (entities.length === 0) {
                         graphCanvas.innerHTML = `<div style="color:var(--accent-orange); padding:40px; text-align:center;">No matching entity records located in database for "${query}".</div>`;
                         return;
                     }
 
-                    let gapBadge = '<span class="pill pill-green">Healthy Linked</span>';
-                    let showInlineResolver = false;
-                    if (graph.meta.gap_status === 'MISSING_IMDB_GAP') { gapBadge = '<span class="pill pill-orange">Missing IMDb Gap</span>'; showInlineResolver = true; }
-                    else if (graph.meta.gap_status === 'PENDING_MATCH') { gapBadge = '<span class="pill pill-blue">Pending Match</span>'; showInlineResolver = true; }
-                    else if (graph.meta.gap_status === 'UNLINKED') { gapBadge = '<span class="pill pill-red">Unlinked Thread</span>'; showInlineResolver = true; }
+                    graphCanvas.innerHTML = ''; // Clear canvas for new cards
 
-                    let html = `
-                        <div class="tree-node-root">
-                            <div class="tree-header">
-                                <div>
-                                    <div style="font-size: var(--font-lg); font-weight: 700; color: var(--text-primary); margin-bottom: 4px;">${graph.meta.title || 'Unknown Title'} (${graph.meta.year || 'N/A'})</div>
-                                    <div class="text-muted" style="font-size: var(--font-sm);">TMDB: <strong style="color:var(--accent-blue)">${graph.meta.tmdb_id || 'None'}</strong> | IMDb: <strong style="color:var(--accent-blue)">${graph.meta.imdb_id || 'None'}</strong></div>
-                                </div>
-                                <div class="flex-row" style="gap: 12px; align-items: center;">
-                                    <span class="text-muted" style="font-size: var(--font-xs);">${graph.meta.gap_reason}</span>
-                                    ${gapBadge}
-                                </div>
-                            </div>
-                    `;
+                    // ✅ MULTI-ENTITY RENDERING LOOP (Apple HIG Isolated Decks)
+                    entities.forEach((graph, index) => {
+                        let gapBadge = '<span class="pill pill-green">Healthy Linked</span>';
+                        let showInlineResolver = false;
+                        if (graph.meta.gap_status === 'MISSING_IMDB_GAP') { gapBadge = '<span class="pill pill-orange">Missing IMDb Gap</span>'; showInlineResolver = true; }
+                        else if (graph.meta.gap_status === 'PENDING_MATCH') { gapBadge = '<span class="pill pill-blue">Pending Match</span>'; showInlineResolver = true; }
+                        else if (graph.meta.gap_status === 'UNLINKED') { gapBadge = '<span class="pill pill-red">Unlinked Thread</span>'; showInlineResolver = true; }
 
-                    if (showInlineResolver && graph.threads && graph.threads.length > 0) {
-                        const targetThreadId = graph.threads[0].id;
-                        html += `
-                            <div style="margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--border-light); display: flex; gap: 12px; align-items: center;">
-                                <input type="text" id="inlineGapInput" placeholder="Enter IMDb ID (e.g. tt11482184)" style="flex: 1; background: var(--bg-surface-2); border-color: var(--accent-orange);">
-                                <button id="inlineGapFixBtn" class="btn-sm btn-success" data-thread-id="${targetThreadId}">🔗 Attach & Sync</button>
-                            </div>
-                        `;
-                    }
-                    html += `</div>`;
+                        // 1. Create the isolated Root Card
+                        let entityCard = document.createElement('div');
+                        entityCard.style.marginBottom = '32px'; // Spacing between entity decks
 
-                    // Level 1: Threads
-                    const threadCount = (graph.threads || []).length;
-                    html += `
-                        <div class="tree-branch-header" onclick="this.nextElementSibling.classList.toggle('collapsed')">
-                            <span style="font-size: var(--font-md);">📂</span>
-                            <span>Physical Forum Threads</span>
-                            <span class="pill pill-gray" style="margin-left: auto;">${threadCount} Connected</span>
-                            <span style="margin-left: 8px; color: var(--text-tertiary);">▼</span>
-                        </div>
-                        <div class="tree-children">
-                    `;
-
-                    if (threadCount === 0) {
-                        html += '<div class="text-muted" style="padding: 12px 0;">No physical thread records linked to this metadata node.</div>';
-                    } else {
-                        graph.threads.forEach(t => {
-                            const urlLink = t.url ? `<a href="${t.url}" target="_blank" style="color: var(--accent-blue); font-size: var(--font-xs);">Visit Link ↗</a>` : '<span class="pill pill-red" style="font-size: var(--font-xs);">No URL</span>';
-                            html += `
-                                <div class="tree-leaf">
+                        let html = `
+                            <div class="tree-node-root">
+                                <div class="tree-header">
                                     <div>
-                                        <div style="font-weight: 600; color: var(--text-primary); margin-bottom: 4px;">${t.clean_title || t.raw_title}</div>
-                                        <div class="text-muted" style="font-size: var(--font-xs);">Raw: ${t.raw_title}</div>
-                                    </div>
-                                    <div class="flex-row" style="gap: 16px; align-items: center;">
-                                        <span class="text-muted" style="font-size: var(--font-xs);">Cat: <strong style="color:var(--accent-orange)">${t.catalog || t.type}</strong></span>
-                                        <span class="text-muted" style="font-size: var(--font-xs);">Magnets: <strong style="color:var(--accent-green)">${t.magnet_count}</strong></span>
-                                        ${urlLink}
-                                    </div>
-                                </div>
-                            `;
-                        });
-                    }
-                    html += `</div>`;
-
-                    // Level 2: Streams
-                    const streamCount = (graph.streams || []).length;
-                    html += `
-                        <div class="tree-branch-header" style="margin-top: 24px;" onclick="this.nextElementSibling.classList.toggle('collapsed')">
-                            <span style="font-size: var(--font-md);">🌊</span>
-                            <span>Composite Stream Leafs</span>
-                            <span class="pill pill-gray" style="margin-left: auto;">${streamCount} Indexed</span>
-                            <span style="margin-left: 8px; color: var(--text-tertiary);">▼</span>
-                        </div>
-                        <div class="tree-children collapsed">
-                    `;
-
-                    if (streamCount === 0) {
-                        html += '<div class="text-muted" style="padding: 12px 0;">No composite streams currently indexed for this TMDB ID.</div>';
-                    } else {
-                        graph.streams.forEach(s => {
-                            let epStr = 'Movie Stream';
-                            if (s.season !== null && s.episode !== null) epStr = `S${String(s.season).padStart(2, '0')} E${String(s.episode).padStart(2, '0')}`;
-                            html += `
-                                <div class="tree-leaf" style="border-left: 3px solid var(--accent-orange);">
-                                    <div>
-                                        <div style="font-weight: 600; color: var(--accent-orange); margin-bottom: 4px;">${epStr}</div>
-                                        <div class="text-muted" style="font-size: var(--font-xs); word-break: break-all; font-family: var(--font-mono);">${s.infohash}</div>
+                                        <div style="font-size: var(--font-lg); font-weight: 700; color: var(--text-primary); margin-bottom: 4px;">${graph.meta.title || 'Unknown Title'} (${graph.meta.year || 'N/A'})</div>
+                                        <div class="text-muted" style="font-size: var(--font-sm);">TMDB: <strong style="color:var(--accent-blue)">${graph.meta.tmdb_id || 'None'}</strong> | IMDb: <strong style="color:var(--accent-blue)">${graph.meta.imdb_id || 'None'}</strong></div>
                                     </div>
                                     <div class="flex-row" style="gap: 12px; align-items: center;">
-                                        <span class="pill pill-blue">${s.quality || 'SD'}</span>
-                                        <span class="pill ${s.is_locked ? 'pill-orange' : 'pill-green'}">${s.is_locked ? '🔒 LOCKED' : '🔓 OPEN'}</span>
+                                        <span class="text-muted" style="font-size: var(--font-xs);">${graph.meta.gap_reason}</span>
+                                        ${gapBadge}
                                     </div>
                                 </div>
+                        `;
+
+                        if (showInlineResolver && graph.threads && graph.threads.length > 0) {
+                            const targetThreadId = graph.threads[0].id;
+                            html += `
+                                <div style="margin-top: 20px; padding-top: 16px; border-top: 1px solid var(--border-light); display: flex; gap: 12px; align-items: center;">
+                                    <input type="text" id="inlineGapInput_${index}" placeholder="Enter IMDb ID (e.g. tt11482184)" style="flex: 1; background: var(--bg-surface-2); border-color: var(--accent-orange);">
+                                    <button id="inlineGapFixBtn_${index}" class="btn-sm btn-success" data-thread-id="${targetThreadId}">🔗 Attach & Sync</button>
+                                </div>
                             `;
-                        });
-                    }
-                    html += `</div>`;
+                        }
+                        html += `</div>`;
 
-                    graphCanvas.innerHTML = html;
+                        // Level 1: Threads
+                        const threadCount = (graph.threads || []).length;
+                        html += `
+                            <div class="tree-branch-header" onclick="this.nextElementSibling.classList.toggle('collapsed')">
+                                <span style="font-size: var(--font-md);">📂</span>
+                                <span>Physical Forum Threads</span>
+                                <span class="pill pill-gray" style="margin-left: auto;">${threadCount} Connected</span>
+                                <span style="margin-left: 8px; color: var(--text-tertiary);">▼</span>
+                            </div>
+                            <div class="tree-children">
+                        `;
 
-                    const inlineGapFixBtn = el('inlineGapFixBtn');
-                    if (inlineGapFixBtn) {
-                        inlineGapFixBtn.addEventListener('click', async () => {
-                            const threadId = parseInt(inlineGapFixBtn.getAttribute('data-thread-id'));
-                            const officialId = el('inlineGapInput').value.trim();
-                            if (!officialId) return showToast('Please enter an IMDb ID (e.g. tt11482184) to attach.', 'warn');
+                        if (threadCount === 0) {
+                            html += '<div class="text-muted" style="padding: 12px 0;">No physical thread records linked to this metadata node.</div>';
+                        } else {
+                            graph.threads.forEach(t => {
+                                const urlLink = t.url ? `<a href="${t.url}" target="_blank" style="color: var(--accent-blue); font-size: var(--font-xs);">Visit Link ↗</a>` : '<span class="pill pill-red" style="font-size: var(--font-xs);">No URL</span>';
+                                html += `
+                                    <div class="tree-leaf">
+                                        <div>
+                                            <div style="font-weight: 600; color: var(--text-primary); margin-bottom: 4px;">${t.clean_title || t.raw_title}</div>
+                                            <div class="text-muted" style="font-size: var(--font-xs);">Raw: ${t.raw_title}</div>
+                                        </div>
+                                        <div class="flex-row" style="gap: 16px; align-items: center;">
+                                            <span class="text-muted" style="font-size: var(--font-xs);">Cat: <strong style="color:var(--accent-orange)">${t.catalog || t.type}</strong></span>
+                                            <span class="text-muted" style="font-size: var(--font-xs);">Magnets: <strong style="color:var(--accent-green)">${t.magnet_count}</strong></span>
+                                            ${urlLink}
+                                        </div>
+                                    </div>
+                                `;
+                            });
+                        }
+                        html += `</div>`;
 
-                            inlineGapFixBtn.disabled = true;
-                            inlineGapFixBtn.innerText = 'Linking...';
-                            try {
-                                const response = await fetch('/admin/api/link-official', {
-                                    method: 'POST', headers: { 'Content-Type': 'application/json' },
-                                    body: JSON.stringify({ threadId, officialId })
-                                });
-                                const d = await response.json();
-                                if (response.ok) {
-                                    showToast(`Successfully attached ${officialId}! Re-rendering graph...`, 'success');
-                                    graphSearchInput.value = officialId;
-                                    await renderEntityGraph();
-                                    await fetchHealth();
-                                } else {
-                                    showToast('Failed to attach IMDb ID: ' + (d.error || 'Unknown error'), 'error');
+                        // Level 2: Streams
+                        const streamCount = (graph.streams || []).length;
+                        html += `
+                            <div class="tree-branch-header" style="margin-top: 24px;" onclick="this.nextElementSibling.classList.toggle('collapsed')">
+                                <span style="font-size: var(--font-md);">🌊</span>
+                                <span>Composite Stream Leafs</span>
+                                <span class="pill pill-gray" style="margin-left: auto;">${streamCount} Indexed</span>
+                                <span style="margin-left: 8px; color: var(--text-tertiary);">▼</span>
+                            </div>
+                            <div class="tree-children collapsed">
+                        `;
+
+                        if (streamCount === 0) {
+                            html += '<div class="text-muted" style="padding: 12px 0;">No composite streams currently indexed for this TMDB ID.</div>';
+                        } else {
+                            graph.streams.forEach(s => {
+                                let epStr = 'Movie Stream';
+                                if (s.season !== null && s.episode !== null) epStr = `S${String(s.season).padStart(2, '0')} E${String(s.episode).padStart(2, '0')}`;
+                                html += `
+                                    <div class="tree-leaf" style="border-left: 3px solid var(--accent-orange);">
+                                        <div>
+                                            <div style="font-weight: 600; color: var(--accent-orange); margin-bottom: 4px;">${epStr}</div>
+                                            <div class="text-muted" style="font-size: var(--font-xs); word-break: break-all; font-family: var(--font-mono);">${s.infohash}</div>
+                                        </div>
+                                        <div class="flex-row" style="gap: 12px; align-items: center;">
+                                            <span class="pill pill-blue">${s.quality || 'SD'}</span>
+                                            <span class="pill ${s.is_locked ? 'pill-orange' : 'pill-green'}">${s.is_locked ? '🔒 LOCKED' : '🔓 OPEN'}</span>
+                                        </div>
+                                    </div>
+                                `;
+                            });
+                        }
+                        html += `</div>`;
+
+                        entityCard.innerHTML = html;
+                        graphCanvas.appendChild(entityCard);
+
+                        // Attach event listener for this specific entity's inline resolver
+                        const inlineGapFixBtn = document.getElementById(`inlineGapFixBtn_${index}`);
+                        if (inlineGapFixBtn) {
+                            inlineGapFixBtn.addEventListener('click', async () => {
+                                const threadId = parseInt(inlineGapFixBtn.getAttribute('data-thread-id'));
+                                const inputField = document.getElementById(`inlineGapInput_${index}`);
+                                const officialId = inputField.value.trim();
+                                if (!officialId) return showToast('Please enter an IMDb ID (e.g. tt11482184) to attach.', 'warn');
+
+                                inlineGapFixBtn.disabled = true;
+                                inlineGapFixBtn.innerText = 'Linking...';
+                                try {
+                                    const resp = await fetch('/admin/api/link-official', {
+                                        method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                        body: JSON.stringify({ threadId, officialId })
+                                    });
+                                    const d = await resp.json();
+                                    if (resp.ok) {
+                                        showToast(`Successfully attached ${officialId}! Re-rendering graph...`, 'success');
+                                        graphSearchInput.value = officialId;
+                                        await renderEntityGraph();
+                                        await fetchHealth();
+                                    } else {
+                                        showToast('Failed to attach IMDb ID: ' + (d.error || 'Unknown error'), 'error');
+                                        inlineGapFixBtn.disabled = false;
+                                        inlineGapFixBtn.innerText = '🔗 Attach & Sync';
+                                    }
+                                } catch (err) {
+                                    showToast('Network error during gap attachment: ' + err.message, 'error');
                                     inlineGapFixBtn.disabled = false;
                                     inlineGapFixBtn.innerText = '🔗 Attach & Sync';
                                 }
-                            } catch (err) {
-                                showToast('Network error during gap attachment: ' + err.message, 'error');
-                                inlineGapFixBtn.disabled = false;
-                                inlineGapFixBtn.innerText = '🔗 Attach & Sync';
-                            }
-                        });
-                    }
+                            });
+                        }
+                    });
+
                 } catch (err) {
                     graphCanvas.innerHTML = `<div style="color:var(--accent-red); padding:40px; text-align:center;">Network error during graph retrieval: ${err.message}</div>`;
                 }
