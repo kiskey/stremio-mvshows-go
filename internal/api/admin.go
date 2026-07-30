@@ -1,5 +1,5 @@
-// Version: 3.0.1
-// Change log: Integrated MagnetSetHash computation during manual linking and auto-match. Replaced raw bucket Put calls with idempotent UpsertMagnetCache and UpsertTmdbMetadata to preserve TTLs and prevent unnecessary disk writes.
+// Version: 3.0.2
+// Change log: Fixed Go compiler error (undefined err) in linkOfficialHandler and autoMatchHandler by properly declaring err with :=.
 
 package api
 
@@ -344,7 +344,7 @@ func linkOfficialHandler(c *gin.Context) {
         t.MagnetURIs = cleanedMagnets
         t.MagnetSetHash = parser.ComputeMagnetSetHash(cleanedMagnets)
 
-        err = database.CreateOrUpdateThread(tx, t)
+        err := database.CreateOrUpdateThread(tx, t)
         if err != nil {
             return err
         }
@@ -622,7 +622,7 @@ func autoMatchHandler(c *gin.Context) {
             res.Thread.MagnetURIs = cleanedMagnets
             res.Thread.MagnetSetHash = parser.ComputeMagnetSetHash(cleanedMagnets)
 
-            err = database.CreateOrUpdateThread(tx, &res.Thread)
+            err := database.CreateOrUpdateThread(tx, &res.Thread)
             if err != nil {
                 return err
             }
