@@ -1,5 +1,5 @@
-// Version: 2.0.0
-// Change log: Replaced fragile string-based bypass with deterministic O(1) MagnetSetHash comparison. Extended zero-write bypass to all thread statuses. Isolated metadata-only updates from new-magnet stream writes. Integrated UpsertMagnetCache and UpsertTmdbMetadata to prevent TTL resets and disk wear.
+// Version: 2.2.0
+// Change log: Architectural simplification. Removed trivial metadata sync (RawTitle/URL). Thread updates are now strictly gated by MagnetSetHash changes only, ensuring 0 I/O for unchanged threads and perfect Recent Activity stability.
 
 package orchestrator
 
@@ -220,32 +220,6 @@ func isValidParsedTitle(parsed *parser.ParseResult) bool {
     return true
 }
 
-// isThreadContentChanged uses the deterministic MagnetSetHash for O(1) comparison.
-// It is immune to magnet URI formatting, tracker drift, and legacy uncleaned data.
-func isThreadContentChanged(existing *database.Thread, incomingMagnets []string, rawTitle, threadURL string) bool {
-    if existing == nil {
-        return true
-    }
-
-    if existing.RawTitle != rawTitle {
-        return true
-    }
-
-    if threadURL != "" && existing.URL != "" && existing.URL != threadURL {
-        return true
-    }
-
-    incomingHash := parser.ComputeMagnetSetHash(incomingMagnets)
-    storedHash := existing.MagnetSetHash
-
-    // Backward compatibility: compute hash on the fly for legacy records missing MagnetSetHash
-    if storedHash == "" && len(existing.MagnetURIs) > 0 {
-        storedHash = parser.ComputeMagnetSetHash(existing.MagnetURIs)
-    }
-
-    return incomingHash != storedHash
-}
-
 func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient, incremental bool) {
     defer func() {
         if r := recover(); r != nil {
@@ -311,56 +285,35 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
         cleanedMagnets = append(cleanedMagnets, cleanM)
     }
 
-    // ─── UNIFIED BYPASS LOGIC ───
-    // Applies to ALL statuses (linked, pending_tmdb) to prevent unnecessary disk I/O
+    // ─── PURE INVARIANT BYPASS LOGIC ───
+    // Identity is ThreadHash (Topic ID). Content change is MagnetSetHash (Infohashes).
+    // We do NOT care if RawTitle or URL changed slightly. If magnets are same, thread is unchanged.
     if hasExisting {
-        if !isThreadContentChanged(existing, cleanedMagnets, thread.RawTitle, thread.URL) {
+        incomingHash := parser.ComputeMagnetSetHash(cleanedMagnets)
+        existingHash := existing.MagnetSetHash
+        
+        // Backward compatibility fallback for legacy records missing MagnetSetHash
+        if existingHash == "" {
+            existingHash = parser.ComputeMagnetSetHash(existing.MagnetURIs)
+        }
+
+        // If magnets match, we do absolutely nothing. No metadata sync, no timestamp updates.
+        if incomingHash == existingHash {
             utils.Logger.Debug().
                 Str("hash", thread.ThreadHash).
                 Str("title", thread.RawTitle).
-                Msg("Thread content fingerprint matches stored record. Bypassing all writes (0 disk I/O).")
+                Msg("Magnet set hash matches stored record. Bypassing all writes (0 disk I/O).")
             _ = database.DeleteFailedThread(nil, thread.ThreadHash)
             return
         }
 
-        // Content has changed. Determine if magnets changed or just metadata (title/URL)
-        incomingHash := parser.ComputeMagnetSetHash(cleanedMagnets)
-        existingHash := existing.MagnetSetHash
-        if existingHash == "" {
-            existingHash = parser.ComputeMagnetSetHash(existing.MagnetURIs)
-        }
-        hasNewMagnets := incomingHash != existingHash
-
-        // If thread is linked and only metadata changed (no new magnets),
-        // update ONLY the thread record — don't touch streams/metadata/magnet_cache
-        if existing.Status == "linked" && existing.TmdbID != nil && !hasNewMagnets {
-            errTx := database.DB.Update(func(tx *bolt.Tx) error {
-                existing.RawTitle = thread.RawTitle
-                if thread.URL != "" {
-                    existing.URL = thread.URL
-                }
-                existing.MagnetURIs = cleanedMagnets
-                existing.MagnetSetHash = incomingHash
-                existing.LastSeen = time.Now()
-                existing.UpdatedAt = time.Now()
-                return database.CreateOrUpdateThread(tx, existing)
-            })
-            if errTx == nil {
-                utils.Logger.Info().
-                    Str("hash", thread.ThreadHash).
-                    Msg("Thread metadata updated (title/URL). Streams and metadata untouched — no new magnets detected.")
-                _ = database.DeleteFailedThread(nil, thread.ThreadHash)
-                return
-            }
-        }
-
-        // New magnets detected OR thread not yet linked — proceed to full write path
+        // New magnets detected! Proceed to full write path, updating timestamps.
         if existing.Status == "linked" && existing.TmdbID != nil {
             utils.Logger.Info().
                 Str("hash", thread.ThreadHash).
                 Str("raw_title", thread.RawTitle).
                 Str("tmdb_id", *existing.TmdbID).
-                Msg("Topic ID invariant match identified with updated magnets. Executing in-place thread update & stream merging...")
+                Msg("New magnets detected. Executing in-place thread update & stream merging...")
 
             errTx := database.DB.Update(func(tx *bolt.Tx) error {
                 existing.MagnetURIs = cleanedMagnets
@@ -421,7 +374,7 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
                 }
 
                 if len(newStreams) > 0 {
-                    _ = database.CreateStreams(tx, newStreams) // Idempotent internally
+                    _ = database.CreateStreams(tx, newStreams)
                 }
 
                 _ = database.DeleteFailedThread(tx, thread.ThreadHash)
@@ -557,7 +510,6 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
             tmdbMetadata.Year = &tmdbResult.Year
         }
 
-        // Idempotent metadata write
         _ = database.UpsertTmdbMetadata(tx, tmdbMetadata)
 
         cleanTitle := tmdbResult.Title
@@ -638,7 +590,7 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
         }
 
         if len(streams) > 0 {
-            err = database.CreateStreams(tx, streams) // Idempotent internally
+            err = database.CreateStreams(tx, streams)
             if err != nil {
                 return err
             }
