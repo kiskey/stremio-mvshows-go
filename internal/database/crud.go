@@ -1,5 +1,5 @@
-// Version: 2.9.3
-// Change log: Fixed compilation error by including the missing UpsertMagnetCache and UpsertTmdbMetadata function definitions.
+// Version: 2.9.4
+// Change log: Fixed critical MagnetSetHash desynchronization. CreateOrUpdateThread now forcefully recomputes MagnetSetHash after merging MagnetURIs to guarantee database parity and prevent oscillating bypass failures.
 
 package database
 
@@ -265,7 +265,10 @@ func CreateOrUpdateThread(tx *bolt.Tx, data *Thread) error {
                             merged = append(merged, m)
                         }
                     }
+                    
                     data.MagnetURIs = merged
+                    // CRITICAL FIX: Forcefully recompute MagnetSetHash after merge to guarantee DB parity
+                    data.MagnetSetHash = parser.ComputeMagnetSetHash(merged)
                 }
 
                 if oldThread.Catalog != "" {
