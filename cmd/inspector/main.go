@@ -1,5 +1,5 @@
-// Version: 3.0.0
-// Change log: Implemented Step 2.5 to normalize legacy magnet URIs across all existing threads and persist deterministic MagnetSetHash fingerprints. Integrated idempotent UpsertMagnetCache and UpsertTmdbMetadata functions.
+// Version: 3.0.1
+// Change log: Fixed Go compiler error (declared and not used: magnetB) by removing the redundant bucket assignment since UpsertMagnetCache handles it internally.
 
 package main
 
@@ -237,7 +237,6 @@ func main() {
         monitoredB, _ := tx.CreateBucketIfNotExists([]byte("monitored_series"))
         streamsB := tx.Bucket([]byte("streams"))
         metaB := tx.Bucket([]byte("tmdb_metadata"))
-        magnetB := tx.Bucket([]byte("magnet_cache"))
 
         // STEP 1: Audit and map all numeric TMDB IDs to their IMDb tt... IDs
         log.Println("Step 1: Auditing and standardizing metadata bucket under canonical tt... primary keys...")
