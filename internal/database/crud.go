@@ -1,5 +1,5 @@
-// Version: 2.9.4
-// Change log: Fixed critical MagnetSetHash desynchronization. CreateOrUpdateThread now forcefully recomputes MagnetSetHash after merging MagnetURIs to guarantee database parity and prevent oscillating bypass failures.
+// Version: 2.9.5
+// Change log: Removed zombie magnet merge logic. CreateOrUpdateThread now strictly trusts the incoming data.MagnetURIs slice as the source of truth, preventing oscillating bypass failures when rogue magnets are filtered out by the orchestrator.
 
 package database
 
@@ -236,40 +236,11 @@ func CreateOrUpdateThread(tx *bolt.Tx, data *Thread) error {
                     data.URL = oldThread.URL
                 }
 
-                if len(oldThread.MagnetURIs) > 0 {
-                    seenInfohashes := make(map[string]bool)
-                    var merged []string
-                    
-                    // Add incoming magnets first (prioritize cleaned versions)
-                    for _, m := range data.MagnetURIs {
-                        ih := parser.ExtractInfohash(m)
-                        if ih == "" {
-                            continue
-                        }
-                        ih = strings.ToLower(ih)
-                        if !seenInfohashes[ih] {
-                            seenInfohashes[ih] = true
-                            merged = append(merged, m)
-                        }
-                    }
-                    
-                    // Add existing magnets if not already present by infohash
-                    for _, m := range oldThread.MagnetURIs {
-                        ih := parser.ExtractInfohash(m)
-                        if ih == "" {
-                            continue
-                        }
-                        ih = strings.ToLower(ih)
-                        if !seenInfohashes[ih] {
-                            seenInfohashes[ih] = true
-                            merged = append(merged, m)
-                        }
-                    }
-                    
-                    data.MagnetURIs = merged
-                    // CRITICAL FIX: Forcefully recompute MagnetSetHash after merge to guarantee DB parity
-                    data.MagnetSetHash = parser.ComputeMagnetSetHash(merged)
-                }
+                // CRITICAL FIX: Removed zombie magnet merge logic.
+                // The orchestrator is the source of truth. If it filtered out a rogue magnet,
+                // we must NOT restore it from oldThread.MagnetURIs. 
+                // We strictly trust data.MagnetURIs and recompute the hash to guarantee parity.
+                data.MagnetSetHash = parser.ComputeMagnetSetHash(data.MagnetURIs)
 
                 if oldThread.Catalog != "" {
                     oldPosted := time.Unix(0, 0)
