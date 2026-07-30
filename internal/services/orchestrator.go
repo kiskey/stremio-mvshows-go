@@ -1,5 +1,5 @@
-// Version: 2.3.0
-// Change log: Enforced strict metadata.NormalizeTitleForMatching on all OverlapCoefficient inputs to prevent false-positive magnet drops due to casing/punctuation differences.
+// Version: 2.3.1
+// Change log: Added empty-list safeguard to prevent accidental data wipes if the scraper fails to extract any magnets. Ensured existing.MagnetURIs is strictly overwritten by cleanedMagnets.
 
 package orchestrator
 
@@ -291,6 +291,16 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
         cleanedMagnets = append(cleanedMagnets, cleanM)
     }
 
+    // SAFEGUARD: If scraper returned 0 magnets, do NOT wipe the DB. 
+    // This prevents data loss during transient Cloudflare blocks or partial page loads.
+    if len(cleanedMagnets) == 0 {
+        utils.Logger.Warn().
+            Str("hash", thread.ThreadHash).
+            Str("title", thread.RawTitle).
+            Msg("Scraper returned 0 valid magnets. Bypassing update to prevent data wipe.")
+        return
+    }
+
     // ─── PURE INVARIANT BYPASS LOGIC ───
     // Identity is ThreadHash (Topic ID). Content change is MagnetSetHash (Infohashes).
     // We do NOT care if RawTitle or URL changed slightly. If magnets are same, thread is unchanged.
@@ -322,6 +332,8 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
                 Msg("New magnets detected. Executing in-place thread update & stream merging...")
 
             errTx := database.DB.Update(func(tx *bolt.Tx) error {
+                // STRICT OVERWRITE: The orchestrator is the source of truth.
+                // We do not merge with oldThread.MagnetURIs here. CRUD layer trusts this slice exactly.
                 existing.MagnetURIs = cleanedMagnets
                 existing.MagnetSetHash = incomingHash
                 existing.RawTitle = thread.RawTitle
