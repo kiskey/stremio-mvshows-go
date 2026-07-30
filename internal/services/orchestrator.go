@@ -1,5 +1,5 @@
-// Version: 2.2.0
-// Change log: Architectural simplification. Removed trivial metadata sync (RawTitle/URL). Thread updates are now strictly gated by MagnetSetHash changes only, ensuring 0 I/O for unchanged threads and perfect Recent Activity stability.
+// Version: 2.3.0
+// Change log: Enforced strict metadata.NormalizeTitleForMatching on all OverlapCoefficient inputs to prevent false-positive magnet drops due to casing/punctuation differences.
 
 package orchestrator
 
@@ -256,6 +256,16 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
         return
     }
 
+    // Pre-normalize titles for deterministic overlap comparison
+    normParsedTitle := metadata.NormalizeTitleForMatching(parsed.Title)
+    var normExistingTitle string
+    if existing != nil {
+        normExistingTitle = metadata.NormalizeTitleForMatching(existing.CleanTitle)
+    }
+    if normExistingTitle == "" {
+        normExistingTitle = normParsedTitle
+    }
+
     // Clean incoming magnets and filter out rogue title divergence
     var cleanedMagnets []string
     for _, m := range thread.MagnetURIs {
@@ -264,19 +274,15 @@ func processThread(thread crawler.CrawledThread, tmdbClient *metadata.TMDBClient
         if dn != "" {
             pmr := parser.ParseRelease(dn, threadType)
             if pmr != nil && pmr.IsValid && pmr.CleanTitle != "" {
-                overlapParsed := metadata.OverlapCoefficient(parsed.Title, pmr.CleanTitle)
-                existingCleanTitle := ""
-                if existing != nil {
-                    existingCleanTitle = existing.CleanTitle
-                }
-                if existingCleanTitle == "" {
-                    existingCleanTitle = parsed.Title
-                }
-                overlapClean := metadata.OverlapCoefficient(existingCleanTitle, pmr.CleanTitle)
+                normMagnetTitle := metadata.NormalizeTitleForMatching(pmr.CleanTitle)
+                
+                overlapParsed := metadata.OverlapCoefficient(normParsedTitle, normMagnetTitle)
+                overlapClean := metadata.OverlapCoefficient(normExistingTitle, normMagnetTitle)
+                
                 if overlapParsed < 0.20 && overlapClean < 0.20 {
                     utils.Logger.Warn().
-                        Str("thread_title", parsed.Title).
-                        Str("magnet_title", pmr.CleanTitle).
+                        Str("thread_title", normParsedTitle).
+                        Str("magnet_title", normMagnetTitle).
                         Msg("In-thread title divergence detected. Dropping rogue magnet.")
                     continue
                 }
