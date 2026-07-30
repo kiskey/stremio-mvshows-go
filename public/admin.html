@@ -2,615 +2,967 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>► MVSHOWS ADMIN TERMINAL ◄</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+    <title>MVSHOWS — Ops Console</title>
     <style>
-        @import url('https://fonts.googleapis.com/css2?family=VT323&display=swap');
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
 
-        body { 
-            font-family: 'VT323', 'Courier New', monospace; 
-            font-size: 1.35rem;
-            line-height: 1.3;
-            margin: 20px; 
-            background: #050505; 
-            color: #e0e0e0; 
-            letter-spacing: 1px;
-            text-shadow: 0 0 3px rgba(224, 224, 224, 0.25);
-        }
-        
-        h1 { 
-            text-align: center; 
-            color: #00ff66; 
-            font-size: 3rem; 
-            margin-bottom: 25px;
-            text-shadow: 0 0 8px rgba(0, 255, 102, 0.5);
-            text-transform: uppercase;
-        }
+        :root {
+            /* ── Apple Human Interface Dark Palette: True OLED Black ── */
+            --bg-main: #000000;
+            --bg-surface: #1c1c1e;
+            --bg-surface-elevated: #2c2c2e;
+            --bg-input: rgba(118, 118, 128, 0.24);
+            
+            --border-subtle: rgba(255, 255, 255, 0.08);
+            --border-strong: rgba(255, 255, 255, 0.16);
+            --border-focus: rgba(10, 132, 255, 0.5);
 
-        table { 
-            width: 100%;
-            border-collapse: collapse; 
-            margin: 5px 0; 
-        }
+            --text-primary: #f5f5f7;
+            --text-secondary: #8e8e93;
+            --text-tertiary: #636366;
 
-        td, th { 
-            padding: 6px 12px; 
-            border-bottom: 1px dashed #333; 
-            text-align: left;
-        }
+            /* Apple System Vibrant Accent Colors */
+            --accent-blue: #0a84ff;
+            --accent-green: #30d158;
+            --accent-orange: #ff9f0a;
+            --accent-red: #ff453a;
+            --accent-cyan: #64d2ff;
+            --accent-purple: #bf5af2;
 
-        th {
-            color: #00e5ff;
-            text-transform: uppercase;
-        }
+            --radius-sm: 10px;
+            --radius-md: 14px;
+            --radius-lg: 20px;
+            --radius-xl: 28px;
 
-        button { 
-            font-family: 'VT323', 'Courier New', monospace;
-            font-size: 1.25rem;
-            background: #000; 
-            color: #00ff66; 
-            border: 2px solid #00ff66; 
-            padding: 5px 14px; 
-            cursor: pointer; 
-            border-radius: 0;
-            text-transform: uppercase;
-            box-shadow: 2px 2px 0 #004411;
-            margin: 4px;
-            transition: all 0.1s ease;
+            --shadow-flat: 0 2px 8px rgba(0, 0, 0, 0.4);
+            --shadow-depth: 0 16px 40px rgba(0, 0, 0, 0.7);
+            --ease-apple: cubic-bezier(0.16, 1, 0.3, 1);
+
+            --rail-w: 250px;
+            --topbar-h: 56px;
+
+            --font-display: ui-sans-serif, -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "SF Pro", "Inter", system-ui, sans-serif;
+            --font-body: ui-sans-serif, -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "SF Pro", "Inter", system-ui, sans-serif;
+            --font-mono: ui-monospace, "SF Mono", SFMono-Regular, "JetBrains Mono", Menlo, Consolas, monospace;
+
+            --font-size-large-title: clamp(26px, 3.2vw, 34px);
+            --font-size-title-1: clamp(22px, 2.5vw, 28px);
+            --font-size-title-2: clamp(18px, 2vw, 22px);
+            --font-size-title-3: clamp(16px, 1.5vw, 20px);
+            --font-size-body: clamp(14px, 1.1vw, 16px);
+            --font-size-subhead: clamp(13px, 1vw, 15px);
+            --font-size-caption: clamp(11px, 0.9vw, 12.5px);
         }
 
-        button:hover { 
-            background: #00ff66; 
-            color: #000; 
-            box-shadow: none;
-            transform: translate(2px, 2px);
+        * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+        html { scroll-behavior: smooth; height: 100%; background-color: var(--bg-main); }
+
+        body {
+            font-family: var(--font-body);
+            font-size: var(--font-size-body);
+            background-color: var(--bg-main);
+            color: var(--text-primary);
+            line-height: 1.47059;
+            letter-spacing: -0.011em;
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
+            min-height: 100vh;
+            overflow-x: hidden;
+            touch-action: manipulation;
         }
 
-        button:disabled { 
-            background: #111;
-            border-color: #444;
-            color: #444; 
-            box-shadow: none;
-            cursor: not-allowed; 
-            transform: none;
+        h1 {
+            font-family: var(--font-display);
+            font-size: var(--font-size-large-title);
+            font-weight: 700;
+            letter-spacing: -0.022em;
+            margin-bottom: 24px;
+            text-align: center;
         }
 
-        select, input[type="text"] { 
-            font-family: 'VT323', 'Courier New', monospace;
-            font-size: 1.25rem;
-            padding: 4px 8px; 
-            margin: 4px; 
-            border-radius: 0; 
-            border: 2px solid #00e5ff; 
-            background: #0a0a0c; 
-            color: #00e5ff; 
-            box-shadow: inset 1px 1px 0 #000;
-        }
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: transparent; }
+        ::-webkit-scrollbar-thumb { background: rgba(255, 255, 255, 0.2); border-radius: 3px; }
+        ::-webkit-scrollbar-thumb:hover { background: rgba(255, 255, 255, 0.35); }
 
-        select:focus, input[type="text"]:focus {
-            outline: none;
-            border-color: #ff9900;
-            color: #ff9900;
-        }
+        a { color: var(--accent-blue); text-decoration: none; }
+        a:hover { text-decoration: underline; }
 
-        .section { 
-            border: 2px solid #e0e0e0;
-            background-color: #0a0a0c;
-            padding: 15px; 
-            box-shadow: 4px 4px 0 #222;
-            position: relative;
-            margin-bottom: 20px;
-        }
+        .app-shell { display: flex; min-height: 100vh; background-color: var(--bg-main); }
 
-        .terminal-header {
-            background: #e0e0e0;
-            color: #000;
-            font-weight: bold;
-            padding: 3px 10px;
-            margin: -15px -15px 15px -15px;
-            text-transform: uppercase;
-            font-size: 1.15rem;
-            display: flex;
-            justify-content: space-between;
-        }
-
-        .dashboard-grid {
-            display: grid;
-            grid-template-columns: repeat(12, 1fr);
-            gap: 20px;
-        }
-
-        .span-4 { grid-column: span 4; }
-        .span-6 { grid-column: span 6; }
-        .span-8 { grid-column: span 8; }
-        .span-12 { grid-column: span 12; }
-
-        @media (max-width: 1024px) {
-            .span-4, .span-6, .span-8 { grid-column: span 12; }
-        }
-
-        .glow-green { color: #00ff66; text-shadow: 0 0 4px rgba(0, 255, 102, 0.3); }
-        .glow-cyan { color: #00e5ff; text-shadow: 0 0 4px rgba(0, 229, 255, 0.3); }
-        .glow-amber { color: #ff9900; text-shadow: 0 0 4px rgba(255, 153, 0, 0.3); }
-        .glow-red { color: #ff2a5f; text-shadow: 0 0 4px rgba(255, 42, 95, 0.3); }
-
-        .rescue-grid {
-            display: grid;
-            grid-template-columns: repeat(12, 1fr);
-            gap: 20px;
-        }
-        .rescue-manager {
-            grid-column: span 7;
-        }
-        .rescue-actions {
-            grid-column: span 5;
+        .rail {
+            width: var(--rail-w);
+            flex-shrink: 0;
+            background: rgba(28, 28, 30, 0.85);
+            backdrop-filter: blur(30px) saturate(190%);
+            -webkit-backdrop-filter: blur(30px) saturate(190%);
+            border-right: 1px solid var(--border-subtle);
             display: flex;
             flex-direction: column;
-            gap: 15px;
-        }
-        @media (max-width: 1100px) {
-            .rescue-manager, .rescue-actions {
-                grid-column: span 12;
-            }
+            padding: 16px 12px;
+            gap: 4px;
+            position: sticky;
+            top: 0;
+            height: 100vh;
+            z-index: 60;
+            transition: transform 0.28s var(--ease-apple);
         }
 
-        /* Panel F Autocomplete Dropdown Styling */
-        .autocomplete-container {
-            position: relative;
-            flex: 1;
+        .rail-brand {
+            display: flex; align-items: center; gap: 10px;
+            font-family: var(--font-display); font-weight: 700; font-size: 16px;
+            letter-spacing: -0.015em; padding: 10px 10px 18px 10px; white-space: nowrap; overflow: hidden;
         }
-        .autocomplete-dropdown {
-            position: absolute;
-            top: 100%;
-            left: 0;
-            right: 0;
-            background: #08080c;
-            border: 2px solid #00ff66;
-            z-index: 1000;
-            max-height: 250px;
-            overflow-y: auto;
-            display: none;
-            box-shadow: 4px 4px 0 #000;
+        .rail-brand .dot {
+            width: 10px; height: 10px; border-radius: 50%;
+            background: var(--accent-orange); box-shadow: 0 0 12px rgba(255, 159, 10, 0.5); flex-shrink: 0;
         }
-        .autocomplete-item {
-            padding: 8px 12px;
-            border-bottom: 1px dashed #333;
-            cursor: pointer;
+        .rail-brand .sub { color: var(--text-tertiary); font-weight: 500; font-size: 10.5px; font-family: var(--font-mono); letter-spacing: 0.02em; display: block; margin-top: 2px; }
+
+        .rail-section-label {
+            font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em;
+            color: var(--text-tertiary); font-weight: 600; padding: 12px 10px 6px;
+            white-space: nowrap; overflow: hidden;
+        }
+
+        .nav-btn {
+            display: flex; align-items: center; gap: 10px;
+            width: 100%; text-align: left; background: transparent; border: none;
+            color: var(--text-secondary); font-family: var(--font-body); font-weight: 500; font-size: var(--font-size-subhead);
+            letter-spacing: -0.011em; padding: 9px 12px; border-radius: var(--radius-sm); cursor: pointer;
+            white-space: nowrap; overflow: hidden; transition: all 0.18s var(--ease-apple); min-height: 44px;
+        }
+        .nav-btn .ic { font-size: 16px; width: 22px; text-align: center; flex-shrink: 0; }
+        .nav-btn:hover { background: rgba(255, 255, 255, 0.08); color: var(--text-primary); }
+        .nav-btn.active { background: var(--accent-blue); color: #ffffff; font-weight: 600; box-shadow: var(--shadow-flat); }
+        .nav-btn.active .ic { color: #ffffff; }
+        .nav-btn .nav-flag { margin-left: auto; width: 8px; height: 8px; border-radius: 50%; background: var(--accent-red); display: none; flex-shrink: 0; }
+        .nav-btn .nav-flag.show { display: inline-block; }
+
+        .rail-footer { margin-top: auto; padding: 12px 8px 4px; border-top: 1px solid var(--border-subtle); }
+        .rail-status-row { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--text-secondary); white-space: nowrap; overflow: hidden; }
+        .pulse-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--text-tertiary); flex-shrink: 0; position: relative; }
+        .pulse-dot.live { background: var(--accent-orange); }
+        .pulse-dot.live::after {
+            content: ''; position: absolute; inset: -3px; border-radius: 50%;
+            border: 1.5px solid var(--accent-orange); animation: pulse-ring 1.8s var(--ease-apple) infinite;
+        }
+        @keyframes pulse-ring { 0% { transform: scale(0.8); opacity: 0.9; } 100% { transform: scale(2.2); opacity: 0; } }
+
+        .main { flex: 1; min-width: 0; display: flex; flex-direction: column; background-color: var(--bg-main); }
+
+        .topbar {
+            height: var(--topbar-h); flex-shrink: 0; position: sticky; top: 0; z-index: 50;
+            display: flex; align-items: center; gap: 12px; padding: 0 24px;
+            background: rgba(0, 0, 0, 0.75); backdrop-filter: blur(25px) saturate(190%);
+            -webkit-backdrop-filter: blur(25px) saturate(190%);
+            border-bottom: 1px solid var(--border-subtle);
+        }
+        .hamburger {
+            display: none; background: var(--bg-surface-elevated); border: 1px solid var(--border-subtle);
+            width: 44px; height: 44px; border-radius: var(--radius-sm); font-size: 18px;
+            align-items: center; justify-content: center; padding: 0; color: var(--text-primary); cursor: pointer;
+            transition: background 0.2s var(--ease-apple);
+        }
+        .hamburger:active { transform: scale(0.95); }
+
+        .topbar-title { font-family: var(--font-display); font-weight: 600; font-size: var(--font-size-title-3); letter-spacing: -0.018em; }
+        .topbar-sub { font-size: 12px; color: var(--text-tertiary); font-family: var(--font-mono); }
+        .topbar-status { margin-left: auto; display: flex; align-items: center; gap: 10px; }
+        
+        .status-pill {
+            font-family: var(--font-mono); font-size: 11px; font-weight: 600; letter-spacing: 0.02em;
+            padding: 6px 12px; border-radius: 20px; border: 1px solid var(--border-subtle);
+            background: var(--bg-surface-elevated); color: var(--text-secondary); min-height: 32px; display: inline-flex; align-items: center;
+        }
+        .status-pill.live { color: var(--accent-orange); border-color: rgba(255, 159, 10, 0.35); background: rgba(255, 159, 10, 0.12); }
+        .status-pill.idle { color: var(--accent-green); border-color: rgba(48, 209, 88, 0.3); background: rgba(48, 209, 88, 0.1); }
+
+        .content {
+            padding: 24px; max-width: 1440px; width: 100%; margin: 0 auto;
+            padding-bottom: calc(32px + env(safe-area-inset-bottom));
+            padding-left: calc(24px + env(safe-area-inset-left));
+            padding-right: calc(24px + env(safe-area-inset-right));
+        }
+
+        .view { display: none; animation: view-in 0.28s var(--ease-apple); }
+        .view.active { display: block; }
+        @keyframes view-in { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+
+        .view-heading { margin-bottom: 22px; }
+        .view-heading h2 { font-family: var(--font-display); font-size: var(--font-size-title-1); font-weight: 700; letter-spacing: -0.022em; margin-bottom: 4px; }
+        .view-heading p { color: var(--text-secondary); font-size: var(--font-size-subhead); letter-spacing: -0.006em; }
+
+        .dashboard-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 18px; }
+        .span-12 { grid-column: 1 / -1; }
+        .top-grid, .bottom-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+        @media (max-width: 980px) { .top-grid, .bottom-grid { grid-template-columns: 1fr; } }
+
+        .card {
+            background: var(--bg-surface);
+            border: 1px solid var(--border-subtle);
+            border-radius: var(--radius-lg);
+            padding: 20px;
+            box-shadow: var(--shadow-depth);
+            display: flex; flex-direction: column; gap: 16px;
+            height: 100%;
+        }
+        .card-header { display: flex; justify-content: space-between; align-items: center; border-bottom: 1px solid var(--border-subtle); padding-bottom: 12px; gap: 10px; flex-wrap: wrap; }
+        .card-title { font-family: var(--font-display); font-size: var(--font-size-title-3); font-weight: 600; color: var(--text-primary); letter-spacing: -0.015em; }
+        .card-badge { font-size: 11px; font-weight: 600; letter-spacing: 0.02em; color: var(--text-secondary); background: rgba(255,255,255,0.06); border: 1px solid var(--border-subtle); padding: 4px 10px; border-radius: 20px; font-family: var(--font-mono); }
+
+        .table-wrap { overflow-x: auto; width: 100%; flex: 1; -webkit-overflow-scrolling: touch; border-radius: var(--radius-md); }
+        table { width: 100%; border-collapse: separate; border-spacing: 0; font-size: var(--font-size-body); letter-spacing: -0.006em; }
+        th, td { padding: 12px 14px; text-align: left; border-bottom: 1px solid var(--border-subtle); white-space: nowrap; }
+        th { font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; color: var(--text-tertiary); font-weight: 600; background: var(--bg-surface); }
+        tr:last-child td { border-bottom: none; }
+        tr:hover td { background-color: rgba(255, 255, 255, 0.03); }
+        td:nth-child(2), td:nth-child(3) { white-space: normal; }
+
+        input[type="text"], select {
+            font-family: inherit; width: 100%; background-color: var(--bg-input);
+            color: var(--text-primary); border: 1px solid var(--border-subtle); border-radius: var(--radius-sm);
+            padding: 10px 14px; font-size: var(--font-size-body); letter-spacing: -0.006em; transition: all 0.2s var(--ease-apple); min-height: 44px;
+        }
+        input[type="text"]:focus, select:focus { outline: none; border-color: var(--border-focus); background-color: rgba(0, 0, 0, 0.6); box-shadow: 0 0 0 3px rgba(10, 132, 255, 0.25); }
+        input[type="checkbox"] { width: 22px; height: 22px; accent-color: var(--accent-blue); cursor: pointer; border-radius: 4px; }
+        input[type="radio"] { accent-color: var(--accent-blue); width: 20px; height: 20px; }
+
+        .segmented-control {
+            display: inline-flex; background: var(--bg-input); border-radius: 12px;
+            padding: 2px; gap: 2px; width: 100%; max-width: 480px; border: 1px solid var(--border-subtle); min-height: 44px;
+        }
+        .segment {
+            flex: 1; border: none; background: transparent; color: var(--text-secondary);
+            padding: 8px 14px; border-radius: 10px; font-weight: 500; font-size: var(--font-size-subhead); letter-spacing: -0.006em;
+            transition: all 0.2s var(--ease-apple); cursor: pointer; text-align: center; white-space: nowrap; min-height: 38px;
+        }
+        .segment.active { background: rgba(255, 255, 255, 0.15); color: var(--text-primary); font-weight: 600; box-shadow: var(--shadow-flat); }
+
+        button {
+            font-family: inherit; font-size: var(--font-size-body); font-weight: 500; letter-spacing: -0.006em; background-color: var(--bg-surface-elevated);
+            color: var(--text-primary); border: 1px solid var(--border-subtle); padding: 10px 16px;
+            border-radius: var(--radius-sm); cursor: pointer; transition: all 0.18s var(--ease-apple);
+            display: inline-flex; align-items: center; justify-content: center; gap: 6px; min-height: 44px;
+        }
+        button:hover { background-color: rgba(255, 255, 255, 0.12); border-color: var(--border-strong); }
+        button:active { transform: scale(0.97); opacity: 0.9; }
+        button:disabled { opacity: 0.4; cursor: not-allowed; transform: none; }
+
+        .btn-primary { background-color: var(--accent-blue); border-color: var(--accent-blue); color: #ffffff; font-weight: 600; }
+        .btn-success { background-color: var(--accent-green); border-color: var(--accent-green); color: #000000; font-weight: 600; }
+        .btn-danger { background-color: var(--accent-red); border-color: var(--accent-red); color: #ffffff; font-weight: 600; }
+        .btn-warning { background-color: var(--accent-orange); border-color: var(--accent-orange); color: #000000; font-weight: 600; }
+        .btn-sm { font-size: var(--font-size-caption); padding: 6px 12px; min-height: 36px; border-radius: 8px; }
+        .btn-lg { font-size: var(--font-size-title-3); padding: 12px 20px; width: 100%; min-height: 48px; border-radius: var(--radius-md); }
+
+        .text-muted { color: var(--text-secondary); font-size: var(--font-size-caption); }
+        .flex-row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+        .flex-col { display: flex; flex-direction: column; gap: 10px; }
+        .flex-between { justify-content: space-between; }
+        .flex-grow { flex: 1; }
+
+        .pill { display: inline-block; padding: 4px 10px; border-radius: 12px; font-size: 10.5px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.05em; font-family: var(--font-mono); }
+        .pill-green { background: rgba(48, 209, 88, 0.16); color: var(--accent-green); }
+        .pill-orange { background: rgba(255, 159, 10, 0.16); color: var(--accent-orange); }
+        .pill-red { background: rgba(255, 69, 58, 0.16); color: var(--accent-red); }
+        .pill-blue { background: rgba(10, 132, 255, 0.16); color: var(--accent-blue); }
+        .pill-gray { background: rgba(255, 255, 255, 0.08); color: var(--text-secondary); }
+
+        .stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 12px; }
+        .stat-card { background: rgba(255, 255, 255, 0.03); border: 1px solid var(--border-subtle); padding: 14px 10px; border-radius: var(--radius-md); text-align: center; }
+        .stat-value { font-family: var(--font-display); font-size: clamp(22px, 2.2vw, 26px); font-weight: 700; letter-spacing: -0.018em; display: block; margin-bottom: 2px; }
+        .stat-label { font-size: 10.5px; color: var(--text-tertiary); text-transform: uppercase; letter-spacing: 0.05em; }
+
+        .rescue-layout {
+            display: grid; grid-template-columns: 1fr 1.25fr; gap: 18px;
+            background: rgba(255, 255, 255, 0.02); padding: 18px;
+            border-radius: var(--radius-lg); border: 1px solid var(--border-subtle);
+        }
+        @media (max-width: 980px) { .rescue-layout { grid-template-columns: 1fr; } }
+
+        .list-pane { display: flex; flex-direction: column; gap: 12px; min-height: 360px; }
+        .pane-title { font-size: 11px; font-weight: 600; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.05em; padding-left: 2px; }
+
+        .list-container { display: grid; grid-template-columns: 1fr 52px 1fr; gap: 8px; flex: 1; min-height: 0; }
+        @media (max-width: 560px) {
+            .list-container { grid-template-columns: 1fr; grid-template-rows: 160px auto 160px; }
+            .transfer-btns { flex-direction: row; justify-content: center; }
+        }
+
+        .list-box-wrapper { display: flex; flex-direction: column; gap: 6px; min-height: 0; }
+
+        .list-box-apple {
+            flex: 1; width: 100%; background: var(--bg-surface);
+            border: 1px solid var(--border-subtle); border-radius: var(--radius-md);
+            padding: 6px; overflow-y: auto; min-height: 150px;
+            font-family: inherit; font-size: var(--font-size-body); color: var(--text-primary);
+        }
+        .list-box-apple option { padding: 8px 10px; border-radius: 6px; margin-bottom: 2px; background: rgba(255,255,255,0.04); }
+        .list-box-apple option:checked { background: var(--accent-blue) !important; color: #ffffff; }
+
+        .transfer-btns { display: flex; flex-direction: column; justify-content: center; align-items: center; gap: 8px; }
+        .transfer-btns button {
+            width: 44px; height: 44px; padding: 0; font-size: 16px; border-radius: 10px;
+            background: var(--bg-input); border: 1px solid var(--border-subtle); color: var(--text-primary); min-height: 44px;
+        }
+
+        .detail-pane { background: var(--bg-surface); border: 1px solid var(--border-subtle); border-radius: var(--radius-lg); padding: 18px; display: flex; flex-direction: column; gap: 16px; min-height: 360px; }
+        .settings-group { background: rgba(255,255,255,0.02); border-radius: var(--radius-md); overflow: hidden; border: 1px solid var(--border-subtle); }
+        .settings-row { display: flex; justify-content: space-between; align-items: center; padding: 12px 14px; border-bottom: 1px solid var(--border-subtle); gap: 12px; }
+        .settings-row:last-child { border-bottom: none; }
+        .settings-label { font-size: var(--font-size-body); color: var(--text-primary); font-weight: 500; }
+        .settings-input { background: var(--bg-input); border: 1px solid var(--border-subtle); border-radius: 8px; padding: 8px 12px; width: 220px; max-width: 55%; color: var(--text-primary); font-size: var(--font-size-body); min-height: 44px; }
+
+        .settings-actions { display: flex; gap: 8px; justify-content: flex-end; flex-wrap: wrap; padding: 12px; background: rgba(0,0,0,0.3); }
+
+        /* ── 3-TIER LAYERED DISCLOSURE STACK STYLES (PANEL G) ── */
+        .tree-container { background: rgba(255,255,255,0.02); border-radius: var(--radius-md); padding: 16px; border: 1px solid var(--border-subtle); }
+
+        .entity-deck-card {
+            background: var(--bg-surface);
+            border: 1px solid var(--border-subtle);
+            border-radius: var(--radius-md);
+            overflow: hidden;
+            margin-bottom: 14px;
+            box-shadow: var(--shadow-flat);
+            transition: border-color 0.2s var(--ease-apple), box-shadow 0.2s var(--ease-apple);
+        }
+        .entity-deck-card:hover { border-color: var(--border-strong); }
+
+        .deck-header {
+            padding: 16px 18px;
+            background: var(--bg-surface);
             display: flex;
             justify-content: space-between;
             align-items: center;
+            cursor: pointer;
+            user-select: none;
+            gap: 12px;
+            flex-wrap: wrap;
+            transition: background 0.2s var(--ease-apple);
         }
-        .autocomplete-item:hover {
-            background: #00ff66;
-            color: #000;
+        .deck-header:hover { background: rgba(255, 255, 255, 0.04); }
+
+        .deck-chevron {
+            font-size: 11px;
+            color: var(--text-tertiary);
+            transition: transform 0.28s var(--ease-apple);
+            display: inline-block;
         }
-        .autocomplete-item:hover .glow-cyan, .autocomplete-item:hover .glow-amber {
-            color: #000;
+        .entity-deck-card.expanded .deck-chevron {
+            transform: rotate(180deg);
+            color: var(--accent-blue);
         }
 
-        /* Panel G Graph Node Styling */
-        .graph-container {
+        .deck-body {
+            max-height: 0;
+            overflow: hidden;
+            transition: max-height 0.35s var(--ease-apple), padding 0.35s var(--ease-apple);
+            background: rgba(0, 0, 0, 0.25);
+            border-top: 1px solid transparent;
+        }
+        .entity-deck-card.expanded .deck-body {
+            max-height: 2500px;
+            padding: 16px 18px;
+            border-top-color: var(--border-subtle);
+        }
+
+        .branch-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            padding: 12px 14px;
+            background: var(--bg-surface-elevated);
+            border: 1px solid var(--border-subtle);
+            border-radius: var(--radius-sm);
+            cursor: pointer;
+            user-select: none;
+            margin-top: 12px;
+            font-size: var(--font-size-subhead);
+            font-weight: 600;
+            color: var(--text-primary);
+            transition: background 0.2s var(--ease-apple);
+        }
+        .branch-header:hover { background: rgba(255, 255, 255, 0.08); }
+
+        .branch-chevron {
+            font-size: 11px;
+            color: var(--text-tertiary);
+            transition: transform 0.25s var(--ease-apple);
+            display: inline-block;
+        }
+        .branch-header.expanded .branch-chevron {
+            transform: rotate(180deg);
+            color: var(--accent-orange);
+        }
+
+        .branch-content {
+            max-height: 0;
+            overflow: hidden;
+            transition: max-height 0.35s var(--ease-apple), margin 0.35s var(--ease-apple);
             display: flex;
             flex-direction: column;
-            gap: 20px;
-            overflow-x: auto;
-            padding: 15px;
-            background: #000;
-            border: 1px dashed #00e5ff;
-            min-height: 250px;
+            gap: 8px;
+            margin-top: 0;
+        }
+        .branch-header.expanded + .branch-content {
+            max-height: 1500px;
+            margin-top: 10px;
         }
 
-        .node-card {
-            border: 2px solid #00e5ff;
-            background: #08080c;
-            padding: 12px;
-            border-radius: 0;
-            box-shadow: 3px 3px 0 #003344;
-            transition: all 0.15s ease;
+        .tree-leaf { background: var(--bg-surface); padding: 12px 14px; border-radius: 8px; border: 1px solid var(--border-subtle); font-size: var(--font-size-caption); display: flex; justify-content: space-between; align-items: center; gap: 10px; flex-wrap: wrap; }
+
+        .console { background: #000000; border: 1px solid var(--border-subtle); border-radius: var(--radius-sm); padding: 12px; font-family: var(--font-mono); font-size: 11.5px; color: var(--accent-green); height: 110px; overflow-y: auto; white-space: pre-wrap; line-height: 1.45; }
+
+        .cinemeta-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
+        .cinemeta-card { display: flex; gap: 12px; background: rgba(255,255,255,0.03); padding: 12px; border-radius: var(--radius-md); border: 1px solid var(--border-subtle); transition: transform 0.2s var(--ease-apple); }
+        .cinemeta-card:hover { transform: translateY(-2px); border-color: var(--accent-blue); background: var(--bg-surface); }
+        .cinemeta-card img { width: 72px; height: 108px; object-fit: cover; border-radius: 6px; background: #1c1c1e; flex-shrink: 0; }
+        .card-info { flex: 1; display: flex; flex-direction: column; justify-content: space-between; min-width: 0; }
+
+        .autocomplete-container { position: relative; flex: 1; min-width: 200px; }
+        .autocomplete-dropdown {
+            position: absolute; top: calc(100% + 6px); left: 0; right: 0;
+            background: rgba(28, 28, 30, 0.95); backdrop-filter: blur(25px) saturate(190%);
+            border: 1px solid var(--border-strong); border-radius: var(--radius-md);
+            box-shadow: var(--shadow-depth); max-height: 380px; overflow-y: auto; z-index: 100; display: none;
         }
-        .node-card:hover {
-            border-color: #00ff66;
-            transform: translateY(-2px);
+        .autocomplete-item { padding: 12px 14px; border-bottom: 1px solid var(--border-subtle); display: flex; justify-content: space-between; align-items: center; cursor: pointer; gap: 10px; }
+        .autocomplete-item:last-child { border-bottom: none; }
+        .autocomplete-item:hover { background: rgba(255,255,255,0.06); }
+
+        #toast-container { position: fixed; bottom: calc(20px + env(safe-area-inset-bottom)); right: 20px; display: flex; flex-direction: column; gap: 8px; z-index: 9999; max-width: calc(100vw - 40px); }
+        .toast {
+            background: rgba(30, 30, 32, 0.92); backdrop-filter: blur(25px) saturate(200%);
+            color: var(--text-primary); padding: 14px 18px; border-radius: var(--radius-md);
+            box-shadow: var(--shadow-depth); border: 1px solid var(--border-strong);
+            font-size: var(--font-size-subhead); min-width: 240px; max-width: 360px; opacity: 0; transform: translateY(12px) scale(0.96);
+            transition: all 0.28s var(--ease-apple);
+        }
+        .toast.show { opacity: 1; transform: translateY(0) scale(1); }
+        .toast.success { border-left: 3px solid var(--accent-green); }
+        .toast.error { border-left: 3px solid var(--accent-red); }
+        .toast.warn { border-left: 3px solid var(--accent-orange); }
+
+        .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.7); backdrop-filter: blur(12px); display: flex; align-items: center; justify-content: center; z-index: 10000; opacity: 0; transition: opacity 0.22s var(--ease-apple); padding: 20px; }
+        .modal-card { background: rgba(36, 36, 38, 0.94); backdrop-filter: blur(30px); border: 1px solid var(--border-strong); border-radius: var(--radius-xl); padding: 22px; width: 100%; max-width: 360px; box-shadow: var(--shadow-depth); transform: scale(0.92); transition: transform 0.22s var(--ease-apple); text-align: center; }
+        .modal-overlay.show { opacity: 1; }
+        .modal-overlay.show .modal-card { transform: scale(1); }
+        .modal-title { font-family: var(--font-display); font-size: var(--font-size-title-3); font-weight: 600; margin-bottom: 6px; letter-spacing: -0.018em; }
+        .modal-text { font-size: var(--font-size-subhead); color: var(--text-secondary); margin-bottom: 20px; line-height: 1.45; white-space: pre-line; }
+        .modal-actions { display: flex; gap: 8px; justify-content: center; }
+        .modal-actions button { flex: 1; min-height: 44px; }
+
+        /* HIG Panel Focus Pulse Animation */
+        @keyframes focus-pulse {
+            0% { box-shadow: 0 0 0 0 rgba(10, 132, 255, 0.8); }
+            50% { box-shadow: 0 0 0 10px rgba(10, 132, 255, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(10, 132, 255, 0); }
+        }
+        .highlight-focus {
+            animation: focus-pulse 1.2s var(--ease-apple);
         }
 
-        .tree-level {
-            display: flex;
-            gap: 15px;
-            flex-wrap: wrap;
-            justify-content: flex-start;
-            align-items: stretch;
+        .tabbar { display: none; }
+
+        @media (max-width: 880px) {
+            .rail {
+                position: fixed !important; top: 0 !important; left: 0 !important; bottom: 0 !important;
+                z-index: 200 !important; width: 280px !important; transform: translateX(-100%);
+                box-shadow: 0 0 120px rgba(0,0,0,0.9);
+                background: rgba(20, 20, 22, 0.95) !important;
+            }
+            .rail.drawer-open { transform: translateX(0) !important; }
+
+            .drawer-overlay {
+                position: fixed; inset: 0; background: rgba(0,0,0,0.6); backdrop-filter: blur(8px);
+                z-index: 190; opacity: 0; pointer-events: none; transition: opacity 0.28s var(--ease-apple);
+            }
+            .drawer-overlay.show { opacity: 1; pointer-events: auto; }
+
+            .hamburger { display: inline-flex; }
+            .content {
+                padding: 16px;
+                padding-bottom: calc(24px + env(safe-area-inset-bottom));
+                padding-left: calc(16px + env(safe-area-inset-left));
+                padding-right: calc(16px + env(safe-area-inset-right));
+            }
+            .topbar { padding: 0 16px; }
+            .topbar-sub { display: none; }
+
+            .settings-row { flex-direction: column; align-items: flex-start; }
+            .settings-input { width: 100%; max-width: 100%; }
+            .card { padding: 16px; }
         }
     </style>
 </head>
 <body>
-    <h1>► MVSHOWS ADMIN TERMINAL v2.7.1 ◄</h1>
 
-    <div class="dashboard-grid">
-        
-        <!-- SYSTEM STATUS MODULE -->
-        <div class="section span-6">
-            <div class="terminal-header">
-                <span>► SYSTEM_HEALTH_SNAPSHOT</span>
-                <span>STATUS: OK</span>
+    <div class="app-shell">
+        <div class="drawer-overlay" id="drawerOverlay"></div>
+
+        <!-- ═══ RAIL NAVIGATION ═══ -->
+        <nav class="rail" id="mainNav">
+            <div class="rail-brand"><span class="dot"></span><div><div>MVSHOWS<span class="sub">OPS CONSOLE</span></div></div></div>
+
+            <div class="rail-section-label">Monitor</div>
+            <button class="nav-btn active" data-section="overview"><span class="ic">📡</span><span class="label">Overview</span></button>
+            <button class="nav-btn" data-section="activity"><span class="ic">📋</span><span class="label">Activity Log</span><span class="nav-flag" id="navFlagFailures"></span></button>
+
+            <div class="rail-section-label">Curate</div>
+            <button class="nav-btn" data-section="watchlist"><span class="ic">🎬</span><span class="label">Watchlist</span></button>
+            <button class="nav-btn" data-section="graph"><span class="ic">🕸️</span><span class="label">Entity Graph</span></button>
+            <button class="nav-btn" data-section="rescue"><span class="ic">🛠️</span><span class="label">Rescue Bay</span></button>
+
+            <div class="rail-section-label">Operate</div>
+            <button class="nav-btn" data-section="recoup"><span class="ic">⚡</span><span class="label">Thread Recoup</span></button>
+            <button class="nav-btn" data-section="purge"><span class="ic">🔥</span><span class="label">Purge Console</span></button>
+
+            <div class="rail-footer">
+                <div class="rail-status-row"><span class="pulse-dot" id="railPulse"></span><span class="txt">Crawler idle</span></div>
             </div>
-            <table>
-                <tr><td>Workflow running:</td><td id="isCrawling" class="glow-amber">-</td></tr>
-                <tr><td>Last workflow update:</td><td id="lastUpdated" class="glow-cyan">-</td></tr>
-                <tr><td>Debrid provider:</td><td id="debridService" class="glow-cyan">-</td></tr>
-                <tr><td>Cache check:</td><td id="cacheCheckMethod" class="glow-cyan">-</td></tr>
-                <tr><td>RD enabled:</td><td id="rdEnabled">-</td></tr>
-                <tr><td>TorBox enabled:</td><td id="torboxEnabled">-</td></tr>
-                <tr><td>TMDB configured:</td><td id="tmdbConfigured">-</td></tr>
-                <tr><td>Tracker count:</td><td id="trackerCount" class="glow-green">-</td></tr>
-                <tr><td>DB size:</td><td id="dbSize" class="glow-green">-</td></tr>
-            </table>
-        </div>
+        </nav>
 
-        <!-- AGGREGATE METRICS & CONTROL MODULE -->
-        <div class="section span-6">
-            <div class="terminal-header">
-                <span>► DATABASE_METRICS_LOG</span>
-                <span>SECURE</span>
-            </div>
-            <table>
-                <tr><td>Total Linked items:</td><td id="linkedCount" class="glow-green" style="font-size: 1.8rem; font-weight: bold;">0</td></tr>
-                <tr><td>Pending TMDB Match:</td><td id="pendingCount" class="glow-cyan" style="font-size: 1.8rem; font-weight: bold;">0</td></tr>
-                <tr><td>Critical Parse Failures:</td><td id="failedCount" class="glow-red" style="font-size: 1.8rem; font-weight: bold;">0</td></tr>
-            </table>
-            <div style="margin-top: 25px; text-align: center;">
-                <button id="triggerCrawl" style="font-size: 1.5rem; border-color: #ff9900; color: #ff9900; box-shadow: 2px 2px 0 #553300;">⚡ Trigger Manual Crawl</button>
-            </div>
-        </div>
-
-        <!-- MONITORED WEBSERIES WATCHLIST COMMAND DECK (Panel F) -->
-        <div class="section span-12" style="border: 2px solid #00ff66; box-shadow: 4px 4px 0 #004411;">
-            <div class="terminal-header" style="background: #00ff66; color: #000;">
-                <span>► Panel F: Monitored WebSeries Watchlist Command Deck</span>
-                <span>DIRECT_UNBUMPED_POLLING</span>
-            </div>
-            
-            <!-- Quick Add & Autocomplete Search Bar -->
-            <div style="display: flex; gap: 15px; margin-bottom: 20px; align-items: center; flex-wrap: wrap;">
-                <div style="font-size: 1.35rem; color: #00ff66; min-width: 220px;">Search Existing Series DB:</div>
-                <div class="autocomplete-container">
-                    <input type="text" id="seriesSearchInput" placeholder="Type series name (e.g. Love Beyond Wicket)..." style="width: 100%; border-color: #00ff66; color: #00ff66; background: #000; height: 38px;">
-                    <div id="seriesSearchDropdown" class="autocomplete-dropdown"></div>
-                </div>
-            </div>
-
-            <!-- Tabbed Watchlist Filters -->
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; border-bottom: 1px dashed #333; padding-bottom: 10px; flex-wrap: wrap; gap: 10px;">
-                <div style="display: flex; gap: 8px;">
-                    <button id="tabActiveBtn" style="border-color: #00ff66; color: #00ff66; background: #001100;">🟢 Active (<span id="countActive">0</span>)</button>
-                    <button id="tabPausedBtn" style="border-color: #ff9900; color: #ff9900;">⏸️ Paused (<span id="countPaused">0</span>)</button>
-                    <button id="tabArchivedBtn" style="border-color: #888; color: #888;">📁 Archived (<span id="countArchived">0</span>)</button>
-                </div>
-                <input type="text" id="watchlistFilterInput" placeholder="Filter active view..." style="width: 220px; border-color: #00e5ff; height: 32px;">
-            </div>
-
-            <!-- Batch Operations Toolbar -->
-            <div style="display: flex; gap: 10px; align-items: center; margin-bottom: 15px; background: #08080c; border: 1px solid #00ff66; padding: 8px 12px; flex-wrap: wrap;">
-                <span style="font-size: 1.15rem; color: #00ff66; font-weight: bold;">BATCH COMMANDS:</span>
-                <button id="bulkActiveBtn" style="border-color: #00ff66; color: #00ff66; font-size: 1.05rem; padding: 2px 10px; margin: 0;">🟢 Bulk Activate</button>
-                <button id="bulkPauseBtn" style="border-color: #ff9900; color: #ff9900; font-size: 1.05rem; padding: 2px 10px; margin: 0;">⏸️ Bulk Pause</button>
-                <button id="bulkArchiveBtn" style="border-color: #888; color: #888; font-size: 1.05rem; padding: 2px 10px; margin: 0;">📁 Bulk Archive</button>
-                <button id="bulkRemoveBtn" style="border-color: #ff2a5f; color: #ff2a5f; font-size: 1.05rem; padding: 2px 10px; margin: 0;">🔥 Bulk Remove</button>
-                <span id="bulkSelectedCounter" style="color: #00e5ff; font-size: 1.15rem; margin-left: auto; font-weight: bold;">Selected: 0</span>
-            </div>
-
-            <!-- Monitored Series Table -->
-            <div style="max-height: 380px; overflow-y: auto; border: 1px dashed #333; background: #000;">
-                <table>
-                    <thead>
-                        <tr>
-                            <th style="width: 40px; text-align: center;"><input type="checkbox" id="selectAllMonitored" style="cursor: pointer;" title="Select/Deselect All Visible"></th>
-                            <th>Series Title / Raw Thread Title</th>
-                            <th>Status</th>
-                            <th>Last Checked / Updated</th>
-                            <th>Direct Thread Address</th>
-                            <th>Actions</th>
-                        </tr>
-                    </thead>
-                    <tbody id="monitoredSeriesBody">
-                        <tr><td colspan="6" style="color: #666; text-align: center;">Loading monitored series watchlist...</td></tr>
-                    </tbody>
-                </table>
-            </div>
-        </div>
-
-        <!-- PANEL G: ENTITY RELATION GRAPH VISUALIZER -->
-        <div class="section span-12" style="border: 2px solid #00e5ff; box-shadow: 4px 4px 0 #003344;">
-            <div class="terminal-header" style="background: #00e5ff; color: #000;">
-                <span>► Panel G: Entity Relation Graph Visualizer</span>
-                <span>LIQUID_GRAPH_DECK</span>
-            </div>
-
-            <div style="display: flex; gap: 15px; margin-bottom: 15px; align-items: center; flex-wrap: wrap;">
-                <select id="graphTypeSelect" style="border-color: #00e5ff; height: 38px;">
-                    <option value="all">All Content Types</option>
-                    <option value="movie">Movies Only</option>
-                    <option value="series">TV Series Only</option>
-                </select>
-                <input type="text" id="graphSearchInput" placeholder="Type Title, IMDb ID (tt...), or TMDB ID..." style="flex: 1; border-color: #00e5ff; background: #000; height: 38px;">
-                <button id="graphSearchBtn" style="border-color: #00e5ff; color: #00e5ff; box-shadow: 2px 2px 0 #003344; height: 42px; margin: 0; padding: 0 20px;">🔍 Map Graph</button>
-            </div>
-
-            <div id="graphCanvas" class="graph-container">
-                <div style="color: #666; text-align: center; padding: 40px 0; font-size: 1.2rem;">Enter a Title, IMDb ID, or TMDB ID above to visualize entity linkages and gap analysis.</div>
-            </div>
-        </div>
-
-        <!-- METADATA RESCUE BAY MODULE -->
-        <div class="section span-12">
-            <div class="terminal-header">
-                <span>► METADATA_RESCUE_BAY</span>
-                <span>REGULAR_OVERRIDE</span>
-            </div>
-            
-            <div style="background: #0d0d11; border: 1px dashed #00e5ff; padding: 12px; font-size: 1.15rem; margin-bottom: 20px; line-height: 1.4;">
-                <span class="glow-cyan" style="font-size: 1.3rem; font-weight: bold; text-transform: uppercase;">Workflow Directions:</span><br>
-                • <span class="glow-green">Single Tuning</span>: Click any item in the <span class="glow-cyan">Pending Pool</span> to focus on it. You can instantly inspect streams below, override poster/plot descriptions, or link it manually.<br>
-                • <span class="glow-amber">Group Batching</span>: Select multiple items, move them to the <span class="glow-cyan">Bulk actions Batch</span> using transfer buttons, and link all of them to a single TMDB/IMDb ID or auto-match them together using the action panels on the right.
-            </div>
-
-            <div class="rescue-grid">
-                <div class="rescue-manager">
-                    <div style="display: flex; gap: 15px; align-items: stretch;">
-                        <div style="flex: 1;">
-                            <div style="font-size: 1.2rem; margin-bottom: 4px; text-transform: uppercase; color: #00e5ff; font-weight: bold;">[01] Pending Pool</div>
-                            <select id="availableList" size="12" style="width:100%; min-height:280px;"></select>
-                        </div>
-                        
-                        <div style="display: flex; flex-direction: column; justify-content: center; gap: 8px; width: 60px; min-width: 60px; align-items: center;">
-                            <button id="moveBtn" title="Move selected to batch" style="width: 45px;">→</button>
-                            <button id="removeBtn" title="Remove selected from batch" style="width: 45px;">←</button>
-                            <button id="moveAllBtn" title="Move all to batch" style="width: 45px;">→→</button>
-                            <button id="clearAllBtn" title="Clear batch queue" style="width: 45px;">←←</button>
-                        </div>
-                        
-                        <div style="flex: 1;">
-                            <div style="font-size: 1.2rem; margin-bottom: 4px; text-transform: uppercase; color: #ff9900; font-weight: bold;">[02] Bulk Actions Batch</div>
-                            <select id="selectedList" size="12" style="width:100%; min-height:280px;"></select>
-                        </div>
-                    </div>
-                    <div style="margin-top: 10px; display: flex; justify-content: space-between; align-items: center;">
-                        <button id="setFocusBtn" style="border-color: #00e5ff; color: #00e5ff; box-shadow: 2px 2px 0 #005577;">🎯 Focus Highlighted Item</button>
-                        <span style="font-size: 1.1rem; color: #666;">Double-click or click any item to auto-focus!</span>
-                    </div>
-                </div>
-
-                <div class="rescue-actions">
-                    <div style="border: 1px solid #00e5ff; padding: 12px; background: #08080c;">
-                        <div style="font-weight: bold; color: #00e5ff; border-bottom: 1px dashed #00e5ff; padding-bottom: 4px; margin-bottom: 10px; text-transform: uppercase;">
-                            ► Panel A: Single Item Tuner
-                        </div>
-                        <p style="margin: 5px 0 10px 0; font-size: 1.2rem;">Focused: <span id="focusedTitle" class="glow-green" style="font-weight: bold;">None</span></p>
-                        
-                        <div style="display: flex; flex-direction: column; gap: 6px; font-size: 1.1rem;">
-                            <div style="display: flex; align-items: center; justify-content: space-between;">
-                                <span style="color:#888;">Custom Poster:</span>
-                                <input type="text" id="customPoster" placeholder="https://image-url..." style="width: 200px;">
-                            </div>
-                            <div style="display: flex; align-items: center; justify-content: space-between;">
-                                <span style="color:#888;">Custom Plot:</span>
-                                <input type="text" id="customDescription" placeholder="Plot overrides..." style="width: 200px;">
-                            </div>
-                            <div style="text-align: right; margin-bottom: 6px;">
-                                <button id="saveFocused" style="font-size: 1.1rem; padding: 2px 10px;">💾 Save Custom Meta</button>
-                            </div>
-                            
-                            <div style="border-top: 1px dotted #333; padding-top: 8px; display: flex; align-items: center; justify-content: space-between;">
-                                <span style="color:#ff2a5f;">Official ID:</span>
-                                <input type="text" id="officialId" placeholder="tt12345 or movie:123" style="width: 200px;">
-                            </div>
-                            <div style="display: flex; justify-content: flex-end; gap: 5px;">
-                                <button id="autoMatchFocused" style="font-size: 1.1rem; border-color: #2a69ac; color: #2a69ac; box-shadow: 2px 2px 0 #112b4b; padding: 2px 10px;">🤖 Auto-Match</button>
-                                <button id="linkFocused" style="font-size: 1.1rem; border-color: #ff2a5f; color: #ff2a5f; box-shadow: 2px 2px 0 #550011; padding: 2px 10px;">🔗 Link ID</button>
-                            </div>
-                        </div>
-                    </div>
-
-                    <div style="border: 1px solid #ff9900; padding: 12px; background: #08080c;">
-                        <div style="font-weight: bold; color: #ff9900; border-bottom: 1px dashed #ff9900; padding-bottom: 4px; margin-bottom: 10px; text-transform: uppercase;">
-                            ► Panel B: Group Batch Processor
-                        </div>
-                        
-                        <div style="display: flex; flex-direction: column; gap: 8px; font-size: 1.1rem;">
-                            <div style="display: flex; align-items: center; justify-content: space-between;">
-                                <span style="color:#aaa;">Auto-Match Batch:</span>
-                                <button id="bulkAutoMatch" style="border-color: #2a69ac; color: #2a69ac; box-shadow: 2px 2px 0 #112b4b; padding: 2px 10px; font-size: 1.1rem;">🤖 Run Bulk Auto-Match</button>
-                            </div>
-
-                            <div style="border-top: 1px dotted #333; padding-top: 8px;">
-                                <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px;">
-                                    <span class="glow-amber">Link Batch to ONE ID:</span>
-                                    <input type="text" id="bulkOfficialId" placeholder="tt12345 or movie:123" style="width: 180px; border-color: #ff9900; color: #ff9900;">
-                                </div>
-                                <div style="text-align: right;">
-                                    <button id="bulkLink" style="border-color: #ff9900; color: #ff9900; box-shadow: 2px 2px 0 #553300; padding: 2px 12px; font-size: 1.1rem;">🔗 Link Batch to single ID</button>
-                                </div>
-                            </div>
-
-                            <div style="border-top: 1px dotted #333; padding-top: 8px; display: flex; flex-direction: column; gap: 4px;">
-                                <div style="display: flex; align-items: center; justify-content: space-between;">
-                                    <span style="color:#aaa;">Batch Poster:</span>
-                                    <input type="text" id="bulkCustomPoster" placeholder="https://image-url..." style="width: 180px; border-color: #ff9900; color: #ff9900;">
-                                </div>
-                                <div style="display: flex; align-items: center; justify-content: space-between;">
-                                    <span style="color:#aaa;">Batch Plot:</span>
-                                    <input type="text" id="bulkCustomDescription" placeholder="Plot overrides..." style="width: 180px; border-color: #ff9900; color: #ff9900;">
-                                </div>
-                                <div style="text-align: right;">
-                                    <button id="bulkUpdateMeta" style="border-color: #ff9900; color: #ff9900; box-shadow: 2px 2px 0 #553300; padding: 2px 12px; font-size: 1.1rem;">💾 Save Batch Meta</button>
-                                </div>
-                            </div>
-
-                            <div style="font-size: 1.05rem; text-transform: uppercase; color: #888; margin-top: 5px; margin-bottom: -4px;">► Batch Output Monitor</div>
-                            <div id="bulkStatus" class="glow-amber" style="border: 1px dashed #333; padding: 6px; height: 75px; overflow-y: auto; font-size: 1.05rem; background: #000; font-family: monospace; line-height: 1.2;">
-                                Idle... Ready for batch queue tasks.
-                            </div>
-                        </div>
-                    </div>
-                </div>
-
-                <div class="section span-12" style="border: 2px solid #00ff66; margin-top: 15px; box-shadow: 4px 4px 0 #004411;">
-                    <div class="terminal-header" style="background: #00ff66; color: #000;">
-                        <span>► Panel C: Cinemeta Visual Matcher (Unified Deck)</span>
-                        <span>ACTIVE_LOOKUP</span>
-                    </div>
-                    
-                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; gap: 15px; flex-wrap: wrap;">
-                        <div style="font-size: 1.35rem; color: #00ff66;">Search targets: <span id="visualSearchTarget" class="glow-cyan" style="font-weight: bold;">None</span></div>
-                        <div style="display: flex; gap: 10px; width: 50%; min-width: 300px;">
-                            <input type="text" id="visualSearchInput" placeholder="Search title manually..." style="flex: 1; border-color: #00ff66; color: #00ff66; background: #000; height: 38px;">
-                            <button id="visualSearchBtn" style="border-color: #00ff66; color: #00ff66; box-shadow: 2px 2px 0 #004411; font-size: 1.2rem; padding: 2px 15px; margin: 0; height: 42px;">🔍 Search</button>
-                        </div>
-                    </div>
-
-                    <div id="visualCandidatesContainer" style="max-height: 480px; overflow-y: auto; display: grid; grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); gap: 15px; border: 1px dashed #333; padding: 12px; background: #000;">
-                        <div style="grid-column: 1 / -1; color: #666; text-align: center; font-size: 1.3rem; padding: 40px 0;">Select a pending item above to search visual candidates.</div>
-                    </div>
-                </div>
-            </div>
-
-            <div style="border-top: 2px solid #e0e0e0; margin-top: 25px; padding-top: 15px;">
-                <h3 class="glow-green">03. Debrid Caching Pipeline</h3>
-                <p style="color: #888; font-size: 1.1rem; margin: 0 0 10px 0;">Select a single stream below to push and cache into your configured Debrid provider cloud.</p>
-                <div id="streamsContainer">
-                    <table>
-                        <thead>
-                            <tr>
-                                <th>Torrent Info Hash</th>
-                                <th>Quality / Language</th>
-                                <th>Selection</th>
-                            </tr>
-                        </thead>
-                        <tbody id="streamsBody">
-                            <tr><td colspan="3" style="color: #666; text-align: center;">Set a focused item above to query available streams.</td></tr>
-                        </tbody>
-                    </table>
-                </div>
-                <div style="margin-top: 15px; text-align: right;">
-                    <button id="cacheSelected" style="font-size: 1.3rem;">📥 Push &amp; Cache Selected Stream</button>
-                </div>
-            </div>
-        </div>
-
-        <!-- DATABASE RECORD PURGE CONSOLE (Panel D) -->
-        <div class="section span-12" style="border: 2px solid #ff2a5f; box-shadow: 4px 4px 0 #550011;">
-            <div class="terminal-header" style="background: #ff2a5f; color: #000;">
-                <span>► Panel D: Database Record Purge Console</span>
-                <span>CRITICAL_ADMIN_OVERRIDE</span>
-            </div>
-            
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 15px; gap: 15px; flex-wrap: wrap;">
-                <div style="font-size: 1.35rem; color: #ff2a5f;">Enter linked IMDb ID:</div>
-                <div style="display: flex; gap: 10px; width: 50%; min-width: 300px;">
-                    <input type="text" id="purgeSearchInput" placeholder="tt1234567" style="flex: 1; border-color: #ff2a5f; color: #ff2a5f; background: #000; height: 38px;">
-                    <button id="purgeLookupBtn" style="border-color: #ff2a5f; color: #ff2a5f; box-shadow: 2px 2px 0 #550011; font-size: 1.2rem; padding: 2px 15px; margin: 0; height: 42px;">🔍 Lookup Records</button>
-                </div>
-            </div>
-
-            <div id="purgeResultBox" style="display: none; border: 1px dashed #ff2a5f; padding: 15px; background: #000; font-family: monospace; font-size: 1.25rem; line-height: 1.4; margin-bottom: 15px;">
-                <div style="font-weight: bold; color: #ff2a5f; font-size: 1.4rem; margin-bottom: 10px; border-bottom: 1px dotted #ff2a5f; padding-bottom: 5px;">► TARGET RECORDS VERIFIED</div>
-                <div style="margin-bottom: 5px;">Matched Title: <strong id="purgeResultTitle" class="glow-green">None</strong></div>
-                <div style="margin-bottom: 5px;">IMDb ID: <strong id="purgeResultImdb" style="color: #fff;">None</strong> | TMDB ID: <strong id="purgeResultTmdb" style="color: #fff;">None</strong></div>
-                <div style="margin-bottom: 10px;">Total Streams Indexed: <strong id="purgeResultStreams" class="glow-amber">0</strong></div>
-                
-                <div style="margin-bottom: 10px;">
-                    <strong>Threads Found:</strong>
-                    <ul id="purgeResultThreads" style="margin: 5px 0; padding-left: 20px; color: #aaa;">
-                    </ul>
-                </div>
-                
-                <div style="color: #ff2a5f; font-weight: bold; margin-bottom: 15px;">⚠️ WARNING: Wiping these records is permanent and cannot be undone. Threads, streams, metadata, and cached mapping links will be completely deleted.</div>
-                
-                <div style="text-align: right;">
-                    <button id="purgeExecuteBtn" style="border-color: #ff2a5f; color: #ff2a5f; box-shadow: 2px 2px 0 #550011; font-size: 1.3rem; padding: 5px 20px; background: #110003; margin: 0;">🔥 CONFIRM COMPLETELY DELETE RECORDS</button>
-                </div>
-            </div>
-        </div>
-
-        <!-- TARGETED THREAD RECOUP CONSOLE (Panel E) -->
-        <div class="section span-12" style="border: 2px solid #ff9900; box-shadow: 4px 4px 0 #553300;">
-            <div class="terminal-header" style="background: #ff9900; color: #000;">
-                <span>► Panel E: Targeted Thread Recoup Console</span>
-                <span>SELECTIVE_CRAWL_GATEWAY</span>
-            </div>
-            
-            <div style="display: flex; flex-direction: column; gap: 15px;">
-                <div style="display: flex; justify-content: space-between; align-items: center; gap: 15px; flex-wrap: wrap;">
-                    <div style="font-size: 1.35rem; color: #ff9900; min-width: 150px;">Target Thread URL:</div>
-                    <input type="text" id="recoupUrlInput" placeholder="https://www.1tamilmv.tf/index.php?/forums/topic/12345-thread-title/" style="flex: 1; border-color: #ff9900; color: #ff9900; background: #000; height: 38px;">
-                </div>
-                
-                <div style="display: flex; justify-content: space-between; align-items: center; gap: 15px; flex-wrap: wrap;">
-                    <div style="font-size: 1.35rem; color: #ff9900; min-width: 150px;">Category Mappings:</div>
-                    <select id="recoupCategorySelect" style="flex: 1; border-color: #ff9900; color: #ff9900; background: #000; height: 42px;">
-                        <option value="series:top-series-from-forum">Tamil WebSeries (series | Tamil WebSeries catalog)</option>
-                        <option value="movie:tamil-hd-movies">Tamil HD Movies (movie | Tamil HD Movies catalog)</option>
-                        <option value="movie:tamil-dubbed-movies">Tamil Dubbed Movies (movie | Tamil Dubbed Movies catalog)</option>
-                    </select>
-                </div>
-
-                <div style="text-align: right; margin-top: 5px;">
-                    <button id="recoupExecuteBtn" style="border-color: #ff9900; color: #ff9900; box-shadow: 2px 2px 0 #553300; font-size: 1.3rem; padding: 5px 25px; background: #0b0600; margin: 0;">⚡ Recoup &amp; Index Thread</button>
-                </div>
-
-                <div style="font-size: 1.05rem; text-transform: uppercase; color: #888; margin-top: 5px; margin-bottom: -4px;">► Recoup Output Monitor</div>
-                <div id="recoupStatus" class="glow-amber" style="border: 1px dashed #333; padding: 6px; height: 100px; overflow-y: auto; font-size: 1.05rem; background: #000; font-family: monospace; line-height: 1.2;">
-                    Idle... Ready for targeted single-thread crawl.
-                </div>
-            </div>
-        </div>
-
-        <!-- RECENT ACTIVITY MODULE -->
-        <div class="section span-6">
-            <div class="terminal-header">
-                <span>► RECENT_ACTIVITY_LOG</span>
-                <span>PAGINATED</span>
-            </div>
-            <div style="margin-bottom: 10px; display: flex; justify-content: space-between; align-items: center;">
-                <span style="color:#888;">Page List logs</span>
+        <div class="main">
+            <!-- ═══ TOPBAR ═══ -->
+            <header class="topbar">
+                <button class="hamburger" id="hamburgerBtn" aria-label="Open menu">☰</button>
                 <div>
-                    <button id="prevPage">◀ Prev</button> 
-                    <span id="currentPage" class="glow-cyan" style="padding: 0 10px; font-weight: bold;">1</span> 
-                    <button id="nextPage">Next ▶</button>
+                    <div class="topbar-title" id="sectionTitle">Overview</div>
+                    <div class="topbar-sub">MVSHOWS backend · live status</div>
                 </div>
-            </div>
-            <table>
-                <thead>
-                    <tr>
-                        <th>Event Type</th>
-                        <th>Clean Title / Error Reason</th>
-                        <th>Timestamp</th>
-                    </tr>
-                </thead>
-                <tbody id="recentBody"></tbody>
-            </table>
-        </div>
+                <div class="topbar-status">
+                    <span class="status-pill idle" id="topStatusPill">IDLE</span>
+                    <button id="triggerCrawlTop" class="btn-warning btn-sm">⚡ Crawl</button>
+                </div>
+            </header>
 
-        <!-- CRITICAL PARSE FAILURES MODULE -->
-        <div class="section span-6">
-            <div class="terminal-header">
-                <span>► CRITICAL_PARSING_FAILURES</span>
-                <span>ACTION_REQUIRED</span>
-            </div>
-            <table>
-                <thead>
-                    <tr>
-                        <th>Raw Scraped Title</th>
-                        <th>Exception Reason</th>
-                        <th>Last Attempt</th>
-                        <th>Actions</th>
-                    </tr>
-                </thead>
-                <tbody id="failuresBody"></tbody>
-            </table>
-        </div>
+            <div class="content">
 
+                <!-- ══════════ OVERVIEW ══════════ -->
+                <section id="section-overview" class="view active">
+                    <div class="view-heading">
+                        <h2>Overview</h2>
+                        <p>System health, debrid/tracker configuration, and database metrics at a glance.</p>
+                    </div>
+                    <div class="top-grid">
+                        <div class="card">
+                            <div class="card-header">
+                                <span class="card-title">System Health</span>
+                                <span class="card-badge">OK</span>
+                            </div>
+                            <div class="table-wrap">
+                                <table>
+                                    <tr><td class="text-muted">Workflow running</td><td id="isCrawling" class="pill pill-gray">-</td></tr>
+                                    <tr><td class="text-muted">Last workflow update</td><td id="lastUpdated">-</td></tr>
+                                    <tr><td class="text-muted">Debrid provider</td><td id="debridService">-</td></tr>
+                                    <tr><td class="text-muted">Cache check</td><td id="cacheCheckMethod">-</td></tr>
+                                    <tr><td class="text-muted">RD enabled</td><td id="rdEnabled">-</td></tr>
+                                    <tr><td class="text-muted">TorBox enabled</td><td id="torboxEnabled">-</td></tr>
+                                    <tr><td class="text-muted">TMDB configured</td><td id="tmdbConfigured">-</td></tr>
+                                    <tr><td class="text-muted">Tracker count</td><td id="trackerCount">-</td></tr>
+                                    <tr><td class="text-muted">DB size</td><td id="dbSize">-</td></tr>
+                                </table>
+                            </div>
+                        </div>
+
+                        <div class="card">
+                            <div class="card-header">
+                                <span class="card-title">Database Metrics</span>
+                                <span class="card-badge">Secure</span>
+                            </div>
+                            <div class="stats-grid">
+                                <div class="stat-card">
+                                    <span id="linkedCount" class="stat-value" style="color: var(--accent-green)">0</span>
+                                    <span class="stat-label">Linked Items</span>
+                                </div>
+                                <div class="stat-card">
+                                    <span id="pendingCount" class="stat-value" style="color: var(--accent-blue)">0</span>
+                                    <span class="stat-label">Pending Match</span>
+                                </div>
+                                <div class="stat-card">
+                                    <span id="failedCount" class="stat-value" style="color: var(--accent-red)">0</span>
+                                    <span class="stat-label">Parse Failures</span>
+                                </div>
+                            </div>
+                            <button id="triggerCrawl" class="btn-warning btn-lg">⚡ Trigger Manual Crawl</button>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- ══════════ WATCHLIST (Panel F) ══════════ -->
+                <section id="section-watchlist" class="view">
+                    <div class="view-heading">
+                        <h2>Monitored WebSeries Watchlist</h2>
+                        <p>Search the series DB, enroll new titles for direct polling, and batch-manage watchlist status.</p>
+                    </div>
+                    <div class="card span-12">
+                        <div class="flex-row">
+                            <div class="text-muted" style="min-width: 140px; font-weight: 600;">Search Series DB:</div>
+                            <div class="autocomplete-container">
+                                <input type="text" id="seriesSearchInput" placeholder="Type series name (e.g. Love Beyond Wicket)">
+                                <div id="seriesSearchDropdown" class="autocomplete-dropdown"></div>
+                            </div>
+                        </div>
+
+                        <div class="flex-row flex-between">
+                            <div class="segmented-control">
+                                <button id="tabActiveBtn" class="segment active">🟢 Active (<span id="countActive">0</span>)</button>
+                                <button id="tabPausedBtn" class="segment">⏸️ Paused (<span id="countPaused">0</span>)</button>
+                                <button id="tabArchivedBtn" class="segment">📁 Archived (<span id="countArchived">0</span>)</button>
+                            </div>
+                            <input type="text" id="watchlistFilterInput" placeholder="Filter view..." style="max-width: 240px;">
+                        </div>
+
+                        <div class="flex-row" style="background: rgba(255,255,255,0.03); padding: 10px 12px; border-radius: var(--radius-sm); border: 1px solid var(--border-subtle);">
+                            <span class="text-muted" style="font-weight: 600; margin-right: 8px;">BATCH:</span>
+                            <button id="bulkActiveBtn" class="btn-sm btn-success">Activate</button>
+                            <button id="bulkPauseBtn" class="btn-sm btn-warning">Pause</button>
+                            <button id="bulkArchiveBtn" class="btn-sm">Archive</button>
+                            <button id="bulkRemoveBtn" class="btn-sm btn-danger">Remove</button>
+                            <span id="bulkSelectedCounter" class="text-muted" style="margin-left: auto; font-weight: 600;">Selected: 0</span>
+                        </div>
+
+                        <div class="table-wrap" style="max-height: 480px; overflow-y: auto; border: 1px solid var(--border-subtle); border-radius: var(--radius-md);">
+                            <table>
+                                <thead style="position: sticky; top: 0; background: var(--bg-surface); z-index: 10;">
+                                    <tr>
+                                        <th style="width: 40px; text-align: center;"><input type="checkbox" id="selectAllMonitored"></th>
+                                        <th>Series Title / Raw Thread</th>
+                                        <th>Status</th>
+                                        <th>Last Checked</th>
+                                        <th>Thread</th>
+                                        <th>Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="monitoredSeriesBody">
+                                    <tr><td colspan="6" class="text-muted" style="text-align: center; padding: 24px;">Loading monitored series watchlist...</td></tr>
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- ══════════ GRAPH (Panel G) ══════════ -->
+                <section id="section-graph" class="view">
+                    <div class="view-heading">
+                        <h2>Entity Relation Graph</h2>
+                        <p>Trace how a title's threads and streams connect, and spot metadata linkage gaps.</p>
+                    </div>
+                    <div class="card span-12">
+                        <div class="card-header">
+                            <span class="card-title">Liquid Graph Deck</span>
+                            <span class="card-badge">Bbolt Traversal</span>
+                        </div>
+
+                        <div class="flex-row">
+                            <select id="graphTypeSelect" style="max-width: 220px;">
+                                <option value="all">All Content Types</option>
+                                <option value="movie">Movies Only</option>
+                                <option value="series">TV Series Only</option>
+                            </select>
+                            <input type="text" id="graphSearchInput" placeholder="Type Title, IMDb ID (tt...), or TMDB ID..." class="flex-grow">
+                            <button id="graphSearchBtn" class="btn-primary">🔍 Map Graph</button>
+                        </div>
+
+                        <div id="graphCanvas" class="tree-container" style="min-height: 300px;">
+                            <div class="text-muted" style="text-align: center; padding: 60px 0;">Enter a Title, IMDb ID, or TMDB ID above to visualize entity linkages and gap analysis.</div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- ══════════ RESCUE BAY ══════════ -->
+                <section id="section-rescue" class="view">
+                    <div class="view-heading">
+                        <h2>Metadata Rescue Bay</h2>
+                        <p>Queue pending items, tune metadata one at a time, or batch-process a whole group.</p>
+                    </div>
+
+                    <div class="card span-12">
+                        <div class="card-header">
+                            <span class="card-title">Master Queue &amp; Detail Actions</span>
+                            <span class="card-badge">Regular Override</span>
+                        </div>
+
+                        <div class="rescue-layout">
+                            <!-- Master List Pane -->
+                            <div class="list-pane">
+                                <div class="flex-row flex-between">
+                                    <div class="pane-title">Master Queue</div>
+                                    <button id="setFocusBtn" class="btn-sm btn-primary">🎯 Focus Selected</button>
+                                </div>
+
+                                <div class="list-container">
+                                    <div class="list-box-wrapper">
+                                        <div class="pane-title" style="color: var(--accent-blue);">Pending Pool</div>
+                                        <select id="availableList" multiple class="list-box-apple"></select>
+                                    </div>
+
+                                    <div class="transfer-btns">
+                                        <button id="moveBtn" title="Move selected to batch">→</button>
+                                        <button id="removeBtn" title="Remove selected from batch">←</button>
+                                        <button id="moveAllBtn" title="Move all to batch">⇉</button>
+                                        <button id="clearAllBtn" title="Clear batch queue">⇇</button>
+                                    </div>
+
+                                    <div class="list-box-wrapper">
+                                        <div class="pane-title" style="color: var(--accent-orange);">Bulk Batch</div>
+                                        <select id="selectedList" multiple class="list-box-apple"></select>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <!-- Detail Action Pane -->
+                            <div class="detail-pane">
+                                <div>
+                                    <div class="pane-title" style="color: var(--accent-blue); margin-bottom: 10px;">Panel A: Single Item Tuner</div>
+                                    <div class="settings-group">
+                                        <div class="settings-row">
+                                            <span class="settings-label">Focused Item</span>
+                                            <strong id="focusedTitle" style="color: var(--accent-green); font-size: 13.5px;">None</strong>
+                                        </div>
+                                        <div class="settings-row">
+                                            <span class="settings-label">Custom Poster URL</span>
+                                            <input type="text" id="customPoster" class="settings-input" placeholder="https://image-url...">
+                                        </div>
+                                        <div class="settings-row">
+                                            <span class="settings-label">Custom Plot</span>
+                                            <input type="text" id="customDescription" class="settings-input" placeholder="Plot overrides...">
+                                        </div>
+                                        <div class="settings-row">
+                                            <span class="settings-label">Official ID</span>
+                                            <input type="text" id="officialId" class="settings-input" placeholder="tt12345 or movie:123">
+                                        </div>
+                                        <div class="settings-actions">
+                                            <button id="saveFocused" class="btn-sm">💾 Save Meta</button>
+                                            <button id="autoMatchFocused" class="btn-sm btn-primary">🤖 Auto-Match</button>
+                                            <button id="linkFocused" class="btn-sm btn-danger">🔗 Link ID</button>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div>
+                                    <div class="pane-title" style="color: var(--accent-orange); margin-bottom: 10px;">Panel B: Group Batch Processor</div>
+                                    <div class="settings-group">
+                                        <div class="settings-row">
+                                            <span class="settings-label">Link Batch to ONE ID</span>
+                                            <input type="text" id="bulkOfficialId" class="settings-input" placeholder="tt12345" style="border-color: var(--accent-orange);">
+                                        </div>
+                                        <div class="settings-row">
+                                            <span class="settings-label">Batch Poster URL</span>
+                                            <input type="text" id="bulkCustomPoster" class="settings-input" placeholder="https://image-url...">
+                                        </div>
+                                        <div class="settings-row">
+                                            <span class="settings-label">Batch Plot</span>
+                                            <input type="text" id="bulkCustomDescription" class="settings-input" placeholder="Plot overrides...">
+                                        </div>
+                                        <div class="settings-actions">
+                                            <button id="bulkAutoMatch" class="btn-sm btn-primary">🤖 Run Bulk Match</button>
+                                            <button id="bulkLink" class="btn-sm btn-warning">🔗 Link Batch</button>
+                                            <button id="bulkUpdateMeta" class="btn-sm btn-warning">💾 Save Batch Meta</button>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                <div>
+                                    <div class="pane-title" style="margin-bottom: 6px;">Batch Output Monitor</div>
+                                    <div id="bulkStatus" class="console">Idle... Ready for batch queue tasks.</div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Panel C: Visual Matcher with Viewport Auto-Focus -->
+                        <div class="card span-12" id="panelCCard" style="border: 1px solid var(--accent-green); background: rgba(48, 209, 88, 0.02); margin-top: 18px; padding: 0;">
+                            <div class="card-header" style="padding: 16px 20px;">
+                                <span class="card-title">Panel C: Cinemeta Visual Matcher</span>
+                                <span class="card-badge">Active Lookup</span>
+                            </div>
+
+                            <div style="padding: 0 20px 20px 20px;">
+                                <div class="flex-row flex-between" style="margin-bottom: 14px;">
+                                    <div style="font-size: 13.5px;">Search targets: <strong id="visualSearchTarget" style="color: var(--accent-blue);">None</strong></div>
+                                    <div class="flex-row" style="flex: 1; max-width: 480px;">
+                                        <input type="text" id="visualSearchInput" placeholder="Search title manually..." class="flex-grow">
+                                        <button id="visualSearchBtn" class="btn-sm btn-success">🔍 Search</button>
+                                    </div>
+                                </div>
+
+                                <div id="visualCandidatesContainer" class="cinemeta-grid" style="max-height: 480px; overflow-y: auto;">
+                                    <div class="text-muted" style="grid-column: 1 / -1; text-align: center; padding: 40px 0;">Select a pending item above to search visual candidates.</div>
+                                </div>
+                            </div>
+                        </div>
+
+                        <!-- Streams Pipeline -->
+                        <div style="border-top: 1px solid var(--border-subtle); margin-top: 18px; padding-top: 18px;">
+                            <h3 style="margin-bottom: 10px; color: var(--accent-green); font-family: var(--font-display); font-size: 15.5px; font-weight: 600;">03. Debrid Caching Pipeline</h3>
+                            <p class="text-muted" style="margin-bottom: 14px;">Select a single stream below to push and cache into your configured Debrid provider cloud.</p>
+                            <div class="table-wrap" id="streamsContainer" style="border: 1px solid var(--border-subtle); border-radius: var(--radius-md);">
+                                <table>
+                                    <thead>
+                                        <tr>
+                                            <th>Torrent Info Hash</th>
+                                            <th>Quality / Language</th>
+                                            <th>Selection</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="streamsBody">
+                                        <tr><td colspan="3" class="text-muted" style="text-align: center; padding: 15px;">Set a focused item above to query available streams.</td></tr>
+                                    </tbody>
+                                </table>
+                            </div>
+                            <div style="margin-top: 14px; text-align: right;">
+                                <button id="cacheSelected" class="btn-primary">📥 Push &amp; Cache Selected Stream</button>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- ══════════ RECOUP (Panel E) ══════════ -->
+                <section id="section-recoup" class="view">
+                    <div class="view-heading">
+                        <h2>Targeted Thread Recoup</h2>
+                        <p>Selectively crawl and index one forum thread by URL, without a full run.</p>
+                    </div>
+                    <div class="card span-12" style="border: 1px solid var(--accent-orange);">
+                        <div class="card-header">
+                            <span class="card-title" style="color: var(--accent-orange);">Panel E: Targeted Thread Recoup Console</span>
+                            <span class="card-badge" style="color: var(--accent-orange);">Selective Crawl</span>
+                        </div>
+
+                        <div class="flex-col" style="gap: 14px;">
+                            <div class="flex-row flex-between">
+                                <div style="color: var(--accent-orange); font-weight: 600; min-width: 140px;">Target Thread URL:</div>
+                                <input type="text" id="recoupUrlInput" placeholder="https://www.1tamilmv.tf/index.php?/forums/topic/..." class="flex-grow">
+                            </div>
+
+                            <div class="flex-row flex-between">
+                                <div style="color: var(--accent-orange); font-weight: 600; min-width: 140px;">Category Mappings:</div>
+                                <select id="recoupCategorySelect" class="flex-grow">
+                                    <option value="series:top-series-from-forum">Tamil WebSeries (series | Tamil WebSeries catalog)</option>
+                                    <option value="movie:tamil-hd-movies">Tamil HD Movies (movie | Tamil HD Movies catalog)</option>
+                                    <option value="movie:tamil-dubbed-movies">Tamil Dubbed Movies (movie | Tamil Dubbed Movies catalog)</option>
+                                </select>
+                            </div>
+
+                            <div style="text-align: right;">
+                                <button id="recoupExecuteBtn" class="btn-warning" style="padding: 10px 28px;">⚡ Recoup &amp; Index Thread</button>
+                            </div>
+
+                            <div class="text-muted" style="font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; margin-top: 6px; margin-bottom: -4px;">► Recoup Output Monitor</div>
+                            <div id="recoupStatus" class="console">Idle... Ready for targeted single-thread crawl.</div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- ══════════ PURGE (Panel D) ══════════ -->
+                <section id="section-purge" class="view">
+                    <div class="view-heading">
+                        <h2>Database Record Purge</h2>
+                        <p>Permanently remove all threads, streams, and metadata linked to an IMDb ID. This cannot be undone.</p>
+                    </div>
+                    <div class="card span-12" style="border: 1px solid var(--accent-red);">
+                        <div class="card-header">
+                            <span class="card-title" style="color: var(--accent-red);">Panel D: Database Record Purge Console</span>
+                            <span class="card-badge" style="color: var(--accent-red);">Critical Override</span>
+                        </div>
+
+                        <div class="flex-row flex-between">
+                            <div style="color: var(--accent-red); font-weight: 600;">Enter linked IMDb ID:</div>
+                            <div class="flex-row" style="flex: 1; max-width: 480px;">
+                                <input type="text" id="purgeSearchInput" placeholder="tt1234567" class="flex-grow">
+                                <button id="purgeLookupBtn" class="btn-danger">🔍 Lookup Records</button>
+                            </div>
+                        </div>
+
+                        <div id="purgeResultBox" style="display: none; border: 1px solid var(--accent-red); padding: 18px; background: rgba(255, 69, 58, 0.05); border-radius: var(--radius-md); font-size: 13.5px;">
+                            <div style="font-weight: 700; color: var(--accent-red); font-size: 16px; margin-bottom: 14px; border-bottom: 1px solid var(--accent-red); padding-bottom: 6px;">► TARGET RECORDS VERIFIED</div>
+                            <div style="margin-bottom: 6px;">Matched Title: <strong id="purgeResultTitle" style="color: var(--accent-green)">None</strong></div>
+                            <div style="margin-bottom: 6px;">IMDb ID: <strong id="purgeResultImdb">None</strong> | TMDB ID: <strong id="purgeResultTmdb">None</strong></div>
+                            <div style="margin-bottom: 14px;">Total Streams Indexed: <strong id="purgeResultStreams" style="color: var(--accent-orange)">0</strong></div>
+
+                            <div style="margin-bottom: 14px;">
+                                <strong>Threads Found:</strong>
+                                <ul id="purgeResultThreads" style="margin: 6px 0; padding-left: 18px; color: var(--text-secondary);"></ul>
+                            </div>
+
+                            <div style="color: var(--accent-red); font-weight: 600; margin-bottom: 14px;">⚠️ WARNING: Wiping these records is permanent and cannot be undone. Threads, streams, metadata, and cached mapping links will be completely deleted.</div>
+
+                            <div style="text-align: right;">
+                                <button id="purgeExecuteBtn" class="btn-danger btn-lg" style="width: auto; padding: 10px 28px;">🔥 CONFIRM DELETE RECORDS</button>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+                <!-- ══════════ ACTIVITY ══════════ -->
+                <section id="section-activity" class="view">
+                    <div class="view-heading">
+                        <h2>Activity Log</h2>
+                        <p>Recent links, failures, and parsing exceptions that need attention.</p>
+                    </div>
+                    <div class="bottom-grid">
+                        <div class="card">
+                            <div class="card-header">
+                                <span class="card-title">Recent Activity Log</span>
+                                <span class="card-badge">Paginated</span>
+                            </div>
+                            <div class="flex-row flex-between" style="margin-bottom: 10px;">
+                                <span class="text-muted">Page logs</span>
+                                <div class="flex-row">
+                                    <button id="prevPage" class="btn-sm">◀ Prev</button>
+                                    <span id="currentPage" style="padding: 0 10px; align-self: center; font-weight: 600; color: var(--accent-blue);">1</span>
+                                    <button id="nextPage" class="btn-sm">Next ▶</button>
+                                </div>
+                            </div>
+                            <div class="table-wrap" style="max-height: 400px; overflow-y: auto; border-radius: 8px;">
+                                <table>
+                                    <thead style="position: sticky; top: 0; background: var(--bg-surface); z-index: 10;">
+                                        <tr>
+                                            <th>Event Type</th>
+                                            <th>Clean Title / Error</th>
+                                            <th>Timestamp</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="recentBody"></tbody>
+                                </table>
+                            </div>
+                        </div>
+
+                        <div class="card">
+                            <div class="card-header">
+                                <span class="card-title" style="color: var(--accent-red);">Critical Parsing Failures</span>
+                                <span class="card-badge" style="color: var(--accent-red);">Action Required</span>
+                            </div>
+                            <div class="table-wrap" style="max-height: 400px; overflow-y: auto; border-radius: 8px;">
+                                <table>
+                                    <thead style="position: sticky; top: 0; background: var(--bg-surface); z-index: 10;">
+                                        <tr>
+                                            <th>Raw Title</th>
+                                            <th>Exception Reason</th>
+                                            <th>Last Attempt</th>
+                                            <th>Actions</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody id="failuresBody"></tbody>
+                                </table>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+
+            </div>
+        </div>
     </div>
 
+    <nav class="tabbar" id="mainTabbar"></nav>
+    <div id="toast-container"></div>
+
+    <!-- ═══════════════════════════════════════════════════════════════════
+         CORE FUNCTIONAL SCRIPT — 100% BEHAVIORAL & CONTRACT PARITY
+    ═══════════════════════════════════════════════════════════════════ -->
     <script>
         (function() {
             'use strict';
@@ -620,8 +972,48 @@
             let activeWatchlistTab = 'active';
             let allMonitoredSeries = [];
 
-            function el(id) {
-                return document.getElementById(id);
+            function el(id) { return document.getElementById(id); }
+
+            function showToast(message, type = 'info') {
+                const toast = document.createElement('div');
+                toast.className = `toast ${type}`;
+                toast.textContent = message;
+                el('toast-container').appendChild(toast);
+                setTimeout(() => toast.classList.add('show'), 10);
+                setTimeout(() => {
+                    toast.classList.remove('show');
+                    setTimeout(() => toast.remove(), 300);
+                }, 3200);
+            }
+
+            function showConfirmModal(title, message, confirmText = 'Delete') {
+                return new Promise((resolve) => {
+                    const modal = document.createElement('div');
+                    modal.className = 'modal-overlay';
+                    modal.innerHTML = `
+                        <div class="modal-card">
+                            <div class="modal-title">${title}</div>
+                            <div class="modal-text">${message}</div>
+                            <div class="modal-actions">
+                                <button class="btn-sm modal-cancel">Cancel</button>
+                                <button class="btn-sm btn-danger modal-confirm">${confirmText}</button>
+                            </div>
+                        </div>
+                    `;
+                    document.body.appendChild(modal);
+                    setTimeout(() => modal.classList.add('show'), 10);
+
+                    modal.querySelector('.modal-cancel').onclick = () => {
+                        modal.classList.remove('show');
+                        setTimeout(() => modal.remove(), 200);
+                        resolve(false);
+                    };
+                    modal.querySelector('.modal-confirm').onclick = () => {
+                        modal.classList.remove('show');
+                        setTimeout(() => modal.remove(), 200);
+                        resolve(true);
+                    };
+                });
             }
 
             function clearFocusState() {
@@ -632,8 +1024,8 @@
                 el('officialId').value = '';
                 el('visualSearchTarget').textContent = 'None';
                 el('visualSearchInput').value = '';
-                el('visualCandidatesContainer').innerHTML = '<div style="color: #666; text-align: center; font-size: 1.1rem; padding: 20px 0; grid-column: 1 / -1;">Select a pending item above to search visual candidates.</div>';
-                el('streamsBody').innerHTML = '<tr><td colspan="3" style="color: #666; text-align: center;">Set a focused item above to query available streams.</td></tr>';
+                el('visualCandidatesContainer').innerHTML = '<div class="text-muted" style="grid-column: 1 / -1; text-align: center; padding: 40px 0;">Select a pending item above to search visual candidates.</div>';
+                el('streamsBody').innerHTML = '<tr><td colspan="3" class="text-muted" style="text-align: center; padding: 15px;">Set a focused item above to query available streams.</td></tr>';
             }
 
             async function fetchHealth() {
@@ -641,17 +1033,17 @@
                     const r = await fetch('/admin/api/health?_t=' + Date.now());
                     const d = await r.json();
                     el('isCrawling').textContent = d.isCrawling ? 'ACTIVE' : 'IDLE';
-                    el('isCrawling').className = d.isCrawling ? 'glow-amber' : 'glow-green';
+                    el('isCrawling').className = d.isCrawling ? 'pill pill-orange' : 'pill pill-green';
                     el('lastUpdated').textContent = d.lastUpdated || '-';
                     el('debridService').textContent = (d.debridService || 'none').toUpperCase();
                     el('cacheCheckMethod').textContent = d.debridCacheCheck === 'instant' ? '⚡ INSTANT (API)' : '🗄️ LOCAL DATABASE';
-                    el('cacheCheckMethod').className = d.debridCacheCheck === 'instant' ? 'glow-green' : 'glow-amber';
+                    el('cacheCheckMethod').className = d.debridCacheCheck === 'instant' ? 'pill pill-green' : 'pill pill-orange';
                     el('rdEnabled').textContent = d.realDebridEnabled ? 'YES' : 'NO';
-                    el('rdEnabled').className = d.realDebridEnabled ? 'glow-green' : 'glow-red';
+                    el('rdEnabled').className = d.realDebridEnabled ? 'pill pill-green' : 'pill pill-red';
                     el('torboxEnabled').textContent = d.torboxEnabled ? 'YES' : 'NO';
-                    el('torboxEnabled').className = d.torboxEnabled ? 'glow-green' : 'glow-red';
+                    el('torboxEnabled').className = d.torboxEnabled ? 'pill pill-green' : 'pill pill-red';
                     el('tmdbConfigured').textContent = d.tmdbConfigured ? 'YES' : 'NO';
-                    el('tmdbConfigured').className = d.tmdbConfigured ? 'glow-green' : 'glow-red';
+                    el('tmdbConfigured').className = d.tmdbConfigured ? 'pill pill-green' : 'pill pill-red';
                     el('trackerCount').textContent = d.trackerCount;
                     el('dbSize').textContent = d.dbSizeBytes ? (d.dbSizeBytes / 1024 / 1024).toFixed(1) + ' MB' : '-';
 
@@ -665,28 +1057,24 @@
 
             el('triggerCrawl').addEventListener('click', async () => {
                 await fetch('/admin/api/trigger-crawl', { method: 'POST' });
-                alert('Crawl sequence initiated in background.');
+                showToast('Crawl sequence initiated in background.', 'success');
                 fetchHealth();
             });
 
             // ── Panel F: Monitored Series Watchlist Functions ──
-
             async function loadMonitoredSeries() {
                 try {
                     const r = await fetch('/admin/api/monitored-series?_t=' + Date.now());
                     allMonitoredSeries = await r.json() || [];
-
                     let countActive = 0, countPaused = 0, countArchived = 0;
                     allMonitoredSeries.forEach(s => {
                         if (s.status === 'active') countActive++;
                         else if (s.status === 'paused') countPaused++;
                         else if (s.status === 'archived') countArchived++;
                     });
-
                     el('countActive').textContent = countActive;
                     el('countPaused').textContent = countPaused;
                     el('countArchived').textContent = countArchived;
-
                     renderMonitoredTable();
                 } catch (err) {
                     console.error('Failed to load monitored series:', err);
@@ -701,7 +1089,6 @@
             function renderMonitoredTable() {
                 const tbody = el('monitoredSeriesBody');
                 const filterQuery = el('watchlistFilterInput').value.trim().toLowerCase();
-
                 const filtered = allMonitoredSeries.filter(s => {
                     if (s.status !== activeWatchlistTab) return false;
                     if (filterQuery) {
@@ -717,48 +1104,41 @@
                 updateSelectedCounter();
 
                 if (filtered.length === 0) {
-                    tbody.innerHTML = `<tr><td colspan="6" style="color: #666; text-align: center;">No webseries currently in ${activeWatchlistTab.toUpperCase()} queue.</td></tr>`;
+                    tbody.innerHTML = `<tr><td colspan="6" class="text-muted" style="text-align: center; padding: 20px;">No webseries currently in ${activeWatchlistTab.toUpperCase()} queue.</td></tr>`;
                     return;
                 }
 
                 filtered.forEach(s => {
                     const tr = document.createElement('tr');
-                    const badgeClass = s.status === 'active' ? 'glow-green' : (s.status === 'paused' ? 'glow-amber' : 'glow-red');
+                    const badgeClass = s.status === 'active' ? 'pill pill-green' : (s.status === 'paused' ? 'pill pill-orange' : 'pill pill-gray');
                     const displayTitle = s.title || s.raw_title;
-                    const urlDisplay = s.url ? `<a href="${s.url}" target="_blank" style="color: #00e5ff;">Link 🔗</a>` : '<span style="color:#ff2a5f;">Missing URL</span>';
+                    const urlDisplay = s.url ? `<a href="${s.url}" target="_blank" style="color: var(--accent-blue);">Link 🔗</a>` : '<span class="pill pill-red">Missing URL</span>';
 
                     tr.innerHTML = `
-                        <td style="text-align: center;">
-                            <input type="checkbox" class="monitoredRowCheckbox" data-hash="${s.thread_hash}" style="cursor: pointer;">
-                        </td>
-                        <td>
-                            <strong style="color: #fff; font-size: 1.3rem;">${displayTitle}</strong><br>
-                            <span style="color: #888; font-size: 1.05rem;">Raw: ${s.raw_title || '-'}</span>
-                        </td>
-                        <td class="${badgeClass}" style="font-weight: bold;">${s.status.toUpperCase()}</td>
-                        <td style="font-size: 1.1rem; color: #aaa;">${s.last_updated ? new Date(s.last_updated).toLocaleString() : '-'}</td>
+                        <td style="text-align: center;"><input type="checkbox" class="monitoredRowCheckbox" data-hash="${s.thread_hash}"></td>
+                        <td><strong style="color: var(--text-primary); font-size: 14px;">${displayTitle}</strong><br><span class="text-muted">Raw: ${s.raw_title || '-'}</span></td>
+                        <td><span class="${badgeClass}">${s.status.toUpperCase()}</span></td>
+                        <td class="text-muted">${s.last_updated ? new Date(s.last_updated).toLocaleString() : '-'}</td>
                         <td>${urlDisplay}</td>
                         <td>
-                            ${s.status !== 'active' ? `<button class="toggleBtn" data-hash="${s.thread_hash}" data-status="active" style="border-color:#00ff66; color:#00ff66; font-size:1.05rem; padding:2px 8px;">🟢 Activate</button>` : ''}
-                            ${s.status !== 'paused' ? `<button class="toggleBtn" data-hash="${s.thread_hash}" data-status="paused" style="border-color:#ff9900; color:#ff9900; font-size:1.05rem; padding:2px 8px;">⏸️ Pause</button>` : ''}
-                            ${s.status !== 'archived' ? `<button class="toggleBtn" data-hash="${s.thread_hash}" data-status="archived" style="border-color:#888; color:#888; font-size:1.05rem; padding:2px 8px;">📁 Archive</button>` : ''}
-                            <button class="toggleBtn" data-hash="${s.thread_hash}" data-status="delete" style="border-color:#ff2a5f; color:#ff2a5f; font-size:1.05rem; padding:2px 8px;">🔥 Remove</button>
+                            <div class="flex-row" style="gap: 4px; flex-wrap: nowrap;">
+                                ${s.status !== 'active' ? `<button class="toggleBtn btn-sm btn-success" data-hash="${s.thread_hash}" data-status="active">🟢</button>` : ''}
+                                ${s.status !== 'paused' ? `<button class="toggleBtn btn-sm btn-warning" data-hash="${s.thread_hash}" data-status="paused">⏸️</button>` : ''}
+                                ${s.status !== 'archived' ? `<button class="toggleBtn btn-sm" data-hash="${s.thread_hash}" data-status="archived">📁</button>` : ''}
+                                <button class="toggleBtn btn-sm btn-danger" data-hash="${s.thread_hash}" data-status="delete">🔥</button>
+                            </div>
                         </td>
                     `;
                     tbody.appendChild(tr);
                 });
 
-                tbody.querySelectorAll('.monitoredRowCheckbox').forEach(cb => {
-                    cb.addEventListener('change', updateSelectedCounter);
-                });
-
+                tbody.querySelectorAll('.monitoredRowCheckbox').forEach(cb => cb.addEventListener('change', updateSelectedCounter));
                 tbody.querySelectorAll('.toggleBtn').forEach(btn => {
                     btn.addEventListener('click', async () => {
                         const hash = btn.getAttribute('data-hash');
                         const status = btn.getAttribute('data-status');
                         await fetch('/admin/api/monitored-series/toggle', {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
+                            method: 'POST', headers: { 'Content-Type': 'application/json' },
                             body: JSON.stringify({ threadHash: hash, status })
                         });
                         loadMonitoredSeries();
@@ -766,47 +1146,38 @@
                 });
             }
 
-            // Master Checkbox Toggle Handler
             const selectAllMonitored = el('selectAllMonitored');
             if (selectAllMonitored) {
                 selectAllMonitored.addEventListener('change', () => {
-                    const checkboxes = document.querySelectorAll('.monitoredRowCheckbox');
-                    checkboxes.forEach(cb => cb.checked = selectAllMonitored.checked);
+                    document.querySelectorAll('.monitoredRowCheckbox').forEach(cb => cb.checked = selectAllMonitored.checked);
                     updateSelectedCounter();
                 });
             }
 
-            // Bulk Status Action Handlers
             async function executeBulkStatusChange(targetStatus) {
                 const checkedNodes = document.querySelectorAll('.monitoredRowCheckbox:checked');
                 const selectedHashes = Array.from(checkedNodes).map(cb => cb.getAttribute('data-hash'));
 
-                if (selectedHashes.length === 0) {
-                    alert('Please select at least one series using the checkboxes.');
-                    return;
-                }
-
+                if (selectedHashes.length === 0) return showToast('Please select at least one series using the checkboxes.', 'warn');
                 if (targetStatus === 'delete') {
-                    if (!confirm(`Are you sure you want to remove ${selectedHashes.length} series from your monitored watchlist?`)) {
-                        return;
-                    }
+                    const confirmed = await showConfirmModal('Delete Series', `Are you sure you want to remove ${selectedHashes.length} series from your monitored watchlist?`, 'Remove');
+                    if (!confirmed) return;
                 }
 
                 try {
                     const r = await fetch('/admin/api/monitored-series/bulk-toggle', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
+                        method: 'POST', headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ threadHashes: selectedHashes, status: targetStatus })
                     });
                     const d = await r.json();
                     if (r.ok) {
-                        alert(d.message || `Bulk update to '${targetStatus}' successful.`);
+                        showToast(d.message || `Bulk update to '${targetStatus}' successful.`, 'success');
                         loadMonitoredSeries();
                     } else {
-                        alert('Bulk update failed: ' + (d.error || 'Unknown error'));
+                        showToast('Bulk update failed: ' + (d.error || 'Unknown error'), 'error');
                     }
                 } catch (err) {
-                    alert('Network error during bulk operation: ' + err.message);
+                    showToast('Network error during bulk operation: ' + err.message, 'error');
                 }
             }
 
@@ -815,19 +1186,18 @@
             el('bulkArchiveBtn').addEventListener('click', () => executeBulkStatusChange('archived'));
             el('bulkRemoveBtn').addEventListener('click', () => executeBulkStatusChange('delete'));
 
-            // Tab Event Listeners
             el('tabActiveBtn').addEventListener('click', () => { activeWatchlistTab = 'active'; updateTabStyles(); renderMonitoredTable(); });
             el('tabPausedBtn').addEventListener('click', () => { activeWatchlistTab = 'paused'; updateTabStyles(); renderMonitoredTable(); });
             el('tabArchivedBtn').addEventListener('click', () => { activeWatchlistTab = 'archived'; updateTabStyles(); renderMonitoredTable(); });
             el('watchlistFilterInput').addEventListener('input', renderMonitoredTable);
 
             function updateTabStyles() {
-                el('tabActiveBtn').style.background = activeWatchlistTab === 'active' ? '#003311' : '#000';
-                el('tabPausedBtn').style.background = activeWatchlistTab === 'paused' ? '#332200' : '#000';
-                el('tabArchivedBtn').style.background = activeWatchlistTab === 'archived' ? '#222' : '#000';
+                el('tabActiveBtn').classList.toggle('active', activeWatchlistTab === 'active');
+                el('tabPausedBtn').classList.toggle('active', activeWatchlistTab === 'paused');
+                el('tabArchivedBtn').classList.toggle('active', activeWatchlistTab === 'archived');
             }
 
-            // ── Smart Autocomplete Search Handler ──
+            // ── Autocomplete Search Handler ──
             const seriesSearchInput = el('seriesSearchInput');
             const seriesSearchDropdown = el('seriesSearchDropdown');
             let searchTimeout = null;
@@ -835,19 +1205,15 @@
             seriesSearchInput.addEventListener('input', () => {
                 clearTimeout(searchTimeout);
                 const query = seriesSearchInput.value.trim();
-                if (!query) {
-                    seriesSearchDropdown.style.display = 'none';
-                    return;
-                }
+                if (!query) { seriesSearchDropdown.style.display = 'none'; return; }
 
                 searchTimeout = setTimeout(async () => {
                     try {
                         const r = await fetch(`/admin/api/series-search?q=${encodeURIComponent(query)}&_t=${Date.now()}`);
                         const matches = await r.json();
-
                         seriesSearchDropdown.innerHTML = '';
                         if (!matches || matches.length === 0) {
-                            seriesSearchDropdown.innerHTML = '<div style="padding: 10px; color: #ff2a5f; text-align: center;">No matching webseries found in DB</div>';
+                            seriesSearchDropdown.innerHTML = '<div style="padding: 12px; color: var(--accent-red); text-align: center; font-size: 13px;">No matching webseries found in DB</div>';
                             seriesSearchDropdown.style.display = 'block';
                             return;
                         }
@@ -855,50 +1221,54 @@
                         matches.forEach(m => {
                             const item = document.createElement('div');
                             item.className = 'autocomplete-item';
-
-                            let statusBadge = '<span class="glow-cyan">[Unmonitored]</span>';
-                            if (m.monitored_status === 'active') statusBadge = '<span class="glow-green">[🟢 Active]</span>';
-                            else if (m.monitored_status === 'paused') statusBadge = '<span class="glow-amber">[⏸️ Paused]</span>';
-                            else if (m.monitored_status === 'archived') statusBadge = '<span style="color:#888;">[📁 Archived]</span>';
+                            let statusBadge = '<span class="pill pill-blue">Unmonitored</span>';
+                            if (m.monitored_status === 'active') statusBadge = '<span class="pill pill-green">Active</span>';
+                            else if (m.monitored_status === 'paused') statusBadge = '<span class="pill pill-orange">Paused</span>';
+                            else if (m.monitored_status === 'archived') statusBadge = '<span class="pill pill-gray">Archived</span>';
 
                             item.innerHTML = `
-                                <div>
-                                    <strong style="font-size: 1.25rem;">[ID: ${m.id}] ${m.clean_title || m.raw_title}</strong><br>
-                                    <span style="font-size: 1.05rem; color: #aaa;">Raw: ${m.raw_title}</span>
+                                <div style="flex: 1; padding-right: 10px;">
+                                    <strong style="font-size: 13.5px;">[ID: ${m.id}] ${m.clean_title || m.raw_title}</strong><br>
+                                    <span class="text-muted" style="font-size: 11.5px;">Raw: ${m.raw_title}</span>
+                                    <div class="inline-prompt-ui" style="display: none; margin-top: 6px;">
+                                        <input type="text" class="inline-url-input" placeholder="Paste forum thread URL here..." style="width: 100%; margin-bottom: 6px;">
+                                        <button class="btn-sm btn-primary inline-confirm-url">Confirm & Monitor</button>
+                                    </div>
                                 </div>
-                                <div style="display:flex; align-items:center; gap:8px;">
+                                <div class="flex-row" style="gap: 6px; align-items: center;">
                                     ${statusBadge}
-                                    <button class="enrollBtn" style="font-size:1.05rem; padding:2px 8px; margin:0;">⚡ Monitor</button>
+                                    <button class="enrollBtn btn-sm btn-primary">⚡ Monitor</button>
                                 </div>
                             `;
 
-                            item.querySelector('.enrollBtn').addEventListener('click', async (e) => {
+                            const enrollBtn = item.querySelector('.enrollBtn');
+                            const inlineUi = item.querySelector('.inline-prompt-ui');
+                            const inlineInput = item.querySelector('.inline-url-input');
+                            const inlineConfirm = item.querySelector('.inline-confirm-url');
+
+                            enrollBtn.addEventListener('click', async (e) => {
                                 e.stopPropagation();
                                 let targetUrl = m.url;
                                 if (!targetUrl) {
-                                    targetUrl = prompt(`Series "${m.clean_title || m.raw_title}" is missing a thread URL.\n\nPlease paste its forum thread URL once to lock monitoring:`, '');
-                                    if (!targetUrl) return;
+                                    inlineUi.style.display = 'block';
+                                    enrollBtn.style.display = 'none';
+                                    inlineInput.focus();
+                                    return;
                                 }
-
-                                const resp = await fetch('/admin/api/monitored-series/add', {
-                                    method: 'POST',
-                                    headers: { 'Content-Type': 'application/json' },
-                                    body: JSON.stringify({ threadId: m.id, threadUrl: targetUrl, threadHash: m.thread_hash })
-                                });
-                                const d = await resp.json();
-                                alert(d.message || d.error);
-                                seriesSearchInput.value = '';
-                                seriesSearchDropdown.style.display = 'none';
-                                
-                                // Auto-switch view to Active tab so the newly monitored series is immediately visible
-                                activeWatchlistTab = 'active';
-                                updateTabStyles();
-                                loadMonitoredSeries();
+                                await finalizeEnrollment(m, targetUrl);
                             });
+
+                            if (inlineConfirm) {
+                                inlineConfirm.addEventListener('click', async (e) => {
+                                    e.stopPropagation();
+                                    const url = inlineInput.value.trim();
+                                    if (!url) return showToast('Please paste a valid URL.', 'warn');
+                                    await finalizeEnrollment(m, url);
+                                });
+                            }
 
                             seriesSearchDropdown.appendChild(item);
                         });
-
                         seriesSearchDropdown.style.display = 'block';
                     } catch (err) {
                         console.error('Autocomplete query failed:', err);
@@ -906,13 +1276,27 @@
                 }, 250);
             });
 
+            async function finalizeEnrollment(m, targetUrl) {
+                const resp = await fetch('/admin/api/monitored-series/add', {
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ threadId: m.id, threadUrl: targetUrl, threadHash: m.thread_hash })
+                });
+                const d = await resp.json();
+                showToast(d.message || d.error, d.message ? 'success' : 'error');
+                seriesSearchInput.value = '';
+                seriesSearchDropdown.style.display = 'none';
+                activeWatchlistTab = 'active';
+                updateTabStyles();
+                loadMonitoredSeries();
+            }
+
             document.addEventListener('click', (e) => {
                 if (!seriesSearchInput.contains(e.target) && !seriesSearchDropdown.contains(e.target)) {
                     seriesSearchDropdown.style.display = 'none';
                 }
             });
 
-            // ── Panel G: Entity Relation Graph Visualizer Logic ──
+            // ── Panel G: 3-TIER LAYERED DISCLOSURE MODEL GRAPH ──
             const graphSearchInput = el('graphSearchInput');
             const graphTypeSelect = el('graphTypeSelect');
             const graphSearchBtn = el('graphSearchBtn');
@@ -921,211 +1305,232 @@
             async function renderEntityGraph() {
                 const query = graphSearchInput.value.trim();
                 const contentType = graphTypeSelect.value;
+                if (!query) return showToast('Please enter a Title, IMDb ID (tt...), or TMDB ID to visualize.', 'warn');
 
-                if (!query) {
-                    alert('Please enter a Title, IMDb ID (tt...), or TMDB ID to visualize.');
-                    return;
-                }
-
-                graphCanvas.innerHTML = '<div style="color: #00e5ff; text-align: center; padding: 40px 0; font-size: 1.3rem;">🔍 Traversing Bbolt database entity relationships...</div>';
+                graphCanvas.innerHTML = '<div class="text-muted" style="text-align: center; padding: 60px 0; color: var(--accent-blue);">🔍 Traversing Bbolt database entity relationships...</div>';
 
                 try {
                     const r = await fetch(`/admin/api/visualize-tree?q=${encodeURIComponent(query)}&type=${contentType}&_t=${Date.now()}`);
-                    const graph = await r.json();
+                    const response = await r.json();
 
-                    if (!r.ok || graph.error) {
-                        graphCanvas.innerHTML = `<div style="color:#ff2a5f; padding:20px; text-align:center;">Graph traversal error: ${graph.error || 'Unknown'}</div>`;
+                    if (!r.ok || response.error) {
+                        graphCanvas.innerHTML = `<div style="color:var(--accent-red); padding:40px; text-align:center;">Graph traversal error: ${response.error || 'Unknown'}</div>`;
                         return;
                     }
 
-                    if (graph.meta.gap_status === 'NOT_FOUND') {
-                        graphCanvas.innerHTML = `<div style="color:#ff9900; padding:20px; text-align:center;">No matching entity records located in database for "${query}".</div>`;
+                    const entities = response.entities || [];
+                    if (entities.length === 0) {
+                        graphCanvas.innerHTML = `<div style="color:var(--accent-orange); padding:40px; text-align:center;">No matching entity records located in database for "${query}".</div>`;
                         return;
                     }
 
-                    let gapBadge = '<span class="glow-green">[🟢 HEALTHY LINKED]</span>';
-                    let showInlineResolver = false;
-                    if (graph.meta.gap_status === 'MISSING_IMDB_GAP') {
-                        gapBadge = '<span class="glow-amber">[⚠️ MISSING IMDb ID GAP]</span>';
-                        showInlineResolver = true;
-                    } else if (graph.meta.gap_status === 'PENDING_MATCH') {
-                        gapBadge = '<span class="glow-cyan">[⏳ PENDING MATCH]</span>';
-                        showInlineResolver = true;
-                    } else if (graph.meta.gap_status === 'UNLINKED') {
-                        gapBadge = '<span class="glow-red">[🔴 UNLINKED THREAD]</span>';
-                        showInlineResolver = true;
-                    }
+                    graphCanvas.innerHTML = '';
 
-                    let html = `
-                        <!-- LEVEL 1: ROOT METADATA CENTER -->
-                        <div style="border: 2px solid #00ff66; padding: 15px; background: #0a0a0c; margin-bottom: 20px;">
-                            <div style="font-weight: bold; color: #00ff66; font-size: 1.4rem; border-bottom: 1px dashed #00ff66; padding-bottom: 6px; margin-bottom: 10px; display: flex; justify-content: space-between;">
-                                <span>► METADATA CENTER NODE</span>
-                                <span>${gapBadge}</span>
-                            </div>
-                            <div style="display: flex; gap: 20px; flex-wrap: wrap; align-items: center;">
-                                <div style="font-size: 1.3rem;">
-                                    Title: <strong style="color: #fff;">${graph.meta.title || 'Unknown Title'}</strong> (${graph.meta.year || 'N/A'})<br>
-                                    TMDB ID: <strong style="color: #00e5ff;">${graph.meta.tmdb_id || 'None'}</strong> | 
-                                    IMDb ID: <strong style="color: #00e5ff;">${graph.meta.imdb_id || 'None'}</strong>
-                                </div>
-                                <div style="color: #aaa; font-size: 1.1rem; flex: 1; text-align: right;">
-                                    ${graph.meta.gap_reason}
-                                </div>
-                            </div>
-                    `;
+                    entities.forEach((graph, index) => {
+                        let gapBadge = '<span class="pill pill-green">Healthy Linked</span>';
+                        if (graph.meta.gap_status === 'MISSING_IMDB_GAP') { gapBadge = '<span class="pill pill-orange">Missing IMDb Gap</span>'; }
+                        else if (graph.meta.gap_status === 'PENDING_MATCH') { gapBadge = '<span class="pill pill-blue">Pending Match</span>'; }
+                        else if (graph.meta.gap_status === 'UNLINKED') { gapBadge = '<span class="pill pill-red">Unlinked Thread</span>'; }
 
-                    // Inline Quick Gap Resolver Form
-                    if (showInlineResolver && graph.threads && graph.threads.length > 0) {
-                        const targetThreadId = graph.threads[0].id;
-                        html += `
-                            <div style="margin-top: 12px; padding-top: 10px; border-top: 1px dotted #ff9900; display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
-                                <span style="color: #ff9900; font-weight: bold; font-size: 1.15rem;">► QUICK GAP RESOLVER:</span>
-                                <input type="text" id="inlineGapInput" placeholder="Enter IMDb ID (e.g. tt11482184)..." style="width: 220px; border-color: #ff9900; color: #ff9900; background: #000; height: 32px;">
-                                <button id="inlineGapFixBtn" data-thread-id="${targetThreadId}" style="border-color: #00ff66; color: #00ff66; font-size: 1.1rem; padding: 2px 12px; margin: 0; box-shadow: 2px 2px 0 #004411;">🔗 Attach IMDb ID &amp; Sync Streams</button>
+                        const deckCard = document.createElement('div');
+                        deckCard.className = 'entity-deck-card';
+
+                        const targetThreadId = (graph.threads && graph.threads.length > 0) ? graph.threads[0].id : null;
+                        const threadCount = (graph.threads || []).length;
+                        const streamCount = (graph.streams || []).length;
+
+                        // Layer 0: Compact Title Deck Header
+                        let html = `
+                            <div class="deck-header" id="deckHeader_${index}">
+                                <div>
+                                    <div style="font-size: var(--font-size-title-3); font-weight: 700; color: var(--text-primary); margin-bottom: 2px;">
+                                        ${graph.meta.title || 'Unknown Title'} (${graph.meta.year || 'N/A'})
+                                    </div>
+                                    <div class="text-muted" style="font-size: var(--font-size-caption);">
+                                        TMDB: <strong style="color:var(--accent-blue)">${graph.meta.tmdb_id || 'None'}</strong> | 
+                                        IMDb: <strong style="color:var(--accent-blue)">${graph.meta.imdb_id || 'None'}</strong>
+                                    </div>
+                                </div>
+                                <div class="flex-row" style="gap: 10px; align-items: center;">
+                                    <span class="text-muted" style="font-size: var(--font-size-caption);">${graph.meta.gap_reason}</span>
+                                    ${gapBadge}
+                                    <span class="deck-chevron">▼</span>
+                                </div>
                             </div>
+                            
+                            <!-- Layer 1 Body (Expanded on Deck Click) -->
+                            <div class="deck-body" id="deckBody_${index}">
                         `;
-                    }
 
-                    html += `
-                        </div>
-
-                        <!-- LEVEL 2: PHYSICAL FORUM THREAD BRANCHES -->
-                        <div style="font-size: 1.25rem; color: #00e5ff; font-weight: bold; margin-bottom: 8px;">
-                            ► PHYSICAL FORUM THREAD NODES (${(graph.threads || []).length} Connected Threads):
-                        </div>
-                        <div class="tree-level" style="margin-bottom: 25px;">
-                    `;
-
-                    if (!graph.threads || graph.threads.length === 0) {
-                        html += '<div style="color: #888;">No physical thread records linked to this metadata node.</div>';
-                    } else {
-                        graph.threads.forEach(t => {
-                            const urlLink = t.url ? `<a href="${t.url}" target="_blank" style="color: #00e5ff;">Link 🔗</a>` : '<span style="color:#ff2a5f;">No URL</span>';
+                        // Re-Link Tool
+                        if (targetThreadId) {
                             html += `
-                                <div class="node-card" style="flex: 1; min-width: 300px;">
-                                    <div style="font-weight: bold; color: #fff; font-size: 1.2rem; margin-bottom: 4px;">[ID: ${t.id}] ${t.clean_title || t.raw_title}</div>
-                                    <div style="font-size: 1.05rem; color: #888; margin-bottom: 6px;">Raw: ${t.raw_title}</div>
-                                    <div style="display: flex; justify-content: space-between; font-size: 1.1rem;">
-                                        <span>Status: <strong class="${t.status === 'linked' ? 'glow-green' : 'glow-cyan'}">${t.status.toUpperCase()}</strong></span>
-                                        <span>Category: <strong style="color: #ff9900;">${t.catalog || t.type}</strong></span>
-                                    </div>
-                                    <div style="display: flex; justify-content: space-between; font-size: 1.1rem; margin-top: 6px; border-top: 1px dotted #333; padding-top: 6px;">
-                                        <span>Magnets: <strong style="color: #00ff66;">${t.magnet_count}</strong></span>
-                                        <span>Address: ${urlLink}</span>
-                                    </div>
+                                <div style="margin-bottom: 14px; padding-bottom: 12px; border-bottom: 1px solid var(--border-subtle); display: flex; gap: 10px; align-items: center; flex-wrap: wrap;">
+                                    <span style="font-size: var(--font-size-caption); font-weight: 600; color: var(--accent-orange); text-transform: uppercase;">Re-Link Official ID:</span>
+                                    <input type="text" id="inlineGapInput_${index}" placeholder="Enter IMDb ID (e.g. tt11482184) or TMDB ID..." style="flex: 1; min-width: 200px; background: var(--bg-surface-elevated); border-color: var(--accent-orange);">
+                                    <button id="inlineGapFixBtn_${index}" class="btn-sm btn-warning" data-thread-id="${targetThreadId}">🔗 Attach Official ID &amp; Sync Streams</button>
                                 </div>
                             `;
-                        });
-                    }
+                        }
 
-                    html += `
-                        </div>
-
-                        <!-- LEVEL 3: COMPOSITE STREAM LEAF NODES -->
-                        <div style="font-size: 1.25rem; color: #ff9900; font-weight: bold; margin-bottom: 8px;">
-                            ► COMPOSITE STREAM LEAF NODES (${(graph.streams || []).length} Indexed Streams):
-                        </div>
-                        <div class="tree-level">
-                    `;
-
-                    if (!graph.streams || graph.streams.length === 0) {
-                        html += '<div style="color: #888;">No composite streams currently indexed for this TMDB ID.</div>';
-                    } else {
-                        graph.streams.forEach(s => {
-                            let epStr = 'Movie Stream';
-                            if (s.season !== null && s.episode !== null) {
-                                epStr = `S${String(s.season).padStart(2, '0')} E${String(s.episode).padStart(2, '0')}`;
-                            }
-                            html += `
-                                <div class="node-card" style="border-color: #ff9900; min-width: 240px; box-shadow: 3px 3px 0 #442200;">
-                                    <div style="font-weight: bold; color: #ff9900; font-size: 1.2rem;">${epStr}</div>
-                                    <div style="font-size: 1.1rem; color: #fff; margin: 4px 0;">Quality: ${s.quality || 'SD'} | Lang: ${(s.language || 'ta').toUpperCase()}</div>
-                                    <div style="font-size: 0.95rem; color: #aaa; word-break: break-all; font-family: monospace;">
-                                        Hash: ${s.infohash}
-                                    </div>
-                                    <div style="margin-top: 6px; font-size: 1.05rem;">
-                                        Cache Lock: <strong class="${s.is_locked ? 'glow-amber' : 'glow-green'}">${s.is_locked ? '🔒 LOCKED' : '🔓 OPEN'}</strong>
-                                    </div>
+                        // Layer 2 - Branch 1 Header (Physical Forum Threads)
+                        html += `
+                            <div class="branch-header" id="branch1Header_${index}">
+                                <div style="display: flex; align-items: center; gap: 8px;">
+                                    <span>📂</span>
+                                    <span>Physical Forum Threads</span>
                                 </div>
-                            `;
+                                <div style="display: flex; align-items: center; gap: 10px;">
+                                    <span class="pill pill-gray">${threadCount} Connected</span>
+                                    <span class="branch-chevron">▼</span>
+                                </div>
+                            </div>
+                            <div class="branch-content" id="branch1Content_${index}">
+                        `;
+
+                        if (threadCount === 0) {
+                            html += '<div class="text-muted" style="padding: 10px 0;">No physical thread records linked to this metadata node.</div>';
+                        } else {
+                            graph.threads.forEach(t => {
+                                const urlLink = t.url ? `<a href="${t.url}" target="_blank" style="color: var(--accent-blue); font-size: 12px;">Visit Thread ↗</a>` : '<span class="pill pill-red" style="font-size: 10px;">No URL</span>';
+                                html += `
+                                    <div class="tree-leaf">
+                                        <div>
+                                            <div style="font-weight: 600; color: var(--text-primary); margin-bottom: 2px;">[ID: ${t.id}] ${t.clean_title || t.raw_title}</div>
+                                            <div class="text-muted" style="font-size: 11.5px;">Raw: ${t.raw_title}</div>
+                                        </div>
+                                        <div class="flex-row" style="gap: 12px; align-items: center;">
+                                            <span class="text-muted" style="font-size: 11.5px;">Cat: <strong style="color:var(--accent-orange)">${t.catalog || t.type}</strong></span>
+                                            <span class="text-muted" style="font-size: 11.5px;">Magnets: <strong style="color:var(--accent-green)">${t.magnet_count}</strong></span>
+                                            ${urlLink}
+                                        </div>
+                                    </div>
+                                `;
+                            });
+                        }
+                        html += `</div>`; // Close Branch 1 Content
+
+                        // Layer 2 - Branch 2 Header (Composite Stream Leafs)
+                        html += `
+                            <div class="branch-header" id="branch2Header_${index}">
+                                <div style="display: flex; align-items: center; gap: 8px;">
+                                    <span>🌊</span>
+                                    <span>Composite Stream Leafs</span>
+                                </div>
+                                <div style="display: flex; align-items: center; gap: 10px;">
+                                    <span class="pill pill-gray">${streamCount} Indexed</span>
+                                    <span class="branch-chevron">▼</span>
+                                </div>
+                            </div>
+                            <div class="branch-content" id="branch2Content_${index}">
+                        `;
+
+                        if (streamCount === 0) {
+                            html += '<div class="text-muted" style="padding: 10px 0;">No composite streams currently indexed for this TMDB ID.</div>';
+                        } else {
+                            graph.streams.forEach(s => {
+                                let epStr = 'Movie Stream';
+                                if (s.season !== null && s.episode !== null) epStr = `S${String(s.season).padStart(2, '0')} E${String(s.episode).padStart(2, '0')}`;
+                                html += `
+                                    <div class="tree-leaf" style="border-left: 3px solid var(--accent-orange);">
+                                        <div>
+                                            <div style="font-weight: 600; color: var(--accent-orange); margin-bottom: 2px;">${epStr}</div>
+                                            <div class="text-muted" style="font-size: 11px; word-break: break-all; font-family: var(--font-mono);">${s.infohash}</div>
+                                        </div>
+                                        <div class="flex-row" style="gap: 10px; align-items: center;">
+                                            <span class="pill pill-blue">${s.quality || 'SD'}</span>
+                                            <span class="pill ${s.is_locked ? 'pill-orange' : 'pill-green'}">${s.is_locked ? '🔒 LOCKED' : '🔓 OPEN'}</span>
+                                        </div>
+                                    </div>
+                                `;
+                            });
+                        }
+                        html += `</div>`; // Close Branch 2 Content
+
+                        html += `</div>`; // Close Deck Body
+                        deckCard.innerHTML = html;
+                        graphCanvas.appendChild(deckCard);
+
+                        // ── Layer 1 Toggle Event Listener ──
+                        const deckHeaderEl = document.getElementById(`deckHeader_${index}`);
+                        deckHeaderEl.addEventListener('click', () => {
+                            deckCard.classList.toggle('expanded');
                         });
-                    }
 
-                    html += '</div>';
-                    graphCanvas.innerHTML = html;
+                        // ── Layer 2 Toggle Event Listeners ──
+                        const branch1HeaderEl = document.getElementById(`branch1Header_${index}`);
+                        branch1HeaderEl.addEventListener('click', (e) => {
+                            e.stopPropagation();
+                            branch1HeaderEl.classList.toggle('expanded');
+                        });
 
-                    // Bind Inline Gap Fix Button Event Handler
-                    const inlineGapFixBtn = el('inlineGapFixBtn');
-                    if (inlineGapFixBtn) {
-                        inlineGapFixBtn.addEventListener('click', async () => {
-                            const threadId = parseInt(inlineGapFixBtn.getAttribute('data-thread-id'));
-                            const officialId = el('inlineGapInput').value.trim();
+                        const branch2HeaderEl = document.getElementById(`branch2Header_${index}`);
+                        branch2HeaderEl.addEventListener('click', (e) => {
+                            e.stopPropagation();
+                            branch2HeaderEl.classList.toggle('expanded');
+                        });
 
-                            if (!officialId) {
-                                alert('Please enter an IMDb ID (e.g. tt11482184) to attach.');
-                                return;
-                            }
+                        // ── Inline Re-Link Event Listener ──
+                        const inlineGapFixBtn = document.getElementById(`inlineGapFixBtn_${index}`);
+                        if (inlineGapFixBtn) {
+                            inlineGapFixBtn.addEventListener('click', async (e) => {
+                                e.stopPropagation();
+                                const threadId = parseInt(inlineGapFixBtn.getAttribute('data-thread-id'));
+                                const inputField = document.getElementById(`inlineGapInput_${index}`);
+                                const officialId = inputField.value.trim();
+                                if (!officialId) return showToast('Please enter an official IMDb or TMDB ID (e.g. tt11482184) to re-link.', 'warn');
 
-                            inlineGapFixBtn.disabled = true;
-                            inlineGapFixBtn.innerText = 'Linking...';
-
-                            try {
-                                const response = await fetch('/admin/api/link-official', {
-                                    method: 'POST',
-                                    headers: { 'Content-Type': 'application/json' },
-                                    body: JSON.stringify({ threadId, officialId })
-                                });
-                                const d = await response.json();
-                                if (response.ok) {
-                                    alert(`Successfully attached ${officialId}! Re-rendering graph...`);
-                                    graphSearchInput.value = officialId;
-                                    await renderEntityGraph();
-                                    await fetchHealth();
-                                } else {
-                                    alert('Failed to attach IMDb ID: ' + (d.error || 'Unknown error'));
+                                inlineGapFixBtn.disabled = true;
+                                inlineGapFixBtn.innerText = 'Linking...';
+                                try {
+                                    const resp = await fetch('/admin/api/link-official', {
+                                        method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                        body: JSON.stringify({ threadId, officialId })
+                                    });
+                                    const d = await resp.json();
+                                    if (resp.ok) {
+                                        showToast(`Successfully re-linked thread #${threadId} to ${officialId}! Re-indexing graph...`, 'success');
+                                        graphSearchInput.value = officialId;
+                                        await renderEntityGraph();
+                                        await fetchHealth();
+                                    } else {
+                                        showToast('Failed to re-link: ' + (d.error || 'Unknown error'), 'error');
+                                        inlineGapFixBtn.disabled = false;
+                                        inlineGapFixBtn.innerText = '🔗 Attach Official ID & Sync Streams';
+                                    }
+                                } catch (err) {
+                                    showToast('Network error during re-linking: ' + err.message, 'error');
                                     inlineGapFixBtn.disabled = false;
-                                    inlineGapFixBtn.innerText = '🔗 Attach IMDb ID & Sync Streams';
+                                    inlineGapFixBtn.innerText = '🔗 Attach Official ID & Sync Streams';
                                 }
-                            } catch (err) {
-                                alert('Network error during gap attachment: ' + err.message);
-                                inlineGapFixBtn.disabled = false;
-                                inlineGapFixBtn.innerText = '🔗 Attach IMDb ID & Sync Streams';
-                            }
-                        });
-                    }
+                            });
+                        }
+                    });
 
                 } catch (err) {
-                    graphCanvas.innerHTML = `<div style="color:#ff2a5f; padding:20px; text-align:center;">Network error during graph retrieval: ${err.message}</div>`;
+                    graphCanvas.innerHTML = `<div style="color:var(--accent-red); padding:40px; text-align:center;">Network error during graph retrieval: ${err.message}</div>`;
                 }
             }
 
             graphSearchBtn.addEventListener('click', renderEntityGraph);
-            graphSearchInput.addEventListener('keydown', (e) => {
-                if (e.key === 'Enter') renderEntityGraph();
-            });
+            graphSearchInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') renderEntityGraph(); });
 
-            // Synchronized Dual-List & Anti-Cache Refresh Implementation
+            // ── Rescue Bay & List Sync with Viewport Auto-Focus ──
             async function loadPending() {
                 try {
                     const r = await fetch('/admin/api/pending?_t=' + Date.now());
                     const items = await r.json();
-
                     const pendingMap = new Map();
-                    (items || []).forEach(t => {
-                        pendingMap.set(String(t.id), t.clean_title || t.raw_title);
-                    });
+                    (items || []).forEach(t => pendingMap.set(String(t.id), t.clean_title || t.raw_title));
 
                     const availSel = el('availableList');
                     const selectedBatchIds = new Set([...el('selectedList').options].map(opt => String(opt.value)));
-                    
+
                     availSel.innerHTML = '';
                     pendingMap.forEach((title, id) => {
                         if (!selectedBatchIds.has(id)) {
                             const opt = document.createElement('option');
-                            opt.value = id;
-                            opt.textContent = title;
-                            availSel.appendChild(opt);
+                            opt.value = id; opt.textContent = title; availSel.appendChild(opt);
                         }
                     });
 
@@ -1135,42 +1540,45 @@
                     currentBatchOpts.forEach(opt => {
                         if (pendingMap.has(String(opt.value))) {
                             const newOpt = document.createElement('option');
-                            newOpt.value = opt.value;
-                            newOpt.textContent = pendingMap.get(String(opt.value));
+                            newOpt.value = opt.value; newOpt.textContent = pendingMap.get(String(opt.value));
                             batchSel.appendChild(newOpt);
                         }
                     });
 
-                    if (focusedThreadId && !pendingMap.has(String(focusedThreadId))) {
-                        clearFocusState();
-                    }
+                    if (focusedThreadId && !pendingMap.has(String(focusedThreadId))) clearFocusState();
                 } catch (err) {
                     console.error('Failed to load pending threads:', err);
                 }
             }
 
+            // ── HIG Viewport Auto-Focus Handler ──
             async function selectFocusedItem(threadId, title) {
                 focusedThreadId = threadId;
                 el('focusedTitle').textContent = title;
                 el('visualSearchTarget').textContent = title;
                 el('visualSearchInput').value = title;
-                
+
                 loadStreams(threadId);
                 triggerCinemetaSearch(title);
+
+                // Viewport Auto-Focus Transition directly to Panel C
+                setTimeout(() => {
+                    const panelC = el('panelCCard');
+                    if (panelC) {
+                        panelC.scrollIntoView({ behavior: 'smooth', block: 'start' });
+                        panelC.classList.add('highlight-focus');
+                        setTimeout(() => panelC.classList.remove('highlight-focus'), 1200);
+                    }
+                }, 100);
             }
 
             el('availableList').addEventListener('change', () => {
                 const sel = el('availableList');
-                if (sel.selectedOptions.length > 0) {
-                    selectFocusedItem(sel.selectedOptions[0].value, sel.selectedOptions[0].textContent);
-                }
+                if (sel.selectedOptions.length > 0) selectFocusedItem(sel.selectedOptions[0].value, sel.selectedOptions[0].textContent);
             });
-
             el('selectedList').addEventListener('change', () => {
                 const sel = el('selectedList');
-                if (sel.selectedOptions.length > 0) {
-                    selectFocusedItem(sel.selectedOptions[0].value, sel.selectedOptions[0].textContent);
-                }
+                if (sel.selectedOptions.length > 0) selectFocusedItem(sel.selectedOptions[0].value, sel.selectedOptions[0].textContent);
             });
 
             async function loadRecent(p) {
@@ -1179,16 +1587,14 @@
                 const d = await r.json();
                 el('currentPage').textContent = page;
                 const rows = [];
-                (d.linked || []).forEach(l => rows.push(`<tr><td class="glow-green">LINKED</td><td>${l.title}</td><td>${l.updatedAt}</td></tr>`));
-                (d.failures || []).forEach(f => rows.push(`<tr><td class="glow-red">FAILED</td><td>${f.title}</td><td>${f.updatedAt}</td></tr>`));
+                (d.linked || []).forEach(l => rows.push(`<tr><td><span class="pill pill-green">LINKED</span></td><td>${l.title}</td><td class="text-muted">${l.updatedAt}</td></tr>`));
+                (d.failures || []).forEach(f => rows.push(`<tr><td><span class="pill pill-red">FAILED</span></td><td>${f.title}</td><td class="text-muted">${f.updatedAt}</td></tr>`));
                 el('recentBody').innerHTML = rows.join('');
             }
 
             el('setFocusBtn').addEventListener('click', async () => {
                 const sel = el('selectedList').selectedOptions.length > 0 ? el('selectedList') : el('availableList');
-                if (sel.selectedOptions.length > 0) {
-                    selectFocusedItem(sel.selectedOptions[0].value, sel.selectedOptions[0].textContent);
-                }
+                if (sel.selectedOptions.length > 0) selectFocusedItem(sel.selectedOptions[0].value, sel.selectedOptions[0].textContent);
             });
 
             async function loadStreams(threadId) {
@@ -1197,38 +1603,31 @@
                 const tbody = el('streamsBody');
                 tbody.innerHTML = '';
                 if (!data.items || data.items.length === 0) {
-                    tbody.innerHTML = '<tr><td colspan="3" style="color:#ff2a5f; text-align:center;">No streams found.</td></tr>';
+                    tbody.innerHTML = '<tr><td colspan="3" class="pill pill-red" style="text-align:center; padding: 15px;">No streams found.</td></tr>';
                     return;
                 }
-                data.items.forEach((item, i) => {
+                data.items.forEach((item) => {
                     const tr = document.createElement('tr');
                     tr.innerHTML = `
                         <td>${item.label}</td>
-                        <td class="glow-cyan">${item.quality || 'SD'} / ${item.language || 'NA'}</td>
+                        <td><span class="pill pill-blue">${item.quality || 'SD'} / ${item.language || 'NA'}</span></td>
                         <td><input type="radio" name="streamSelect" value="${item.infohash}" ${data.locked.includes(item.infohash) ? 'disabled' : ''}></td>
                     `;
-                    if (data.locked.includes(item.infohash)) {
-                        tr.style.opacity = '0.4';
-                        tr.title = 'Cache locked / already initiated';
-                    }
+                    if (data.locked.includes(item.infohash)) { tr.style.opacity = '0.4'; tr.title = 'Cache locked / already initiated'; }
                     tbody.appendChild(tr);
                 });
             }
 
             async function triggerCinemetaSearch(query) {
                 const container = el('visualCandidatesContainer');
-                container.innerHTML = '<div style="color: #00ff66; text-align: center; padding: 25px 0; grid-column: 1 / -1;">🔍 Querying Cinemeta catalogs in parallel...</div>';
-
+                container.innerHTML = '<div class="text-muted" style="text-align: center; padding: 40px 0; grid-column: 1 / -1; color: var(--accent-green);">🔍 Querying Cinemeta catalogs in parallel...</div>';
                 try {
                     const r = await fetch(`/admin/api/cinemeta-search?query=${encodeURIComponent(query)}&_t=${Date.now()}`);
                     const candidates = await r.json();
-                    if (r.ok) {
-                        renderVisualCandidates(candidates);
-                    } else {
-                        container.innerHTML = `<div style="color:#ff2a5f; padding:15px; text-align:center; grid-column: 1 / -1;">Search failed: ${candidates.error || 'Unknown'}</div>`;
-                    }
+                    if (r.ok) renderVisualCandidates(candidates);
+                    else container.innerHTML = `<div class="pill pill-red" style="padding:15px; text-align:center; grid-column: 1 / -1;">Search failed: ${candidates.error || 'Unknown'}</div>`;
                 } catch (err) {
-                    container.innerHTML = `<div style="color:#ff2a5f; padding:15px; text-align:center; grid-column: 1 / -1;">Network error: ${err.message}</div>`;
+                    container.innerHTML = `<div class="pill pill-red" style="padding:15px; text-align:center; grid-column: 1 / -1;">Network error: ${err.message}</div>`;
                 }
             }
 
@@ -1236,38 +1635,28 @@
                 const container = el('visualCandidatesContainer');
                 container.innerHTML = '';
                 if (!candidates || candidates.length === 0) {
-                    container.innerHTML = '<div style="color: #ff2a5f; text-align: center; padding: 20px 0; grid-column: 1 / -1;">No candidates found on Cinemeta.</div>';
+                    container.innerHTML = '<div class="pill pill-red" style="text-align: center; padding: 20px 0; grid-column: 1 / -1;">No candidates found on Cinemeta.</div>';
                     return;
                 }
-
                 candidates.forEach(c => {
-                    const scoreColor = c.similarity >= 70 ? '#00ff66' : (c.similarity >= 40 ? '#ff9900' : '#ff2a5f');
+                    const scoreColor = c.similarity >= 70 ? 'var(--accent-green)' : (c.similarity >= 40 ? 'var(--accent-orange)' : 'var(--accent-red)');
                     const posterUrl = c.poster ? c.poster : 'https://images.metahub.space/poster/medium/' + c.id + '/img';
-
                     const card = document.createElement('div');
-                    card.style.display = 'flex';
-                    card.style.gap = '15px';
-                    card.style.padding = '12px';
-                    card.style.border = '2px solid #222';
-                    card.style.background = '#0a0a0c';
-                    card.style.alignItems = 'flex-start';
-
+                    card.className = 'cinemeta-card';
                     card.innerHTML = `
-                        <img src="${posterUrl}" onerror="this.src='https://via.placeholder.com/110x165?text=No+Poster'" style="width: 110px; height: 165px; object-fit: cover; border: 2px solid #444;" />
-                        <div style="flex: 1; display: flex; flex-direction: column; gap: 6px; font-size: 1.25rem; height: 100%; justify-content: space-between;">
+                        <img src="${posterUrl}" onerror="this.src='https://via.placeholder.com/80x120?text=No+Poster'" />
+                        <div class="card-info">
                             <div>
-                                <div style="font-weight: bold; color: #fff; line-height: 1.2; font-size: 1.35rem; margin-bottom: 4px;">${c.name}</div>
-                                <div style="font-size: 1.15rem; color: #aaa; margin-bottom: 6px;">Year: <strong style="color: #fff;">${c.releaseInfo || 'N/A'}</strong></div>
-                                <div style="display: flex; flex-direction: column; gap: 4px; font-size: 1.1rem; color: #888;">
-                                    <span>Type: <strong style="color: #00e5ff;">${c.type.toUpperCase()}</strong></span>
-                                    <span>Rating: <strong style="color: #ff9900;">${c.imdbRating || 'N/A'}</strong></span>
+                                <div style="font-weight: 600; font-size: 14px; margin-bottom: 2px;">${c.name}</div>
+                                <div class="text-muted" style="font-size: 11.5px; margin-bottom: 6px;">Year: <strong>${c.releaseInfo || 'N/A'}</strong></div>
+                                <div class="flex-row" style="gap: 4px;">
+                                    <span class="pill pill-blue">${c.type.toUpperCase()}</span>
+                                    <span class="pill pill-orange">★ ${c.imdbRating || 'N/A'}</span>
                                 </div>
                             </div>
-                            <div style="display: flex; justify-content: space-between; align-items: center; margin-top: 10px; border-top: 1px dotted #222; padding-top: 8px;">
-                                <div style="font-size: 1.1rem;">
-                                    Match: <strong style="color: ${scoreColor}; font-size: 1.25rem;">${Math.round(c.similarity)}%</strong>
-                                </div>
-                                <button class="visualLinkBtn" data-id="${c.id}" data-type="${c.type}" style="border-color: #00ff66; color: #00ff66; font-size: 1.15rem; padding: 2px 12px; box-shadow: 2px 2px 0 #004411; margin:0;">🔗 Link</button>
+                            <div class="flex-row flex-between" style="border-top: 1px solid var(--border-subtle); padding-top: 8px; margin-top: 8px;">
+                                <span class="text-muted">Match: <strong style="color: ${scoreColor}; font-size: 15px;">${Math.round(c.similarity)}%</strong></span>
+                                <button class="visualLinkBtn btn-sm btn-success" data-id="${c.id}" data-type="${c.type}">🔗 Link</button>
                             </div>
                         </div>
                     `;
@@ -1277,39 +1666,24 @@
                 container.querySelectorAll('.visualLinkBtn').forEach(btn => {
                     btn.addEventListener('click', async () => {
                         const imdbId = btn.getAttribute('data-id');
-
-                        if (!focusedThreadId) {
-                            alert("Select a focused pending item first!");
-                            return;
-                        }
-
-                        btn.disabled = true;
-                        btn.innerText = 'Linking...';
-
+                        if (!focusedThreadId) return showToast("Select a focused pending item first!", 'warn');
+                        btn.disabled = true; btn.innerText = 'Linking...';
                         try {
                             const response = await fetch('/admin/api/link-official', {
-                                method: 'POST',
-                                headers: { 'Content-Type': 'application/json' },
-                                body: JSON.stringify({
-                                    threadId: parseInt(focusedThreadId),
-                                    officialId: imdbId
-                                })
+                                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                                body: JSON.stringify({ threadId: parseInt(focusedThreadId), officialId: imdbId })
                             });
                             const d = await response.json();
                             if (response.ok) {
-                                alert(`Successfully linked to ${imdbId}!`);
-                                clearFocusState();
-                                await loadPending();
-                                await fetchHealth();
+                                showToast(`Successfully linked to ${imdbId}!`, 'success');
+                                clearFocusState(); await loadPending(); await fetchHealth();
                             } else {
-                                alert('Linking failed: ' + (d.error || 'Unknown error'));
-                                btn.disabled = false;
-                                btn.innerText = '🔗 Link';
+                                showToast('Linking failed: ' + (d.error || 'Unknown error'), 'error');
+                                btn.disabled = false; btn.innerText = '🔗 Link';
                             }
                         } catch (err) {
-                            alert('Network error: ' + err.message);
-                            btn.disabled = false;
-                            btn.innerText = '🔗 Link';
+                            showToast('Network error: ' + err.message, 'error');
+                            btn.disabled = false; btn.innerText = '🔗 Link';
                         }
                     });
                 });
@@ -1317,62 +1691,53 @@
 
             el('visualSearchBtn').addEventListener('click', () => {
                 const val = el('visualSearchInput').value.trim();
-                if (val) {
-                    triggerCinemetaSearch(val);
-                }
+                if (val) triggerCinemetaSearch(val);
             });
 
             el('cacheSelected').addEventListener('click', async () => {
-                if (!focusedThreadId) return alert('Set a focused item first.');
+                if (!focusedThreadId) return showToast('Set a focused item first.', 'warn');
                 const radio = document.querySelector('input[name="streamSelect"]:checked');
                 const infohash = radio ? radio.value : null;
-                if (!infohash) return alert('Select exactly one stream to cache.');
+                if (!infohash) return showToast('Select exactly one stream to cache.', 'warn');
                 const r = await fetch('/admin/api/rd-cache-pending', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ threadId: parseInt(focusedThreadId), infohash })
                 });
                 const d = await r.json();
-                alert(d.message);
+                showToast(d.message, d.message ? 'success' : 'error');
                 await loadStreams(focusedThreadId);
             });
 
             el('linkFocused').addEventListener('click', async () => {
-                if (!focusedThreadId) return alert('Set a focused item first.');
+                if (!focusedThreadId) return showToast('Set a focused item first.', 'warn');
                 const officialId = el('officialId').value.trim();
-                if (!officialId) return alert('Enter an official ID.');
+                if (!officialId) return showToast('Enter an official ID.', 'warn');
                 const r = await fetch('/admin/api/link-official', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ threadId: parseInt(focusedThreadId), officialId })
                 });
                 const d = await r.json();
-                alert(d.message);
-                clearFocusState();
-                await loadPending();
-                await fetchHealth();
+                showToast(d.message, d.message ? 'success' : 'error');
+                clearFocusState(); await loadPending(); await fetchHealth();
             });
 
             el('autoMatchFocused').addEventListener('click', async () => {
-                if (!focusedThreadId) return alert('Set a focused item first.');
+                if (!focusedThreadId) return showToast('Set a focused item first.', 'warn');
                 el('autoMatchFocused').disabled = true;
                 try {
                     const r = await fetch('/admin/api/auto-match', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
+                        method: 'POST', headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ threadIds: [parseInt(focusedThreadId)] })
                     });
                     const d = await r.json();
                     if (d.successCount > 0) {
-                        alert(`Successfully auto-matched: "${(d.matchedTitles || []).join(', ')}"!`);
-                        clearFocusState();
-                        await loadPending();
-                        await fetchHealth();
+                        showToast(`Successfully auto-matched: "${(d.matchedTitles || []).join(', ')}"!`, 'success');
+                        clearFocusState(); await loadPending(); await fetchHealth();
                     } else {
-                        alert('Auto-matching failed to locate a confident metadata candidate. Please enter a manual ID.');
+                        showToast('Auto-matching failed to locate a confident metadata candidate. Please enter a manual ID.', 'warn');
                     }
                 } catch (err) {
-                    alert('Error executing auto-match: ' + err.message);
+                    showToast('Error executing auto-match: ' + err.message, 'error');
                 } finally {
                     el('autoMatchFocused').disabled = false;
                 }
@@ -1381,58 +1746,49 @@
             async function runBulkAutoMatch() {
                 const sel = el('selectedList');
                 const ids = [...sel.options].map(opt => parseInt(opt.value));
-                if (ids.length === 0) return alert('Select and move items to the Bulk Actions Batch first.');
-                
+                if (ids.length === 0) return showToast('Select and move items to the Bulk Actions Batch first.', 'warn');
+
                 const btn = el('bulkAutoMatch');
                 btn.disabled = true;
                 const statusDiv = el('bulkStatus');
-                statusDiv.innerHTML = `Starting parallel Auto-Match on backend for ${ids.length} items...<br>`;
+                statusDiv.innerHTML = `Starting parallel Auto-Match on backend for ${ids.length} items...\n`;
                 statusDiv.scrollTop = statusDiv.scrollHeight;
-                
+
                 try {
                     const r = await fetch('/admin/api/auto-match', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
+                        method: 'POST', headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ threadIds: ids })
                     });
                     const d = await r.json();
                     if (r.ok) {
-                        statusDiv.innerHTML += `Auto-Match completed successfully!<br>`;
-                        statusDiv.innerHTML += `<span class="glow-green">Successfully Matched: ${d.successCount}</span><br>`;
-                        statusDiv.innerHTML += `<span class="glow-red">Failed Matches: ${d.failCount}</span><br>`;
+                        statusDiv.innerHTML += `Auto-Match completed successfully!\nSuccessfully Matched: ${d.successCount}\nFailed Matches: ${d.failCount}\n`;
                         if (d.matchedTitles && d.matchedTitles.length > 0) {
-                            statusDiv.innerHTML += `Matched Titles:<br> - ${(d.matchedTitles || []).join('<br> - ')}<br>`;
+                            statusDiv.innerHTML += `Matched Titles:\n - ${(d.matchedTitles || []).join('\n - ')}\n`;
                         }
                     } else {
-                        statusDiv.innerHTML += `<span class="glow-red">Group Auto-Match Failed: ${d.error || 'Unknown'}</span><br>`;
+                        statusDiv.innerHTML += `Group Auto-Match Failed: ${d.error || 'Unknown'}\n`;
                     }
                 } catch (e) {
-                    statusDiv.innerHTML += `<span class="glow-red">Network Error: ${e.message}</span><br>`;
+                    statusDiv.innerHTML += `Network Error: ${e.message}\n`;
                 }
                 statusDiv.scrollTop = statusDiv.scrollHeight;
                 btn.disabled = false;
-                
-                sel.innerHTML = '';
-                clearFocusState();
-                await loadPending();
-                await fetchHealth();
+                sel.innerHTML = ''; clearFocusState(); await loadPending(); await fetchHealth();
             }
 
             async function runBulkLinkToOneID() {
                 const sel = el('selectedList');
                 const ids = [...sel.options].map(opt => parseInt(opt.value));
                 const officialId = el('bulkOfficialId').value.trim();
-                if (ids.length === 0) return alert('Select and move items to the Bulk Actions Batch first.');
-                if (!officialId) return alert('Enter an IMDb or TMDB ID to link the group to.');
-                
+                if (ids.length === 0) return showToast('Select and move items to the Bulk Actions Batch first.', 'warn');
+                if (!officialId) return showToast('Enter an IMDb or TMDB ID to link the group to.', 'warn');
+
                 const btn = el('bulkLink');
                 btn.disabled = true;
                 const statusDiv = el('bulkStatus');
-                statusDiv.innerHTML = `Starting sequential group link to ID: ${officialId}...<br>`;
-                
-                let success = 0;
-                let fail = 0;
-                
+                statusDiv.innerHTML = `Starting sequential group link to ID: ${officialId}...\n`;
+                let success = 0, fail = 0;
+
                 for (let i = 0; i < ids.length; i++) {
                     const id = ids[i];
                     const optText = [...sel.options][i].textContent;
@@ -1440,33 +1796,22 @@
                     statusDiv.scrollTop = statusDiv.scrollHeight;
                     try {
                         const r = await fetch('/admin/api/link-official', {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
+                            method: 'POST', headers: { 'Content-Type': 'application/json' },
                             body: JSON.stringify({ threadId: id, officialId })
                         });
                         const d = await r.json();
-                        if (r.ok) {
-                            success++;
-                            statusDiv.innerHTML += `<span class="glow-green">SUCCESS</span><br>`;
-                        } else {
-                            fail++;
-                            statusDiv.innerHTML += `<span class="glow-red">FAIL: ${d.error || 'Unknown'}</span><br>`;
-                        }
+                        if (r.ok) { success++; statusDiv.innerHTML += `SUCCESS\n`; }
+                        else { fail++; statusDiv.innerHTML += `FAIL: ${d.error || 'Unknown'}\n`; }
                     } catch (e) {
-                        fail++;
-                        statusDiv.innerHTML += `<span class="glow-red">ERROR: ${e.message}</span><br>`;
+                        fail++; statusDiv.innerHTML += `ERROR: ${e.message}\n`;
                     }
                     statusDiv.scrollTop = statusDiv.scrollHeight;
                     await new Promise(r => setTimeout(r, 200));
                 }
-                statusDiv.innerHTML += `<b>FINISHED: ${success} success, ${fail} failed.</b><br>`;
+                statusDiv.innerHTML += `FINISHED: ${success} success, ${fail} failed.\n`;
                 statusDiv.scrollTop = statusDiv.scrollHeight;
                 btn.disabled = false;
-                
-                sel.innerHTML = '';
-                clearFocusState();
-                await loadPending();
-                await fetchHealth();
+                sel.innerHTML = ''; clearFocusState(); await loadPending(); await fetchHealth();
             }
 
             async function runBulkUpdateMeta() {
@@ -1474,17 +1819,15 @@
                 const ids = [...sel.options].map(opt => parseInt(opt.value));
                 const poster = el('bulkCustomPoster').value.trim();
                 const description = el('bulkCustomDescription').value.trim();
-                if (ids.length === 0) return alert('Select and move items to the Bulk Actions Batch first.');
-                if (!poster && !description) return alert('Provide at least a Custom Poster or a Custom Plot to apply.');
-                
+                if (ids.length === 0) return showToast('Select and move items to the Bulk Actions Batch first.', 'warn');
+                if (!poster && !description) return showToast('Provide at least a Custom Poster or a Custom Plot to apply.', 'warn');
+
                 const btn = el('bulkUpdateMeta');
                 btn.disabled = true;
                 const statusDiv = el('bulkStatus');
-                statusDiv.innerHTML = `Starting group custom metadata update...<br>`;
-                
-                let success = 0;
-                let fail = 0;
-                
+                statusDiv.innerHTML = `Starting group custom metadata update...\n`;
+                let success = 0, fail = 0;
+
                 for (let i = 0; i < ids.length; i++) {
                     const id = ids[i];
                     const optText = [...sel.options][i].textContent;
@@ -1492,49 +1835,32 @@
                     statusDiv.scrollTop = statusDiv.scrollHeight;
                     try {
                         const r = await fetch('/admin/api/custom-meta', {
-                            method: 'POST',
-                            headers: { 'Content-Type': 'application/json' },
-                            body: JSON.stringify({
-                                threadId: id,
-                                poster: poster || undefined,
-                                description: description || undefined
-                            })
+                            method: 'POST', headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({ threadId: id, poster: poster || undefined, description: description || undefined })
                         });
                         const d = await r.json();
-                        if (r.ok) {
-                            success++;
-                            statusDiv.innerHTML += `<span class="glow-green">SUCCESS</span><br>`;
-                        } else {
-                            fail++;
-                            statusDiv.innerHTML += `<span class="glow-red">FAIL: ${d.error || 'Unknown'}</span><br>`;
-                        }
+                        if (r.ok) { success++; statusDiv.innerHTML += `SUCCESS\n`; }
+                        else { fail++; statusDiv.innerHTML += `FAIL: ${d.error || 'Unknown'}\n`; }
                     } catch (e) {
-                        fail++;
-                        statusDiv.innerHTML += `<span class="glow-red">ERROR: ${e.message}</span><br>`;
+                        fail++; statusDiv.innerHTML += `ERROR: ${e.message}\n`;
                     }
                     statusDiv.scrollTop = statusDiv.scrollHeight;
                     await new Promise(r => setTimeout(r, 100));
                 }
-                statusDiv.innerHTML += `<b>FINISHED: ${success} success, ${fail} failed.</b><br>`;
+                statusDiv.innerHTML += `FINISHED: ${success} success, ${fail} failed.\n`;
                 statusDiv.scrollTop = statusDiv.scrollHeight;
                 btn.disabled = false;
-                
                 await loadPending();
             }
 
             el('saveFocused').addEventListener('click', async () => {
-                if (!focusedThreadId) return alert('Set a focused item first.');
+                if (!focusedThreadId) return showToast('Set a focused item first.', 'warn');
                 const r = await fetch('/admin/api/custom-meta', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        threadId: parseInt(focusedThreadId),
-                        poster: el('customPoster').value || undefined,
-                        description: el('customDescription').value || undefined
-                    })
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ threadId: parseInt(focusedThreadId), poster: el('customPoster').value || undefined, description: el('customDescription').value || undefined })
                 });
                 const d = await r.json();
-                alert(d.message);
+                showToast(d.message, d.message ? 'success' : 'error');
             });
 
             el('moveBtn').addEventListener('click', () => moveItems('availableList', 'selectedList'));
@@ -1543,13 +1869,11 @@
             el('clearAllBtn').addEventListener('click', () => moveAll('selectedList', 'availableList'));
 
             function moveItems(fromId, toId) {
-                const from = el(fromId);
-                const to = el(toId);
+                const from = el(fromId); const to = el(toId);
                 [...from.selectedOptions].forEach(opt => to.appendChild(opt));
             }
             function moveAll(fromId, toId) {
-                const from = el(fromId);
-                const to = el(toId);
+                const from = el(fromId); const to = el(toId);
                 [...from.options].forEach(opt => to.appendChild(opt));
             }
 
@@ -1557,155 +1881,117 @@
             el('bulkLink').addEventListener('click', runBulkLinkToOneID);
             el('bulkUpdateMeta').addEventListener('click', runBulkUpdateMeta);
 
-            const purgeSearchInput = el('purgeSearchInput');
-            const purgeLookupBtn = el('purgeLookupBtn');
-            const purgeResultBox = el('purgeResultBox');
-            const purgeResultTitle = el('purgeResultTitle');
-            const purgeResultImdb = el('purgeResultImdb');
-            const purgeResultTmdb = el('purgeResultTmdb');
-            const purgeResultStreams = el('purgeResultStreams');
-            const purgeResultThreads = el('purgeResultThreads');
-            const purgeExecuteBtn = el('purgeExecuteBtn');
-
+            // ── Purge & Recoup Logic with Apple Modals ──
             let currentPurgeImdbId = "";
 
-            purgeLookupBtn.addEventListener('click', async () => {
-                const imdbId = purgeSearchInput.value.trim();
-                if (!imdbId) {
-                    alert('Please enter a valid IMDb ID (e.g., tt39182415).');
-                    return;
-                }
+            el('purgeLookupBtn').addEventListener('click', async () => {
+                const imdbId = el('purgeSearchInput').value.trim();
+                if (!imdbId) return showToast('Please enter a valid IMDb ID (e.g., tt39182415).', 'warn');
 
-                purgeLookupBtn.disabled = true;
-                purgeLookupBtn.innerText = 'Searching...';
-                purgeResultBox.style.display = 'none';
+                el('purgeLookupBtn').disabled = true;
+                el('purgeLookupBtn').innerText = 'Searching...';
+                el('purgeResultBox').style.display = 'none';
 
                 try {
                     const r = await fetch(`/admin/api/purge-lookup?imdbId=${encodeURIComponent(imdbId)}&_t=${Date.now()}`);
                     const d = await r.json();
                     if (r.ok && d.found) {
                         currentPurgeImdbId = d.imdbId;
-                        purgeResultTitle.textContent = d.title;
-                        purgeResultImdb.textContent = d.imdbId;
-                        purgeResultTmdb.textContent = d.tmdbId;
-                        purgeResultStreams.textContent = d.streamsCount;
-                        
-                        purgeResultThreads.innerHTML = '';
+                        el('purgeResultTitle').textContent = d.title;
+                        el('purgeResultImdb').textContent = d.imdbId;
+                        el('purgeResultTmdb').textContent = d.tmdbId;
+                        el('purgeResultStreams').textContent = d.streamsCount;
+
+                        el('purgeResultThreads').innerHTML = '';
                         if (d.threads && d.threads.length > 0) {
                             d.threads.forEach(t => {
                                 const li = document.createElement('li');
                                 li.textContent = `[ID: ${t.id}] ${t.rawTitle} (${t.status.toUpperCase()})`;
-                                purgeResultThreads.appendChild(li);
+                                el('purgeResultThreads').appendChild(li);
                             });
                         } else {
-                            purgeResultThreads.innerHTML = '<li style="color: #666;">No raw thread files currently mapped</li>';
+                            el('purgeResultThreads').innerHTML = '<li class="text-muted">No raw thread files currently mapped</li>';
                         }
-
-                        purgeResultBox.style.display = 'block';
+                        el('purgeResultBox').style.display = 'block';
                     } else {
-                        alert(d.message || d.error || 'No linked records found.');
+                        showToast(d.message || d.error || 'No linked records found.', 'warn');
                     }
                 } catch (err) {
-                    alert('Network error during lookup: ' + err.message);
+                    showToast('Network error during lookup: ' + err.message, 'error');
                 } finally {
-                    purgeLookupBtn.disabled = false;
-                    purgeLookupBtn.innerText = '🔍 Lookup Records';
+                    el('purgeLookupBtn').disabled = false;
+                    el('purgeLookupBtn').innerText = '🔍 Lookup Records';
                 }
             });
 
-            purgeExecuteBtn.addEventListener('click', async () => {
+            el('purgeExecuteBtn').addEventListener('click', async () => {
                 if (!currentPurgeImdbId) return;
-
-                const confirmed = confirm(`CRITICAL WARNING:\n\nYou are about to permanently purge ALL database records associated with IMDb ID: ${currentPurgeImdbId}.\n\nThis will completely wipe the threads and all streams. This action CANNOT be undone.\n\nAre you absolutely sure you want to proceed?`);
+                const confirmed = await showConfirmModal('Critical Warning', `You are about to permanently purge ALL database records associated with IMDb ID: ${currentPurgeImdbId}.\n\nThis will completely wipe the threads and all streams. This action CANNOT be undone.`, 'Purge Records');
                 if (!confirmed) return;
 
-                purgeExecuteBtn.disabled = true;
-                purgeExecuteBtn.innerText = 'PURGING RECORDS...';
+                el('purgeExecuteBtn').disabled = true;
+                el('purgeExecuteBtn').innerText = 'PURGING RECORDS...';
 
                 try {
                     const r = await fetch('/admin/api/purge-confirm', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
+                        method: 'POST', headers: { 'Content-Type': 'application/json' },
                         body: JSON.stringify({ imdbId: currentPurgeImdbId })
                     });
                     const d = await r.json();
                     if (r.ok) {
-                        alert(d.message || 'Records successfully purged.');
-                        purgeSearchInput.value = '';
-                        purgeResultBox.style.display = 'none';
+                        showToast(d.message || 'Records successfully purged.', 'success');
+                        el('purgeSearchInput').value = '';
+                        el('purgeResultBox').style.display = 'none';
                         currentPurgeImdbId = "";
-                        
-                        clearFocusState();
-                        await loadPending();
-                        await fetchHealth();
+                        clearFocusState(); await loadPending(); await fetchHealth();
                     } else {
-                        alert('Purge failed: ' + (d.error || 'Unknown error'));
+                        showToast('Purge failed: ' + (d.error || 'Unknown error'), 'error');
                     }
                 } catch (err) {
-                    alert('Network error during purge execution: ' + err.message);
+                    showToast('Network error during purge execution: ' + err.message, 'error');
                 } finally {
-                    purgeExecuteBtn.disabled = false;
-                    purgeExecuteBtn.innerText = '🔥 CONFIRM COMPLETELY DELETE RECORDS';
+                    el('purgeExecuteBtn').disabled = false;
+                    el('purgeExecuteBtn').innerText = '🔥 CONFIRM DELETE RECORDS';
                 }
             });
 
-            const recoupUrlInput = el('recoupUrlInput');
-            const recoupCategorySelect = el('recoupCategorySelect');
-            const recoupExecuteBtn = el('recoupExecuteBtn');
-            const recoupStatus = el('recoupStatus');
+            el('recoupExecuteBtn').addEventListener('click', async () => {
+                const threadUrl = el('recoupUrlInput').value.trim();
+                if (!threadUrl) return showToast('Please enter a valid thread URL.', 'warn');
+                if (!threadUrl.startsWith('http://') && !threadUrl.startsWith('https://')) return showToast('Invalid URL format. URL must start with http:// or https://', 'warn');
 
-            recoupExecuteBtn.addEventListener('click', async () => {
-                const threadUrl = recoupUrlInput.value.trim();
-                if (!threadUrl) {
-                    alert('Please enter a valid thread URL (e.g., https://www.1tamilmv.tf/index.php?/forums/topic/...).');
-                    return;
-                }
-
-                if (!threadUrl.startsWith('http://') && !threadUrl.startsWith('https://')) {
-                    alert('Invalid URL format. URL must start with http:// or https://');
-                    return;
-                }
-
-                const catVal = recoupCategorySelect.value;
+                const catVal = el('recoupCategorySelect').value;
                 const parts = catVal.split(':');
                 const contentType = parts[0];
                 const catalogId = parts[1];
 
-                recoupExecuteBtn.disabled = true;
-                recoupExecuteBtn.innerText = 'INDEXING SINGLE THREAD...';
-                recoupStatus.innerHTML = `Initiating targeted crawl for: ${threadUrl}<br>`;
-                recoupStatus.innerHTML += `Contacting proxy gateway...<br>`;
-                recoupStatus.scrollTop = recoupStatus.scrollHeight;
+                el('recoupExecuteBtn').disabled = true;
+                el('recoupExecuteBtn').innerText = 'INDEXING SINGLE THREAD...';
+                el('recoupStatus').innerHTML = `Initiating targeted crawl for: ${threadUrl}\nContacting proxy gateway...\n`;
+                el('recoupStatus').scrollTop = el('recoupStatus').scrollHeight;
 
                 try {
                     const r = await fetch('/admin/api/trigger-targeted-crawl', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({
-                            threadUrl: threadUrl,
-                            contentType: contentType,
-                            catalogId: catalogId
-                        })
+                        method: 'POST', headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ threadUrl, contentType, catalogId })
                     });
                     const d = await r.json();
                     if (r.ok) {
-                        recoupStatus.innerHTML += `<span class="glow-green">SUCCESS: Thread crawled, parsed, and stream indexes updated successfully!</span><br>`;
-                        alert(d.message || 'Thread recouped and indexed successfully.');
-                        recoupUrlInput.value = '';
-                        clearFocusState();
-                        await loadPending();
-                        await fetchHealth();
+                        el('recoupStatus').innerHTML += `SUCCESS: Thread crawled, parsed, and stream indexes updated successfully!\n`;
+                        showToast(d.message || 'Thread recouped and indexed successfully.', 'success');
+                        el('recoupUrlInput').value = '';
+                        clearFocusState(); await loadPending(); await fetchHealth();
                     } else {
-                        recoupStatus.innerHTML += `<span class="glow-red">FAILED: ${d.error || 'Unknown error'}</span><br>`;
-                        alert('Index failed: ' + (d.error || 'Unknown error'));
+                        el('recoupStatus').innerHTML += `FAILED: ${d.error || 'Unknown error'}\n`;
+                        showToast('Index failed: ' + (d.error || 'Unknown error'), 'error');
                     }
                 } catch (err) {
-                    recoupStatus.innerHTML += `<span class="glow-red">NETWORK ERROR: ${err.message}</span><br>`;
-                    alert('Network error: ' + err.message);
+                    el('recoupStatus').innerHTML += `NETWORK ERROR: ${err.message}\n`;
+                    showToast('Network error: ' + err.message, 'error');
                 } finally {
-                    recoupStatus.scrollTop = recoupStatus.scrollHeight;
-                    recoupExecuteBtn.disabled = false;
-                    recoupExecuteBtn.innerText = '⚡ Recoup & Index Thread';
+                    el('recoupStatus').scrollTop = el('recoupStatus').scrollHeight;
+                    el('recoupExecuteBtn').disabled = false;
+                    el('recoupExecuteBtn').innerText = '⚡ Recoup & Index Thread';
                 }
             });
 
@@ -1716,17 +2002,16 @@
                 tbody.innerHTML = (items || []).map(f => `
                     <tr>
                         <td>${f.raw_title}</td>
-                        <td class="glow-red">${f.reason}</td>
-                        <td>${f.last_attempt}</td>
-                        <td><button onclick="retryParse('${f.thread_hash}')">Retry</button></td>
+                        <td><span class="pill pill-red">${f.reason}</span></td>
+                        <td class="text-muted">${f.last_attempt}</td>
+                        <td><button class="btn-sm btn-warning" onclick="retryParse('${f.thread_hash}')">Retry</button></td>
                     </tr>
                 `).join('');
             }
 
             window.retryParse = async function(hash) {
                 await fetch('/admin/api/retry-parse', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
+                    method: 'POST', headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ threadHash: hash })
                 });
                 loadFailures();
@@ -1743,6 +2028,86 @@
                 loadRecent(1);
                 setInterval(fetchHealth, 30000);
             });
+        })();
+    </script>
+
+    <!-- ═══ NAV / SHELL CONTROLLER ═══ -->
+    <script>
+        (function() {
+            'use strict';
+            const sectionTitles = {
+                overview: 'Overview', watchlist: 'Watchlist', graph: 'Entity Graph',
+                rescue: 'Rescue Bay', recoup: 'Thread Recoup', purge: 'Purge Console', activity: 'Activity Log'
+            };
+
+            const rail = document.getElementById('mainNav');
+            const drawerOverlay = document.getElementById('drawerOverlay');
+
+            function closeDrawer() {
+                if (rail) rail.classList.remove('drawer-open');
+                if (drawerOverlay) drawerOverlay.classList.remove('show');
+            }
+
+            function openDrawer() {
+                if (rail) rail.classList.add('drawer-open');
+                if (drawerOverlay) drawerOverlay.classList.add('show');
+            }
+
+            function showSection(name) {
+                document.querySelectorAll('.view').forEach(v => v.classList.toggle('active', v.id === 'section-' + name));
+                document.querySelectorAll('#mainNav .nav-btn').forEach(b => b.classList.toggle('active', b.dataset.section === name));
+                const titleEl = document.getElementById('sectionTitle');
+                if (titleEl) titleEl.textContent = sectionTitles[name] || name;
+                closeDrawer();
+                window.scrollTo({ top: 0, behavior: 'smooth' });
+            }
+
+            document.querySelectorAll('#mainNav .nav-btn').forEach(btn => {
+                btn.addEventListener('click', () => showSection(btn.dataset.section));
+            });
+
+            const hamburgerBtn = document.getElementById('hamburgerBtn');
+            if (hamburgerBtn) {
+                hamburgerBtn.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    if (rail && rail.classList.contains('drawer-open')) closeDrawer();
+                    else openDrawer();
+                });
+            }
+
+            if (drawerOverlay) {
+                drawerOverlay.addEventListener('click', closeDrawer);
+            }
+
+            const quickCrawl = document.getElementById('triggerCrawlTop');
+            const originalCrawlBtn = document.getElementById('triggerCrawl');
+            if (quickCrawl && originalCrawlBtn) {
+                quickCrawl.addEventListener('click', () => originalCrawlBtn.click());
+            }
+
+            function mirrorStatus() {
+                const src = document.getElementById('isCrawling');
+                const pill = document.getElementById('topStatusPill');
+                const pulse = document.getElementById('railPulse');
+                if (!src) return;
+                const active = src.textContent === 'ACTIVE';
+                if (pill) {
+                    pill.textContent = src.textContent === '-' ? 'CONNECTING' : src.textContent;
+                    pill.className = 'status-pill ' + (active ? 'live' : 'idle');
+                }
+                if (pulse) pulse.classList.toggle('live', active);
+                const pulseTxt = document.querySelector('.rail-status-row .txt');
+                if (pulseTxt) pulseTxt.textContent = active ? 'Crawler active' : 'Crawler idle';
+
+                const failedCountEl = document.getElementById('failedCount');
+                const navFlag = document.getElementById('navFlagFailures');
+                if (failedCountEl && navFlag) {
+                    const n = parseInt(failedCountEl.textContent, 10) || 0;
+                    navFlag.classList.toggle('show', n > 0);
+                }
+            }
+            setInterval(mirrorStatus, 1000);
+            mirrorStatus();
         })();
     </script>
 </body>

@@ -1,5 +1,5 @@
-// Version: 2.8.0
-// Change log: Refactored linkOfficialHandler to preserve numeric TMDB ID and write secondary IMDb pointer keys during manual linking, enforcing dual-key index parity across standard, fallback, and manual linking scenarios.
+// Version: 3.0.0
+// Change log: Implemented surgical stream migration inside linkOfficialHandler to remove thread-specific infohash composite keys from the old TmdbID before relinking, preventing stranded ghost streams on shared metadata records.
 
 package api
 
@@ -219,7 +219,7 @@ func customMetaHandler(c *gin.Context) {
 func linkOfficialHandler(c *gin.Context) {
 	var body struct {
 		ThreadID   int    `json:"threadId"`
-		OfficialID string `json:"officialId"` // e.g. "tt13464516" or "series:282258" or "282258"
+		OfficialID string `json:"officialId"` // e.g. "tt13464516" or "movie:550" or "series:282258"
 	}
 	if err := c.ShouldBindJSON(&body); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid payload parameters"})
@@ -235,45 +235,52 @@ func linkOfficialHandler(c *gin.Context) {
 	cfg := config.Load()
 	tmdbClient := metadata.NewTMDBClient(cfg)
 
-	mediaType := t.Type
+	// Admin Classification Override Direction: Default to thread's current type or respect explicit prefix
+	targetType := metadata.NormalizeMediaType(t.Type)
 	idOnly := body.OfficialID
 
 	if strings.Contains(idOnly, ":") {
 		parts := strings.Split(idOnly, ":")
-		mediaType = parts[0]
+		targetType = metadata.NormalizeMediaType(parts[0]) // Apply explicit admin type override
 		idOnly = parts[1]
 	}
 
-	tmdbResult, errTmdb := tmdbClient.GetByID(idOnly, mediaType)
+	tmdbResult, errTmdb := tmdbClient.GetByID(idOnly, targetType)
 	if errTmdb != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Failed to resolve official ID on Cinemeta/TMDB: " + errTmdb.Error()})
+		return
+	}
+
+	// Verify resolved metadata type matches expected target type
+	if tmdbResult.Type != "" && !metadata.IsTypeMatch(tmdbResult.Type, targetType) {
+		c.JSON(http.StatusBadRequest, gin.H{
+			"error": fmt.Sprintf("Media type mismatch: requested '%s', but resolved ID %s is a '%s'", targetType, body.OfficialID, tmdbResult.Type),
+		})
 		return
 	}
 
 	errTx := database.DB.Update(func(tx *bolt.Tx) error {
 		metaBucket := tx.Bucket([]byte("tmdb_metadata"))
 		magnetBucket := tx.Bucket([]byte("magnet_cache"))
+		streamsBucket := tx.Bucket([]byte("streams"))
 
-		// ── DUAL-KEY PRESERVATION REFINEMENT ──
-		// Preserve existing numeric TMDB ID if present on thread
 		primaryTmdbID := tmdbResult.TmdbID
-		if t.TmdbID != nil && *t.TmdbID != "" && !strings.HasPrefix(*t.TmdbID, "tt") {
-			primaryTmdbID = *t.TmdbID
-		}
-
-		// Ensure secondary IMDb pointer is populated if linking via tt...
 		secondaryImdbID := tmdbResult.ImdbID
-		if strings.HasPrefix(idOnly, "tt") {
-			secondaryImdbID = idOnly
+
+		if primaryTmdbID == "" && secondaryImdbID != "" {
+			primaryTmdbID = secondaryImdbID
 		}
 
-		c := metaBucket.Cursor()
-		for k, v := c.First(); k != nil; k, v = c.Next() {
-			var metadataRecord database.TmdbMetadata
-			if errDec := database.DecodeGob(v, &metadataRecord); errDec == nil {
-				if secondaryImdbID != "" && metadataRecord.ImdbID != nil && *metadataRecord.ImdbID == secondaryImdbID {
-					primaryTmdbID = metadataRecord.TmdbID
-					break
+		// SURGICAL STREAM PURGE: Remove this specific thread's streams from old TmdbID to prevent ghost streams
+		if t.TmdbID != nil && *t.TmdbID != "" && *t.TmdbID != primaryTmdbID {
+			oldTmdbID := *t.TmdbID
+			if streamsBucket != nil {
+				for _, magnet := range t.MagnetURIs {
+					parsedMagnet := parser.ParseMagnet(magnet, t.Type)
+					if parsedMagnet != nil {
+						oldCompositeKey := fmt.Sprintf("%s:%s", oldTmdbID, strings.ToLower(parsedMagnet.Infohash))
+						_ = streamsBucket.Delete([]byte(oldCompositeKey))
+					}
 				}
 			}
 		}
@@ -282,8 +289,7 @@ func linkOfficialHandler(c *gin.Context) {
 		
 		var imdbIDPtr *string
 		if secondaryImdbID != "" {
-			val := secondaryImdbID
-			imdbIDPtr = &val
+			imdbIDPtr = &secondaryImdbID
 		}
 
 		tmdbMetadata := database.TmdbMetadata{
@@ -308,7 +314,9 @@ func linkOfficialHandler(c *gin.Context) {
 		}
 
 		t.TmdbID = &primaryTmdbID
-		
+		t.Type = targetType // Apply admin type override
+		t.Status = "linked"
+
 		cleanTitle := tmdbResult.Title
 		if cleanTitle == "" || strings.Contains(cleanTitle, "[") || strings.Contains(cleanTitle, "]") || strings.Contains(strings.ToLower(cleanTitle), "1080p") || strings.Contains(strings.ToLower(cleanTitle), "720p") || strings.Contains(strings.ToLower(cleanTitle), "s0") {
 			parsed := parser.ParseTitle(t.RawTitle, t.Type)
@@ -319,8 +327,6 @@ func linkOfficialHandler(c *gin.Context) {
 			}
 		}
 		t.CleanTitle = cleanTitle
-		t.Status = "linked"
-		t.Type = mediaType
 		if tmdbResult.Year > 0 {
 			t.Year = &tmdbResult.Year
 		}
@@ -375,7 +381,7 @@ func linkOfficialHandler(c *gin.Context) {
 				UpdatedAt: time.Now(),
 			}
 
-			if mediaType == "series" {
+			if targetType == "series" {
 				seasonVal := parsedMagnet.Season
 				if seasonVal == 0 {
 					seasonVal = 1
@@ -401,6 +407,7 @@ func linkOfficialHandler(c *gin.Context) {
 			_ = database.CreateStreams(tx, newStreams)
 		}
 
+		_ = database.DeleteFailedThread(tx, t.ThreadHash)
 		return nil
 	})
 
@@ -410,7 +417,7 @@ func linkOfficialHandler(c *gin.Context) {
 	}
 
 	orchestrator.UpdateDashboardCache()
-	c.JSON(http.StatusOK, gin.H{"message": "Thread manually linked to official metadata successfully!"})
+	c.JSON(http.StatusOK, gin.H{"message": "Thread manually linked successfully!"})
 }
 
 func autoMatchHandler(c *gin.Context) {
@@ -463,7 +470,9 @@ func autoMatchHandler(c *gin.Context) {
 				return
 			}
 
-			parsed := parser.ParseTitle(t.RawTitle, t.Type)
+			threadType := metadata.NormalizeMediaType(t.Type)
+
+			parsed := parser.ParseTitle(t.RawTitle, threadType)
 			if parsed == nil || parsed.Title == "" {
 				mu.Lock()
 				failCount++
@@ -500,14 +509,28 @@ func autoMatchHandler(c *gin.Context) {
 				Int("year", parsed.Year).
 				Msg("Processing thread for auto-match")
 
-			tmdbResult, errTmdb := tmdbClient.SearchWithAliases(parsed.Title, parsed.Year, t.Type)
-			if errTmdb != nil {
+			tmdbResult, errTmdb := tmdbClient.SearchWithAliases(parsed.Title, parsed.Year, threadType)
+			if errTmdb != nil || tmdbResult == nil {
 				utils.Logger.Warn().
 					Int("index", index+1).
 					Str("clean_title", parsed.Title).
 					Int("year", parsed.Year).
 					Err(errTmdb).
 					Msg("TMDB search returned no confident match.")
+				mu.Lock()
+				failCount++
+				mu.Unlock()
+				return
+			}
+
+			// Strict media type assertion
+			if tmdbResult.Type != "" && !metadata.IsTypeMatch(tmdbResult.Type, threadType) {
+				utils.Logger.Warn().
+					Int("index", index+1).
+					Str("raw_title", t.RawTitle).
+					Str("thread_type", threadType).
+					Str("matched_type", tmdbResult.Type).
+					Msg("Auto-match candidate rejected due to media type mismatch.")
 				mu.Lock()
 				failCount++
 				mu.Unlock()
@@ -523,34 +546,45 @@ func autoMatchHandler(c *gin.Context) {
 
 	wg.Wait()
 
-	utils.Logger.Info().Int("matched_queued", len(results)).Msg("Network search completed. Commencing serialized database writes...")
+	utils.Logger.Info().Int("matched_queued", len(results)).Msg("Network search completed. Commencing transactional database writes...")
 
 	for idx, res := range results {
 		errTx := database.DB.Update(func(tx *bolt.Tx) error {
 			metaBucket := tx.Bucket([]byte("tmdb_metadata"))
 			magnetBucket := tx.Bucket([]byte("magnet_cache"))
+			streamsBucket := tx.Bucket([]byte("streams"))
 
-			c := metaBucket.Cursor()
-			for k, v := c.First(); k != nil; k, v = c.Next() {
-				var fetched database.TmdbMetadata
-				if errDec := database.DecodeGob(v, &fetched); errDec == nil {
-					if fetched.ImdbID != nil && *fetched.ImdbID == res.Result.ImdbID {
-						res.Result.TmdbID = fetched.TmdbID
-						break
+			threadType := metadata.NormalizeMediaType(res.Thread.Type)
+
+			primaryTmdbID := res.Result.TmdbID
+			secondaryImdbID := res.Result.ImdbID
+
+			if primaryTmdbID == "" && secondaryImdbID != "" {
+				primaryTmdbID = secondaryImdbID
+			}
+
+			// SURGICAL STREAM PURGE: Remove this specific thread's streams from old TmdbID before relinking
+			if res.Thread.TmdbID != nil && *res.Thread.TmdbID != "" && *res.Thread.TmdbID != primaryTmdbID {
+				oldTmdbID := *res.Thread.TmdbID
+				if streamsBucket != nil {
+					for _, magnet := range res.Thread.MagnetURIs {
+						parsedMagnet := parser.ParseMagnet(magnet, res.Thread.Type)
+						if parsedMagnet != nil {
+							oldCompositeKey := fmt.Sprintf("%s:%s", oldTmdbID, strings.ToLower(parsedMagnet.Infohash))
+							_ = streamsBucket.Delete([]byte(oldCompositeKey))
+						}
 					}
 				}
 			}
 
 			rawDataBytes := []byte("{}")
-			
 			var imdbIDPtr *string
-			if res.Result.ImdbID != "" {
-				val := res.Result.ImdbID
-				imdbIDPtr = &val
+			if secondaryImdbID != "" {
+				imdbIDPtr = &secondaryImdbID
 			}
 
 			tmdbMetadata := database.TmdbMetadata{
-				TmdbID:    res.Result.TmdbID,
+				TmdbID:    primaryTmdbID,
 				ImdbID:    imdbIDPtr,
 				Data:      string(rawDataBytes),
 				CreatedAt: time.Now(),
@@ -564,17 +598,18 @@ func autoMatchHandler(c *gin.Context) {
 			if err != nil {
 				return err
 			}
-			_ = metaBucket.Put([]byte(res.Result.TmdbID), metaBytes)
+			_ = metaBucket.Put([]byte(primaryTmdbID), metaBytes)
 
 			if tmdbMetadata.ImdbID != nil && *tmdbMetadata.ImdbID != "" {
 				_ = metaBucket.Put([]byte(*tmdbMetadata.ImdbID), metaBytes)
 			}
 
-			res.Thread.TmdbID = &res.Result.TmdbID
+			res.Thread.TmdbID = &primaryTmdbID
+			res.Thread.Type = threadType
 			
 			cleanTitle := res.Result.Title
 			if cleanTitle == "" || strings.Contains(cleanTitle, "[") || strings.Contains(cleanTitle, "]") || strings.Contains(strings.ToLower(cleanTitle), "1080p") || strings.Contains(strings.ToLower(cleanTitle), "720p") || strings.Contains(strings.ToLower(cleanTitle), "s0") {
-				parsed := parser.ParseTitle(res.Thread.RawTitle, res.Thread.Type)
+				parsed := parser.ParseTitle(res.Thread.RawTitle, threadType)
 				if parsed != nil && parsed.Title != "" {
 					cleanTitle = parsed.Title
 				} else {
@@ -592,7 +627,7 @@ func autoMatchHandler(c *gin.Context) {
 				cleanM := parser.StripTrackersFromMagnet(m)
 				dn := parser.ExtractMagnetDisplayName(m)
 				if dn != "" {
-					pmr := parser.ParseRelease(dn, res.Thread.Type)
+					pmr := parser.ParseRelease(dn, threadType)
 					if pmr != nil && pmr.IsValid && pmr.CleanTitle != "" {
 						overlapClean := metadata.OverlapCoefficient(cleanTitle, pmr.CleanTitle)
 						if overlapClean < 0.20 {
@@ -615,7 +650,7 @@ func autoMatchHandler(c *gin.Context) {
 
 			var newStreams []database.Stream
 			for _, magnet := range res.Thread.MagnetURIs {
-				parsedMagnet := parser.ParseMagnet(magnet, res.Thread.Type)
+				parsedMagnet := parser.ParseMagnet(magnet, threadType)
 				if parsedMagnet == nil {
 					continue
 				}
@@ -629,7 +664,7 @@ func autoMatchHandler(c *gin.Context) {
 				_ = magnetBucket.Put([]byte(parsedMagnet.Infohash), cacheBytes)
 
 				stream := database.Stream{
-					TmdbID:    res.Result.TmdbID,
+					TmdbID:    primaryTmdbID,
 					Infohash:  parsedMagnet.Infohash,
 					Quality:   parsedMagnet.Quality,
 					Language:  parsedMagnet.Language,
@@ -637,7 +672,7 @@ func autoMatchHandler(c *gin.Context) {
 					UpdatedAt: time.Now(),
 				}
 
-				if res.Thread.Type == "series" {
+				if threadType == "series" {
 					seasonVal := parsedMagnet.Season
 					if seasonVal == 0 {
 						seasonVal = 1
@@ -730,7 +765,8 @@ func parsePreviewHandler(c *gin.Context) {
 		return
 	}
 
-	parsed := parser.ParseRelease(body.Title, body.ContentType)
+	targetType := metadata.NormalizeMediaType(body.ContentType)
+	parsed := parser.ParseRelease(body.Title, targetType)
 
 	c.JSON(http.StatusOK, gin.H{
 		"rawTitle":        parsed.ReleaseTitle,
@@ -964,7 +1000,7 @@ func purgeLookupHandler(c *gin.Context) {
 		for k, v := c.First(); k != nil; k, v = c.Next() {
 			var t database.Thread
 			if err := database.DecodeGob(v, &t); err == nil {
-				if t.TmdbID != nil && *t.TmdbID == meta.TmdbID {
+				if t.TmdbID != nil && (*t.TmdbID == meta.TmdbID || (meta.ImdbID != nil && *t.TmdbID == *meta.ImdbID)) {
 					threads = append(threads, threadInfo{
 						ID:       t.ID,
 						RawTitle: t.RawTitle,
@@ -1036,7 +1072,7 @@ func purgeConfirmHandler(c *gin.Context) {
 		for k, v := c.First(); k != nil; k, v = c.Next() {
 			var t database.Thread
 			if err := database.DecodeGob(v, &t); err == nil {
-				if t.TmdbID != nil && *t.TmdbID == meta.TmdbID {
+				if t.TmdbID != nil && (*t.TmdbID == meta.TmdbID || (meta.ImdbID != nil && *t.TmdbID == *meta.ImdbID)) {
 					threadsToDelete = append(threadsToDelete, t)
 				}
 			}
@@ -1054,7 +1090,14 @@ func purgeConfirmHandler(c *gin.Context) {
 
 	_ = database.DB.Update(func(tx *bolt.Tx) error {
 		_ = database.DeleteStreamsByTmdbID(tx, meta.TmdbID)
+		if meta.ImdbID != nil {
+			_ = database.DeleteStreamsByTmdbID(tx, *meta.ImdbID)
+		}
+		
 		_ = tx.Bucket([]byte("tmdb_thread_index")).Delete([]byte(meta.TmdbID))
+		if meta.ImdbID != nil {
+			_ = tx.Bucket([]byte("tmdb_thread_index")).Delete([]byte(*meta.ImdbID))
+		}
 		
 		metaB := tx.Bucket([]byte("tmdb_metadata"))
 		_ = metaB.Delete([]byte(meta.TmdbID))
@@ -1096,8 +1139,10 @@ func triggerTargetedCrawlHandler(c *gin.Context) {
 	}
 
 	cfg := config.Load()
+	targetType := metadata.NormalizeMediaType(body.ContentType)
 	canonicalURL := parser.FormatCanonicalTopicURL(body.ThreadURL)
-	err := orchestrator.RunTargetedWorkflow(cfg, canonicalURL, body.ContentType, body.CatalogID)
+
+	err := orchestrator.RunTargetedWorkflow(cfg, canonicalURL, targetType, body.CatalogID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Targeted crawl failed: " + err.Error()})
 		return
@@ -1212,7 +1257,6 @@ func addMonitoredSeriesHandler(c *gin.Context) {
 		}
 		_ = database.AutoEnrollSeries(nil, targetThread)
 
-		// Explicitly force status = "active" on user re-enrollment request
 		ms, errMs := database.GetMonitoredSeriesByHash(nil, targetThread.ThreadHash)
 		if errMs == nil && ms != nil {
 			ms.Status = "active"
@@ -1232,7 +1276,6 @@ func addMonitoredSeriesHandler(c *gin.Context) {
 			return
 		}
 
-		// Ensure crawled thread gets explicitly activated in monitored watchlist
 		scrapedThread, errTr := database.FindThreadByRawTitle(nil, canonicalURL)
 		if errTr == nil && scrapedThread != nil {
 			_ = database.AutoEnrollSeries(nil, scrapedThread)
@@ -1286,7 +1329,7 @@ func seriesSearchHandler(c *gin.Context) {
 		for k, v := c.First(); k != nil; k, v = c.Next() {
 			var t database.Thread
 			if err := database.DecodeGob(v, &t); err == nil {
-				if strings.ToLower(t.Type) == "series" {
+				if metadata.NormalizeMediaType(t.Type) == "series" {
 					cleanLower := strings.ToLower(t.CleanTitle)
 					rawLower := strings.ToLower(t.RawTitle)
 					if strings.Contains(cleanLower, query) || strings.Contains(rawLower, query) {
@@ -1328,7 +1371,8 @@ func visualizeTreeHandler(c *gin.Context) {
 		return
 	}
 
-	graph, err := database.GetEntityGraphData(nil, query, contentType)
+	targetType := metadata.NormalizeMediaType(contentType)
+	graph, err := database.GetEntityGraphData(nil, query, targetType)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to traverse entity graph: " + err.Error()})
 		return

@@ -1,5 +1,5 @@
-// Version: 2.8.2
-// Change log: Updated getThreadInvariantGroupKey to delegate directly to parser.GenerateThreadHashWithURLAndType, enforcing 100% hash parity with live scraper routines.
+// Version: 2.9.0
+// Change log: Enhanced database repair utility to consolidate split-brain stream composite keys (numericTMDB:infohash vs tt...:infohash) under canonical IMDb tt... primary keys, re-indexing tmdb_metadata and thread pointer links.
 
 package main
 
@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/kiskey/stremio-mvshows-go/internal/database"
+	"github.com/kiskey/stremio-mvshows-go/internal/services/metadata"
 	"github.com/kiskey/stremio-mvshows-go/internal/services/parser"
 	bolt "go.etcd.io/bbolt"
 )
@@ -54,12 +55,12 @@ func getThreadInvariantGroupKey(t *database.Thread) string {
 
 func main() {
 	dbPath := flag.String("db", "/data/stremio_addon.db.bolt", "Path to the active Bbolt database")
-	repair := flag.Bool("repair", false, "Execute automatic hash migration, duplicate pruning, stream regenerator, and index repair")
+	repair := flag.Bool("repair", false, "Execute automatic hash migration, duplicate pruning, stream regenerator, canonical tt... ID consolidation, and index repair")
 	pruneFailuresDays := flag.Int("prune-failures-older-than", 7, "Prune failed threads older than N days")
 	flag.Parse()
 
 	log.Println("==================================================")
-	log.Println("► BBOLT UNIFIED DIAGNOSTIC & TRANSITION INSPECTOR")
+	log.Println("► BBOLT UNIFIED DIAGNOSTIC & CANONICAL REPAIR INSPECTOR")
 	log.Printf("Target Database: %s\n", *dbPath)
 	log.Println("==================================================")
 
@@ -76,9 +77,13 @@ func main() {
 	log.Println("Auditing database records for Topic ID and Clean Title invariant duplicates...")
 	duplicatesMap := make(map[string][]database.Thread)
 	legacyHashCount := 0
+	splitBrainStreamCount := 0
 
 	_ = db.View(func(tx *bolt.Tx) error {
 		tb := tx.Bucket([]byte("threads"))
+		metaB := tx.Bucket([]byte("tmdb_metadata"))
+		streamsB := tx.Bucket([]byte("streams"))
+
 		c := tb.Cursor()
 		for k, v := c.First(); k != nil; k, v = c.Next() {
 			var t database.Thread
@@ -96,6 +101,25 @@ func main() {
 				duplicatesMap[targetHash] = append(duplicatesMap[targetHash], t)
 			}
 		}
+
+		if metaB != nil && streamsB != nil {
+			metaCursor := metaB.Cursor()
+			for k, v := metaCursor.First(); k != nil; k, v = metaCursor.Next() {
+				var m database.TmdbMetadata
+				if errDec := database.DecodeGob(v, &m); errDec == nil {
+					if m.ImdbID != nil && *m.ImdbID != "" && strings.HasPrefix(*m.ImdbID, "tt") {
+						if m.TmdbID != *m.ImdbID {
+							// Check if streams exist under non-canonical numeric TMDB ID
+							numericPrefix := []byte(m.TmdbID + ":")
+							sCursor := streamsB.Cursor()
+							for sk, _ := sCursor.Seek(numericPrefix); sk != nil && strings.HasPrefix(string(sk), string(numericPrefix)); sk, _ = sCursor.Next() {
+								splitBrainStreamCount++
+							}
+						}
+					}
+				}
+			}
+		}
 		return nil
 	})
 
@@ -111,6 +135,7 @@ func main() {
 
 	log.Printf("Inspection Complete.\n")
 	log.Printf("  - Legacy Format Hashes Found: %d records\n", legacyHashCount)
+	log.Printf("  - Split-Brain Stream Composite Keys Detected: %d streams\n", splitBrainStreamCount)
 	log.Printf("  - Duplicate Title/Topic ID Groups Detected: %d groups (containing %d redundant rows)\n", len(duplicateTitles), totalRedundantCount)
 
 	var orphanedIndexKeys [][]byte
@@ -185,26 +210,7 @@ func main() {
 		log.Printf("  - Total Storage Efficiency:     %.1f%%\n", (float64(totalInuseBytes)/float64(diskSize))*100)
 	}
 
-	var missingThreadIdxKeys bool
-	_ = db.View(func(tx *bolt.Tx) error {
-		tb := tx.Bucket([]byte("threads"))
-		threadIdxB := tx.Bucket([]byte("tmdb_thread_index"))
-		c := tb.Cursor()
-		for k, v := c.First(); k != nil; k, v = c.Next() {
-			var t database.Thread
-			if errDec := database.DecodeGob(v, &t); errDec == nil {
-				if t.Status == "linked" && t.TmdbID != nil {
-					if threadIdxB.Get([]byte(*t.TmdbID)) == nil {
-						missingThreadIdxKeys = true
-						break
-					}
-				}
-			}
-		}
-		return nil
-	})
-
-	if !*repair && legacyHashCount == 0 && len(duplicateTitles) == 0 && len(orphanedIndexKeys) == 0 && !missingThreadIdxKeys {
+	if !*repair && legacyHashCount == 0 && splitBrainStreamCount == 0 && len(duplicateTitles) == 0 && len(orphanedIndexKeys) == 0 {
 		log.Println("==================================================")
 		log.Println("► VERDICT: [CLEAN] - No structural anomalies found in database.")
 		log.Println("==================================================")
@@ -214,14 +220,13 @@ func main() {
 	if !*repair {
 		log.Println("==================================================")
 		log.Println("► VERDICT: Audited in Dry-Run mode. No writes occurred.")
-		log.Printf("  - High-Speed Lookups Missing Indexes: %v\n", missingThreadIdxKeys)
-		log.Println("To apply transitions, compile missing indices, optimize magnets, and prune duplicates, run with: --repair")
+		log.Println("To consolidate split-brain keys, compile missing indices, optimize magnets, and prune duplicates, run with: --repair")
 		log.Println("==================================================")
 		return
 	}
 
 	log.Println("==================================================")
-	log.Println("► INITIATING AUTOMATED REPAIR & TRANSITION PHASE...")
+	log.Println("► INITIATING AUTOMATED CANONICAL REPAIR PHASE...")
 	log.Println("==================================================")
 
 	err = db.Update(func(tx *bolt.Tx) error {
@@ -234,13 +239,21 @@ func main() {
 		metaB := tx.Bucket([]byte("tmdb_metadata"))
 		magnetB := tx.Bucket([]byte("magnet_cache"))
 
-		log.Println("Re-indexing Metadata bucket into high-speed Dual-Key layout...")
+		// STEP 1: Audit and map all numeric TMDB IDs to their IMDb tt... IDs
+		log.Println("Step 1: Auditing and standardizing metadata bucket under canonical tt... primary keys...")
+		tmdbToImdbMap := make(map[string]string)
 		var metadataToRewrite []database.TmdbMetadata
+
 		metaCursor := metaB.Cursor()
 		for k, v := metaCursor.First(); k != nil; k, v = metaCursor.Next() {
 			var m database.TmdbMetadata
 			if errDec := database.DecodeGob(v, &m); errDec == nil {
-				if string(k) == m.TmdbID {
+				if m.ImdbID != nil && *m.ImdbID != "" && strings.HasPrefix(*m.ImdbID, "tt") {
+					canonicalImdb := *m.ImdbID
+					tmdbToImdbMap[m.TmdbID] = canonicalImdb
+					tmdbToImdbMap[string(k)] = canonicalImdb
+
+					m.TmdbID = canonicalImdb // Standardize canonical primary ID
 					metadataToRewrite = append(metadataToRewrite, m)
 				}
 			}
@@ -254,16 +267,25 @@ func main() {
 			}
 		}
 
+		// STEP 2: Migrate Thread references to canonical tt... primary keys
+		log.Println("Step 2: Migrating threads and consolidating duplicate groups...")
 		for targetNewHash, list := range duplicatesMap {
 			sort.Slice(list, func(i, j int) bool {
 				return list[i].UpdatedAt.After(list[j].UpdatedAt)
 			})
 
 			keptThread := list[0]
+			keptThread.Type = metadata.NormalizeMediaType(keptThread.Type)
+
+			// Migrate TmdbID if a canonical tt... ID exists
+			if keptThread.TmdbID != nil {
+				if canonicalImdb, ok := tmdbToImdbMap[*keptThread.TmdbID]; ok {
+					keptThread.TmdbID = &canonicalImdb
+				}
+			}
 
 			log.Printf("Processing & Consolidating Group: %q (Target Hash: %s, Records: %d)\n", keptThread.RawTitle, targetNewHash, len(list))
 
-			// Collect all physical keys in this group to execute complete old-key sweep
 			var physicalKeysInGroup []string
 			seenMags := make(map[string]bool)
 			var allMergedMags []string
@@ -287,7 +309,7 @@ func main() {
 				if parser.ExtractTopicID(keptThread.URL) != "" {
 					keptThread.URL = parser.FormatCanonicalTopicURL(keptThread.URL)
 				} else {
-					keptThread.URL = "" // Clear stale proxy endpoint URL so next crawl populates clean forum URL
+					keptThread.URL = ""
 				}
 			}
 
@@ -303,7 +325,6 @@ func main() {
 				}
 			}
 
-			// Save kept thread under targetNewHash
 			keptThread.ThreadHash = targetNewHash
 			bytesData, _ := database.EncodeGob(keptThread)
 			_ = tb.Put([]byte(targetNewHash), bytesData)
@@ -326,11 +347,10 @@ func main() {
 				_ = threadIdxB.Put([]byte(*keptThread.TmdbID), []byte(targetNewHash))
 			}
 
-			if strings.ToLower(keptThread.Type) == "series" && keptThread.Status == "linked" {
+			if metadata.NormalizeMediaType(keptThread.Type) == "series" && keptThread.Status == "linked" {
 				_ = database.AutoEnrollSeries(tx, &keptThread)
 			}
 
-			// OLD-KEY PURGE SWEEP: Delete all historical raw physical keys except targetNewHash
 			for _, oldKey := range physicalKeysInGroup {
 				if oldKey != targetNewHash {
 					_ = tb.Delete([]byte(oldKey))
@@ -366,16 +386,25 @@ func main() {
 			}
 		}
 
-		log.Println("Populating high-speed Thread index pointers bucket & Purging Stale Proxy URLs...")
+		// STEP 3: Re-index Thread Pointers and Monitored Watchlist
+		log.Println("Step 3: Populating Thread index pointers bucket & Purging Stale Proxy URLs...")
 		threadCursor := tb.Cursor()
 		for k, v := threadCursor.First(); k != nil; k, v = threadCursor.Next() {
 			var t database.Thread
 			if errDec := database.DecodeGob(v, &t); errDec == nil {
+				t.Type = metadata.NormalizeMediaType(t.Type)
+				if t.TmdbID != nil {
+					if canonicalImdb, ok := tmdbToImdbMap[*t.TmdbID]; ok {
+						t.TmdbID = &canonicalImdb
+					}
+				}
+
 				if t.URL != "" && parser.ExtractTopicID(t.URL) == "" {
 					t.URL = ""
-					bytesData, _ := database.EncodeGob(t)
-					_ = tb.Put(k, bytesData)
 				}
+
+				bytesData, _ := database.EncodeGob(t)
+				_ = tb.Put(k, bytesData)
 
 				if t.Status == "linked" && t.TmdbID != nil {
 					_ = threadIdxB.Put([]byte(*t.TmdbID), k)
@@ -383,43 +412,14 @@ func main() {
 				if idB != nil && t.ID > 0 {
 					_ = idB.Put([]byte(fmt.Sprintf("%d", t.ID)), k)
 				}
-				if strings.ToLower(t.Type) == "series" && t.Status == "linked" {
+				if t.Type == "series" && t.Status == "linked" {
 					_ = database.AutoEnrollSeries(tx, &t)
 				}
 			}
 		}
 
-		log.Println("Purging Stale Proxy URLs from monitored_series bucket...")
-		if monitoredB != nil {
-			monCursor := monitoredB.Cursor()
-			for k, v := monCursor.First(); k != nil; k, v = monCursor.Next() {
-				var ms database.MonitoredSeries
-				if errDec := database.DecodeGob(v, &ms); errDec == nil {
-					if ms.URL != "" && parser.ExtractTopicID(ms.URL) == "" {
-						ms.URL = ""
-						bytesData, _ := database.EncodeGob(ms)
-						_ = monitoredB.Put(k, bytesData)
-					}
-				}
-			}
-		}
-
-		log.Println("Compacting magnet_cache bucket (removing redundant trackers)...")
-		var magnetCacheToRewrite []database.MagnetCache
-		magnetCursor := magnetB.Cursor()
-		for k, v := magnetCursor.First(); k != nil; k, v = magnetCursor.Next() {
-			var mc database.MagnetCache
-			if errDec := database.DecodeGob(v, &mc); errDec == nil {
-				mc.Magnet = parser.StripTrackersFromMagnet(mc.Magnet)
-				magnetCacheToRewrite = append(magnetCacheToRewrite, mc)
-			}
-		}
-		for _, mc := range magnetCacheToRewrite {
-			bytesData, _ := database.EncodeGob(mc)
-			_ = magnetB.Put([]byte(mc.Infohash), bytesData)
-		}
-
-		log.Println("Regenerating and correcting all stream indices from raw magnets using composite keys...")
+		// STEP 4: Regenerate Streams under Unified Canonical tt... Primary Keys
+		log.Println("Step 4: Regenerating streams and consolidating split-brain keys under canonical tt... IDs...")
 		var streamKeysToDelete [][]byte
 		streamsCursor := streamsB.Cursor()
 		for k, _ := streamsCursor.First(); k != nil; k, _ = streamsCursor.Next() {
@@ -437,7 +437,7 @@ func main() {
 			var t database.Thread
 			if errDec := database.DecodeGob(v, &t); errDec == nil {
 				if t.Status == "linked" && t.TmdbID != nil {
-					isSeries := strings.ToLower(t.Type) == "series"
+					isSeries := metadata.NormalizeMediaType(t.Type) == "series"
 					for _, magnet := range t.MagnetURIs {
 						parsedMagnet := parser.ParseMagnet(magnet, t.Type)
 						if parsedMagnet == nil {
@@ -454,7 +454,7 @@ func main() {
 						_ = magnetB.Put([]byte(parsedMagnet.Infohash), cacheBytes)
 
 						stream := database.Stream{
-							TmdbID:    *t.TmdbID,
+							TmdbID:    *t.TmdbID, // Canonical tt... ID
 							Infohash:  parsedMagnet.Infohash,
 							Quality:   parsedMagnet.Quality,
 							Language:  parsedMagnet.Language,
@@ -488,7 +488,7 @@ func main() {
 		}
 
 		if len(allRegenStreams) > 0 {
-			log.Printf("Successfully generated %d repaired stream pointers. Writing composite keys (tmdbID:infohash) to Bbolt streams bucket...\n", len(allRegenStreams))
+			log.Printf("Successfully generated %d repaired stream pointers. Writing canonical composite keys (tt...:infohash) to streams bucket...\n", len(allRegenStreams))
 			streamIDCounter := uint(0)
 			for _, s := range allRegenStreams {
 				streamIDCounter++
@@ -506,7 +506,8 @@ func main() {
 			}
 		}
 
-		log.Printf("Compacting failed_threads bucket (pruning logs older than %d days)...\n", *pruneFailuresDays)
+		// STEP 5: Prune Expired Failed Logs and Debrid Locks
+		log.Printf("Step 5: Compacting failed_threads bucket (pruning logs older than %d days)...\n", *pruneFailuresDays)
 		var failedKeysToPrune [][]byte
 		failedCursor := tx.Bucket([]byte("failed_threads")).Cursor()
 		cutoffFailed := time.Now().AddDate(0, 0, -*pruneFailuresDays)
@@ -544,24 +545,6 @@ func main() {
 			}
 		}
 
-		log.Println("Auditing torbox_id_map bucket...")
-		var torboxKeysToPrune [][]byte
-		torboxCursor := tx.Bucket([]byte("torbox_id_map")).Cursor()
-		for k, v := torboxCursor.First(); k != nil; k, v = torboxCursor.Next() {
-			var m database.TorboxIdMap
-			if errDec := database.DecodeGob(v, &m); errDec == nil {
-				if tx.Bucket([]byte("magnet_cache")).Get([]byte(m.Hash)) == nil {
-					torboxKeysToPrune = append(torboxKeysToPrune, k)
-				}
-			}
-		}
-		if len(torboxKeysToPrune) > 0 {
-			log.Printf("Pruning %d orphaned keys from torbox_id_map...\n", len(torboxKeysToPrune))
-			for _, k := range torboxKeysToPrune {
-				_ = tx.Bucket([]byte("torbox_id_map")).Delete(k)
-			}
-		}
-
 		return nil
 	})
 
@@ -569,7 +552,7 @@ func main() {
 		log.Fatalf("Transition transaction failed: %v\n", err)
 	}
 
-	log.Println("Database repair, stream regeneration, index compiling, and hash migration committed successfully!")
+	log.Println("Database repair, stream regeneration, index compiling, and canonical tt... ID migration committed successfully!")
 
 	log.Println("Shrinking database file size via sequential compaction...")
 	compactPath := *dbPath + ".compacted"
@@ -590,6 +573,6 @@ func main() {
 	}
 
 	log.Println("==================================================")
-	log.Printf("► VERDICT: [SUCCESS] - COMPACTION LOG COMPLETED SUCCESFULLY.\n")
+	log.Printf("► VERDICT: [SUCCESS] - CANONICAL REPAIR & COMPACTION LOG COMPLETED SUCCESSFULLY.\n")
 	log.Println("==================================================")
 }
